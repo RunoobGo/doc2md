@@ -107,6 +107,29 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
         else:
             raise E4041_NotFound(f"path not found: {path}")
 
+        # CH-449：[perf].queue_async = true → 只入队、立即 202 返回，由 `doc2md work` 消费。
+        # 低配机上「一次丢一个目录」不应把 HTTP 线程占住（也不应同时起步 N 个解析进程）。
+        # 默认 false = 同步转换，既有 §5.1 门禁契约（jobs[].doc_id 立即可用）不变。
+        if bool(config.get(cur(), "perf.queue_async", False)):
+            from .pipeline.s1_parse import sniff
+            from .worker import enqueue
+            # 入队前整体预检 magic：异步路径必须**要么全入队要么全不入**。
+            # 先嗅探再入队（只读 8 字节），否则目录里混一个坏文件就会留下
+            # 「前半截已入队、请求整体 4xx」的半成品队列（同步路径由 convert()
+            # 逐文件失败，不存在这个中间态）。
+            for f in files:
+                if f.is_file():
+                    sniff(f)
+            mode = b.get("mode")
+            out = [enqueue(sched, f, mode=mode, idem_key=idem)
+                   for f in files if f.is_file()]
+            for it in out:
+                if not it["attached"]:
+                    _emit(store, "job_queued", it["doc_id"], it["job_id"],
+                          {"source": "api"}, logw())
+            return jsonify({"jobs": out, "mode": "queued",
+                            "consume_with": "doc2md work"}), 202
+
         out = []
         for f in files:
             try:
@@ -127,6 +150,29 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
                         "attached": j.attached, "idempotency_hit": j.idem_hit,
                         "sharded": res.ir.sharded, "shard_count": res.ir.shard_count})
         return jsonify({"jobs": out}), 202
+
+    @app.get("/jobs")
+    def list_jobs():
+        """队列可观测（CH-449）：按状态计数 + 队头明细，不含正文（NFR-20）。"""
+        need("read")
+        status = request.args.get("status")
+        limit = int(request.args.get("limit", 50))
+        sql = ("SELECT job_id, doc_id, source_key, status, created_at, started_at,"
+               " finished_at, error_code, detail_json, source_path, mode FROM tasks")
+        args: tuple = ()
+        if status:
+            sql += " WHERE status=?"
+            args = (status,)
+        sql += " ORDER BY created_at DESC LIMIT ?"
+        rows = [dict(r) for r in store.q(sql, args + (limit,))]
+        for r in rows:
+            try:
+                r["detail"] = json.loads(r.pop("detail_json") or "{}")
+            except (TypeError, ValueError):
+                r["detail"] = {}
+        counts = {r["status"]: r["c"] for r in store.q(
+            "SELECT status, COUNT(*) c FROM tasks GROUP BY status")}
+        return jsonify({"tasks": rows, "counts": counts})
 
     # --- 文档 ---------------------------------------------------------------
     @app.get("/docs/<doc_id>")

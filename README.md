@@ -18,7 +18,8 @@ env/bin/doc2md doctor                    # 环境自检（依赖 / 目录权限 
 doc2md serve [--host H --port P --root DIR --config F]   # API 服务（默认 127.0.0.1:8090）
 doc2md serve token [--role R --label L | --revoke TOKEN | --list]
 doc2md cron --daily | --weekly [--no-backup]
-doc2md convert <file|dir> [--mode auto|single|two_phase --out DIR --json --follow-symlinks]
+doc2md convert <file|dir> [--mode auto|single|two_phase --out DIR --workers N --json --follow-symlinks]
+doc2md work [--once --max-jobs N --workers N --idle S --enqueue PATH --status]
 doc2md watch <dir> [--once --interval S]
 doc2md tokenizer export --gguf F [--vocab V --manifest M]
 doc2md tokenizer verify --manifest M --gguf F
@@ -44,6 +45,22 @@ curl -s "localhost:8090/search?q=例外" -H "X-Doc2md-Token: $TOK"
 读取顺序：默认 → `--config` → `./doc2md.toml` → `$DOC2MD_HOME/doc2md.toml`。
 
 相对路径（`work/out`、`work/reports/backups` 等）会随 `[paths].root` / `--root` 一起迁移（CH-432）。
+
+## 低配机器（Win11 无 GPU / Mac mini 16GB）
+
+文本管线是 CPU + 内存带宽问题，GPU 无收益；下列口径全部有实测支撑（附录 H CH-447 … CH-451）：
+
+| 键 | 默认 | 说明 |
+| --- | --- | --- |
+| `[s1].chunk_pages` | `32` | S1 分块重开 + 每页缓存清理。320 页样本转换峰值驻留 **1290MB → 177MB**，产物字节级等价 |
+| `[perf].workers` | `0` | 批量转换进程数，`0 = min(4, CPU)`。30 文件串行 3.6s → 进程池 **2.6s**；内存 ≈ workers × chunk_pages，8GB 机器别调到 8 |
+| `[perf].queue_async` | `false` | `true` → `POST /jobs` 只入队（实测 13 个作业 **13ms** 返回 202），后台 `doc2md work` 消化；`GET /jobs` 看进度 |
+| `[perf].min_free_mb` / `disk_safety_factor` | `512` / `3` | NFR-6 磁盘门禁：写产物/备份前校验剩余空间，不足 → **413 / E4131**，不留截断 zip |
+| `[perf].stale_job_minutes` | `30` | 崩溃遗留的 `running` 队列任务超时重回 `queued`（仅限队列来源，不动同步请求行） |
+
+Windows 中文控制台（cp936）下含 emoji 的文件名不再崩进程，`--json` 输出恒为纯 ASCII
+（两种代码页字节一致，可直接管道给 PowerShell / CI）；`doc2md work --enqueue DIR --once`
+可替代 API 走纯 CLI 批量。
 
 ## 权限与数据边界
 
@@ -81,7 +98,8 @@ launchctl list | grep doc2md          # 校验（R6）：应列出两个标签
 正文类字段一律以 sha256 指纹写入（NFR-20）。
 
 `doc2md cron` 是与 serve 分离的进程，各写自己的 `work/logs/cron.jsonl`（同阈值同轮转器），
-不与服务的活动文件互踩。
+不与服务的活动文件互踩。`doc2md work`（CH-449）同理写自己的 `work/logs/work.jsonl`——
+rename 轮转只能有一个属主，三类进程三份文件。
 
 ## 验收与测试
 
@@ -92,7 +110,7 @@ launchctl list | grep doc2md          # 校验（R6）：应列出两个标签
 > 见附录 H CH-446）。补权限后推送即为强制红线；在此之前门禁仍需人工 `pytest -m gate`。
 
 ```bash
-pytest -m gate            # §5.1 六条 merge-gate（红线，全绿方可合并；共 40 项，≈1.5 分钟）
+pytest -m gate            # §5.1 六条 merge-gate + 实现补强断言（红线，全绿方可合并；共 65 项，≈110s）
 pytest tests/             # 全量（含 M0/M2/M3/M4M6/M5/M6c/M8/M9a/DoD）
 python3 tests/make_golden.py            # 重建黄金样本（输出目录随脚本位置，--golden 可覆盖）
 python3 tests/make_golden.py --force    # 强制重生成
@@ -112,5 +130,5 @@ python3 tests/make_golden.py --force    # 强制重生成
 
 ## 已知实现偏差登记
 
-方案执行期间发现的缺陷与更优做法按 §8.2 变更登记流逐条登记，编号 CH-422 … CH-446，
+方案执行期间发现的缺陷与更优做法按 §8.2 变更登记流逐条登记，编号 CH-422 … CH-451，
 正文见 `docs/plan-delta-v1.1.md`（附录 H）。

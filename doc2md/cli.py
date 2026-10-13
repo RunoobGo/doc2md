@@ -3,13 +3,16 @@
     doc2md serve [--host --port --root --config]        # 起 API 服务（不内置线程，ADR-30）
     doc2md serve token [--role admin|editor|reader] [--label] [--revoke TOKEN]
     doc2md cron --daily | --weekly                      # launchd StartCalendarInterval 触发
-    doc2md convert <file|dir> [--mode auto|single|two_phase] [--out DIR] [--json]
+    doc2md convert <file|dir> [--mode auto|single|two_phase] [--out DIR] [--json] [--workers N]
     doc2md watch <dir> [--once]                         # FR-111 稳定性判定 + 入队
+    doc2md work [--once|--max-jobs N|--enqueue PATH|--status]   # CH-449 队列消费
     doc2md tokenizer export <gguf> [--manifest PATH]    # M0：vocab 导出 + manifest
     doc2md tokenizer verify --manifest PATH --gguf GGUF # M0 验收 4：口径可复现
     doc2md doctor                                       # 环境 / 路径 / 权限自检
 
 退出码：0 正常；2 参数错；3 门禁拒收（E4221）；4 其他业务错；5 运行/系统错。
+控制台纪律（CH-451）：Windows cp936/GBK 下输出流按 errors="replace" 降级，
+机器可读行（--json / 队列 / watch）一律 ASCII 转义 JSON，两种代码页同字节可解析。
 """
 from __future__ import annotations
 
@@ -23,6 +26,33 @@ from . import PIPELINE_VERSION, config
 from .errors import Doc2mdError, E4221_GateReject
 
 EXIT_OK, EXIT_USAGE, EXIT_GATE, EXIT_BIZ, EXIT_SYS = 0, 2, 3, 4, 5
+
+
+def _console_safe() -> None:
+    """CH-451：Windows 控制台默认 cp936/GBK，文件名里的非 GBK 字符（emoji、
+    生僻字、日文）会让 `print()` 直接抛 UnicodeEncodeError —— 实测
+    `doc2md convert "🔥报告.pdf"` 在 cp936 代码页下整条命令崩栈（不是转换失败，
+    是**打印**失败）。口径：输出流按 errors="replace" 降级，转换结果本身不受影响。
+    """
+    for name in ("stdout", "stderr"):
+        stream = getattr(sys, name, None)
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            if (stream.encoding or "").lower().replace("-", "") != "utf8":
+                reconfigure(errors="replace")
+        except (ValueError, OSError):
+            pass
+
+
+def _jline(obj: dict) -> str:
+    """机器可读行（--json / 脚本 / CI 消费）：一律 ASCII 转义（CH-451）。
+
+    `ensure_ascii=False` 在 GBK 控制台上要么崩、要么被 errors="replace" 打成 `?`
+    —— 那就不再是有效 JSON。ASCII 转义在两种控制台下同字节可解析。
+    """
+    return json.dumps(obj, ensure_ascii=True)
 
 # CH-441：doctor 自检的依赖清单 = pyproject 运行时依赖的导入名（单一口径，防漂移）。
 # 实装只用 pdfplumber / python-docx / cryptography / Flask；
@@ -68,6 +98,18 @@ def build_parser() -> argparse.ArgumentParser:
     cv.add_argument("--out", help="产物 zip 输出目录（默认 [paths].out）")
     cv.add_argument("--json", action="store_true", help="只打印 JSON 摘要（脚本/CI 用）")
     cv.add_argument("--follow-symlinks", action="store_true")
+    cv.add_argument("--workers", type=int,
+                    help="批量进程数（CH-448）；缺省 = [perf].workers（0 自动 min(4, CPU)），1 = 串行")
+
+    wk = sub.add_parser("work", help="消费 tasks 队列（CH-449，低配机异步转换）")
+    _add_common(wk)
+    wk.add_argument("--once", action="store_true", help="排空当前队列即退出")
+    wk.add_argument("--max-jobs", type=int, default=0, help="处理 N 个作业后退出")
+    wk.add_argument("--workers", type=int, help="并发进程数（覆盖 [perf].workers）")
+    wk.add_argument("--idle", type=float, default=5.0, help="队列空时轮询间隔秒")
+    wk.add_argument("--enqueue", metavar="PATH",
+                    help="先把文件/目录入队（不直接转换）；加 --once 则入队后立即排空")
+    wk.add_argument("--status", action="store_true", help="打印队列计数后退出")
 
     wa = sub.add_parser("watch", help="watch folder：稳定性判定后提交作业")
     _add_common(wa)
@@ -106,6 +148,14 @@ def _root(cfg: dict) -> Path:
 
 def _out(cfg: dict) -> Path:
     return config.path_setting(cfg, "paths.out", _root(cfg), str(_root(cfg) / "out"))
+
+
+def _free_mb(path: Path) -> int:
+    from .ops.diskguard import free_mb
+    try:
+        return free_mb(path)
+    except OSError:
+        return -1
 
 
 # --- serve ------------------------------------------------------------------
@@ -166,18 +216,11 @@ def _gate_summary(detail: dict) -> dict:
 
 
 def cmd_convert(args: argparse.Namespace) -> int:
-    from .pipeline.convert import convert
-    from .security.dirguard import WalkLimits, guard_walk
+    from .pipeline.batch import default_workers, run_batch
     cfg = _cfg(args)
     src = Path(args.path).expanduser()
     if src.is_dir():
-        lim = WalkLimits(follow_symlinks=args.follow_symlinks or bool(
-            config.get(cfg, "watch.follow_symlinks", False)),
-            max_depth=int(config.get(cfg, "watch.max_depth", 20)),
-            skip_hidden=bool(config.get(cfg, "watch.skip_hidden", True)),
-            max_files_per_dir=int(config.get(cfg, "watch.max_files_per_dir", 5000)))
-        files = [Path(f) for f in guard_walk(src, lim).files
-                 if Path(f).suffix.lower() in (".pdf", ".docx")]
+        files = _dir_files(src, cfg, bool(args.follow_symlinks))
     elif src.is_file():
         files = [src]
     else:
@@ -185,34 +228,127 @@ def cmd_convert(args: argparse.Namespace) -> int:
         return EXIT_USAGE
     out = Path(args.out).expanduser() if args.out else _out(cfg)
     rc = EXIT_OK
+    if not files:
+        print(_jline({"status": "empty", "path": str(src)}), file=sys.stderr)
+        return rc
+    # CH-448：目录投递走有界进程池（GIL 下线程池对解析无增益，实测 4 进程 30 文件
+    # 3.8s → 2.1s）；产物与串行逐字节一致（等价性由门禁把住）。`--workers 1` 退回串行。
+    workers = args.workers if args.workers is not None else default_workers(cfg)
+    if len(files) > 1 and workers > 1:
+        results = run_batch(files, cfg=cfg, mode=args.mode, out_dir=out, workers=workers)
+        for res in results:
+            rc = max(rc, _report(res, as_json=args.json))
+        return rc
+
+    from .pipeline.convert import convert
+    from .errors import Doc2mdError, E4221_GateReject
     for f in files:
         try:
             res = convert(f, cfg=cfg, mode=args.mode, out_dir=out)
         except E4221_GateReject as exc:
-            print(json.dumps({"file": f.name, "status": "rejected", "code": exc.code,
-                              "gate": _gate_summary(exc.detail or {})},
-                             ensure_ascii=False), file=sys.stderr)
-            rc = EXIT_GATE
+            print(_jline({"file": f.name, "status": "rejected", "code": exc.code,
+                          "gate": _gate_summary(exc.detail or {})}), file=sys.stderr)
+            rc = max(rc, EXIT_GATE)
             continue
         except Doc2mdError as exc:
-            print(json.dumps({"file": f.name, "status": "error", "code": exc.code,
-                              "message": str(exc)}, ensure_ascii=False), file=sys.stderr)
-            rc = EXIT_BIZ
+            print(_jline({"file": f.name, "status": "error", "code": exc.code,
+                          "message": str(exc)}), file=sys.stderr)
+            rc = max(rc, EXIT_BIZ)
             continue
-        if args.json:
-            print(json.dumps({"file": f.name, **res.to_dict(), "metrics": res.metrics,
-                              "zip": str(res.zip_path)}, ensure_ascii=False))
-        else:
-            st = res.meta.get("shard_stats", {})
-            print(f"{f.name}: doc_id={res.doc_id} blocks={len(res.ir.blocks)} "
-                  f"chars={res.metrics['chars']} sharded={res.meta.get('sharded')} "
-                  f"shards={st.get('shards', 1)} stitched={st.get('stitched', 0)} "
-                  f"dropped_dupes={st.get('dropped_dupes', 0)} zip={res.zip_path}")
+        rc = max(rc, _report({"file": f.name, "status": "ok", "doc_id": res.doc_id,
+                              "blocks": len(res.ir.blocks), "chars": res.metrics["chars"],
+                              "zip": str(res.zip_path) if res.zip_path else "",
+                              "sharded": res.meta.get("sharded"),
+                              "shard_stats": res.meta.get("shard_stats", {})},
+                             as_json=args.json))
     return rc
 
 
+def _report(res: dict, *, as_json: bool) -> int:
+    """批量/串行共用的结果打印；返回该条对应的退出码贡献（调用方取 max = 最严重）。"""
+    status = res.get("status")
+    name = Path(str(res.get("file", ""))).name
+    payload = {"file": name, "status": status, "doc_id": res.get("doc_id", ""),
+               "blocks": res.get("blocks", 0), "chars": res.get("chars", 0),
+               "zip": res.get("zip", "")}
+    if res.get("code"):
+        payload["code"] = res["code"]
+    if res.get("message"):
+        payload["message"] = res["message"]
+    if res.get("gate"):
+        payload["gate"] = res["gate"]
+    if as_json:
+        print(_jline(payload))
+    elif status == "ok":
+        st = res.get("shard_stats") or {}
+        print(f"{name}: doc_id={payload['doc_id']} blocks={payload['blocks']} "
+              f"chars={payload['chars']} sharded={res.get('sharded')} "
+              f"shards={st.get('shards', 1)} stitched={st.get('stitched', 0)} "
+              f"dropped_dupes={st.get('dropped_dupes', 0)} zip={payload['zip']}")
+    else:
+        print(_jline(payload), file=sys.stderr)
+    if status == "ok":
+        return EXIT_OK
+    return EXIT_GATE if status == "rejected" else EXIT_BIZ
+
+
+# --- work ---------------------------------------------------------------------
+def cmd_work(args: argparse.Namespace) -> int:
+    """队列消费（CH-449）。`serve` 不起线程（ADR-30），异步转换由本进程承担。"""
+    from .scheduler import Scheduler
+    from .storage.db import Store
+    from . import worker
+    cfg = _cfg(args)
+    root = _root(cfg)
+    root.mkdir(parents=True, exist_ok=True)
+    store = Store(root / "state.sqlite")
+    rc = EXIT_OK
+    try:
+        if args.status:
+            print(_jline(worker.queue_stats(store)))
+            return rc
+        if args.enqueue:
+            sched = Scheduler(store)
+            src = Path(args.enqueue).expanduser()
+            files = [src] if src.is_file() else _dir_files(src, cfg, False)
+            queued, skipped = 0, 0
+            for f in files:
+                try:
+                    it = worker.enqueue(sched, f)
+                except Doc2mdError as exc:
+                    print(_jline({"file": f.name, "status": "error", "code": exc.code,
+                                  "message": exc.message}), file=sys.stderr)
+                    skipped += 1
+                    rc = max(rc, EXIT_BIZ)
+                    continue
+                queued += 1
+                print(_jline(it))
+            print(_jline({"enqueued": queued, "rejected": skipped,
+                          "counts": worker.queue_stats(store)}))
+            if not args.once:
+                return rc
+        rep = worker.run_work(cfg, root, once=args.once, max_jobs=args.max_jobs,
+                              workers=args.workers, idle_seconds=args.idle)
+        print(_jline(rep.to_dict()))
+        return EXIT_SYS if rep.failed else rc
+    finally:
+        store.close()
+
+
 # --- watch --------------------------------------------------------------------
+def _dir_files(src: Path, cfg: dict, follow: bool) -> list[Path]:
+    from .security.dirguard import WalkLimits, guard_walk
+    lim = WalkLimits(follow_symlinks=follow or bool(
+        config.get(cfg, "watch.follow_symlinks", False)),
+        max_depth=int(config.get(cfg, "watch.max_depth", 20)),
+        skip_hidden=bool(config.get(cfg, "watch.skip_hidden", True)),
+        max_files_per_dir=int(config.get(cfg, "watch.max_files_per_dir", 5000)))
+    return [Path(f) for f in guard_walk(src, lim).files
+            if Path(f).suffix.lower() in (".pdf", ".docx")]
+
+
 def cmd_watch(args: argparse.Namespace) -> int:
+    from . import worker
     from .scheduler import Scheduler
     from .security.dirguard import WalkLimits
     from .security.watcher import StabilityTracker
@@ -230,32 +366,47 @@ def cmd_watch(args: argparse.Namespace) -> int:
         max_files_per_dir=int(config.get(cfg, "watch.max_files_per_dir", 5000)))
     tracker = StabilityTracker(stable_seconds=float(config.get(cfg, "watch.stable_seconds", 5)))
     interval = args.interval or tracker.stable_seconds
+    async_queue = bool(config.get(cfg, "perf.queue_async", False))
     import time
     rc = EXIT_OK
     while True:
         try:
             ready = tracker.poll_all(args.dir, lim)
         except Doc2mdError as exc:
-            print(json.dumps({"status": "error", "code": exc.code,
-                              "message": str(exc)}, ensure_ascii=False), file=sys.stderr)
+            print(_jline({"status": "error", "code": exc.code,
+                          "message": str(exc)}), file=sys.stderr)
             ready = []
         for f in ready:
             p = Path(f)
             if p.suffix.lower() not in (".pdf", ".docx"):
+                continue
+            if async_queue:
+                # CH-449：低配机上 watch 目录批量落文件时，稳定即入队、由 `doc2md work`
+                # 并发消费；不在轮询线程里做 CPU 重活（否则稳定窗口被计算拖长）。
+                try:
+                    it = worker.enqueue(sched, p)
+                    print(_jline(it))
+                except Doc2mdError as exc:
+                    print(_jline({"watched": p.name, "status": "error", "code": exc.code,
+                                  "message": exc.message}), file=sys.stderr)
+                    rc = max(rc, EXIT_BIZ)
                 continue
             try:
                 res = convert(p, cfg=cfg, out_dir=root / "out")
                 save_ir(store, res.ir)
                 j = sched.submit(res.doc_id, res.source_key)
                 sched.mark(j.job_id, "done")
-                print(json.dumps({"watched": p.name, "doc_id": res.doc_id,
-                                  "job_id": j.job_id}, ensure_ascii=False))
+                print(_jline({"watched": p.name, "doc_id": res.doc_id, "job_id": j.job_id}))
             except E4221_GateReject as exc:
                 j = sched.submit("reject:" + p.name)
                 sched.mark(j.job_id, "rejected", exc.code, exc.detail)
-                print(json.dumps({"watched": p.name, "status": "rejected",
-                                  "code": exc.code}, ensure_ascii=False), file=sys.stderr)
+                print(_jline({"watched": p.name, "status": "rejected",
+                              "code": exc.code}), file=sys.stderr)
                 rc = EXIT_GATE
+            except Doc2mdError as exc:
+                print(_jline({"watched": p.name, "status": "error", "code": exc.code,
+                              "message": exc.message}), file=sys.stderr)
+                rc = max(rc, EXIT_BIZ)
         if args.once:
             return rc
         time.sleep(interval)
@@ -299,6 +450,14 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         "base_revision_required": config.get(cfg, "api.base_revision_required"),
         "logs_rotate_mb": config.get(cfg, "logs.rotate_mb"),
         "backup_encrypted_external": config.get(cfg, "ops.backup_external_encrypted"),
+        # CH-447/448/450：低配机三项（内存分块 / 并发 / 磁盘门禁）在自检面可见
+        "s1_chunk_pages": config.get(cfg, "s1.chunk_pages"),
+        "perf_workers": config.get(cfg, "perf.workers"),
+        "cpu_count": os.cpu_count(),
+        "perf_queue_async": config.get(cfg, "perf.queue_async"),
+        "min_free_mb": config.get(cfg, "perf.min_free_mb"),
+        "free_mb": _free_mb(root),
+        "console_encoding": getattr(sys.stdout, "encoding", None),
     }
     # CH-441：清单一律与 pyproject 声明的运行时依赖一致（pypdf 实未使用，列出必误报 MISSING）
     for mod in DEPENDENCY_MODULES:
@@ -312,10 +471,12 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
 
 COMMANDS = {"serve": cmd_serve, "cron": cmd_cron, "convert": cmd_convert,
-            "watch": cmd_watch, "tokenizer": cmd_tokenizer, "doctor": cmd_doctor}
+            "watch": cmd_watch, "work": cmd_work,
+            "tokenizer": cmd_tokenizer, "doctor": cmd_doctor}
 
 
 def main(argv: list[str] | None = None) -> int:
+    _console_safe()                    # CH-451：cp936 控制台上打印非 GBK 文件名不得崩
     args = build_parser().parse_args(argv)
     fn = COMMANDS.get(args.cmd)
     if fn is None:
@@ -323,9 +484,13 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return fn(args)
     except Doc2mdError as exc:
-        print(json.dumps(exc.to_body(), ensure_ascii=False), file=sys.stderr)
+        print(_jline(exc.to_body()), file=sys.stderr)
         return EXIT_GATE if exc.code == "E4221" else EXIT_BIZ
     except KeyboardInterrupt:
+        return EXIT_SYS
+    except OSError as exc:             # ENOSPC / EACCES / ELOOP：低配机常见，栈回溯不是契约输出
+        print(_jline({"code": "E5031", "message": f"{type(exc).__name__}: {exc}"}),
+              file=sys.stderr)
         return EXIT_SYS
 
 

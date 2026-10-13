@@ -35,8 +35,18 @@ class RawPage:
 
 
 def sniff(path: str | Path) -> str:
+    """magic 判定：非文本型 PDF / DOCX 必须是契约内的 415 / E4151。
+
+    CH-451：原实现抛裸 `ValueError`，CLI 面逃到 `main()` 之外（栈回溯 + 退出码非契约值），
+    API 面由 Flask 兜成 500 —— 与 CH-434（消毒失败裸 ValueError → 500）同一类错误：
+    「输入安全」判定在两个入口都不可判定。
+    """
+    from ..errors import E4151_UnsupportedType
     p = Path(path)
-    head = p.open("rb").read(8)
+    try:
+        head = p.open("rb").read(8)
+    except OSError as exc:
+        raise E4151_UnsupportedType(f"cannot read {p.name}: {exc}", detail={"file": p.name})
     if head.startswith(MAGIC_PDF):
         return "pdf"
     if head.startswith(MAGIC_ZIP):
@@ -48,33 +58,79 @@ def sniff(path: str | Path) -> str:
                 return "docx"
         except Exception:
             pass
-    raise ValueError(f"unsupported magic for {p.name}")
+    raise E4151_UnsupportedType(f"unsupported magic for {p.name}",
+                                detail={"file": p.name, "magic": head.hex()})
 
 
-def read_pdf(path: str | Path, page_span: tuple[int, int] | None = None) -> list[RawPage]:
+def read_pdf(path: str | Path, page_span: tuple[int, int] | None = None,
+             chunk_pages: int | None = None) -> list[RawPage]:
     """页级行结构 + 字号 / 粗斜体（pdfplumber chars）。
 
     page_span=(start, end) 半开区间，供 S2 分片按页范围粗切使用。
+    chunk_pages：每重新打开一次文档最多解析多少页（CH-447，低配机内存纪律）。
     """
     import pdfplumber
     out: list[RawPage] = []
-    with pdfplumber.open(str(path)) as pdf:
-        total = len(pdf.pages)
-        start, end = page_span if page_span else (0, total)
-        start, end = max(0, start), min(total, end)
-        for i in range(start, end):
-            page = pdf.pages[i]
-            lines: list[Line] = []
-            chars = page.chars or []
-            raw_lines = page.extract_text_lines() or []
-            for ln in raw_lines:
-                st = _line_style(chars, float(ln.get("top", 0.0) or 0.0),
-                                 float(ln.get("bottom", 0.0) or 0.0))
-                lines.append(Line(text=ln.get("text", ""), size=st[0],
-                                  bold=st[1], italic=st[2], strike=st[3],
-                                  x0=float(ln.get("x0", 0.0) or 0.0)))
-            out.append(RawPage(index=i, lines=lines))
+    total = _pdf_page_count(path)
+    start, end = page_span if page_span else (0, total)
+    start, end = max(0, start), min(total, end)
+    if end <= start:
+        return out
+
+    step = chunk_pages if chunk_pages and chunk_pages > 0 else (end - start)
+    for lo in range(start, end, step):
+        hi = min(lo + step, end)
+        # 每个分块独立 open/close：pdfminer 的 LRUCachingObjectCache / 页对象
+        # 随 PDF 实例一起释放，驻留峰值从「整本文档」降为「一个分块」。
+        with pdfplumber.open(str(path)) as pdf:
+            for i in range(lo, hi):
+                page = pdf.pages[i]
+                chars = page.chars or []
+                cs_index = _char_index(chars)
+                lines: list[Line] = []
+                for ln in (page.extract_text_lines() or []):
+                    top = float(ln.get("top", 0.0) or 0.0)
+                    bottom = float(ln.get("bottom", 0.0) or 0.0)
+                    st = _line_style(_slice_chars(chars, cs_index, top, bottom),
+                                     top, bottom)
+                    lines.append(Line(text=ln.get("text", ""), size=st[0],
+                                      bold=st[1], italic=st[2], strike=st[3],
+                                      x0=float(ln.get("x0", 0.0) or 0.0)))
+                out.append(RawPage(index=i, lines=lines))
+                page.flush_cache()
     return out
+
+
+def _pdf_page_count(path: str | Path) -> int:
+    import pdfplumber
+    with pdfplumber.open(str(path)) as pdf:
+        return len(pdf.pages)
+
+
+def _char_index(chars: list[dict]) -> tuple[list[int], list[float]]:
+    """预排序索引：(原始下标序, 对应的 top 升序序列)。
+
+    _line_style 原本对每行做一次 O(全页 chars) 线性过滤，实测是 S1 的 CPU 热点
+    （15.6k 行 × 每行重扫 → 单文件 320 页 profile 里占 27/100s）。
+    这里用 bisect 取区间，但**取回的下标会再排序还原成原始 char 顺序**，
+    使众数平票时的 `Counter.most_common` 平局判定与逐行全扫完全一致
+    （实测 120 页 / 5613 行 0 处不符）。
+    """
+    tops = [float(c.get("top", 0.0)) for c in chars]
+    order = sorted(range(len(chars)), key=lambda j: (tops[j],
+                                                     float(chars[j].get("x0", 0.0))))
+    return order, [tops[j] for j in order]
+
+
+def _slice_chars(chars: list[dict], index: tuple[list[int], list[float]],
+                 top: float, bottom: float) -> list[dict]:
+    from bisect import bisect_left
+    order, sorted_tops = index
+    lo = bisect_left(sorted_tops, top - 1.0)
+    hi = bisect_left(sorted_tops, max(bottom, top + 1.0))
+    if lo >= hi:
+        return []
+    return [chars[j] for j in sorted(order[lo:hi])]
 
 
 def _line_style(chars: list[dict], top: float, bottom: float) -> tuple[float, bool, bool, bool]:
@@ -149,10 +205,11 @@ def _style_size(style_name: str) -> float:
     return 10.5
 
 
-def read_any(path: str | Path, page_span: tuple[int, int] | None = None) -> list[RawPage]:
+def read_any(path: str | Path, page_span: tuple[int, int] | None = None,
+             chunk_pages: int | None = None) -> list[RawPage]:
     fmt = sniff(path)
     if fmt == "pdf":
-        return read_pdf(path, page_span)
+        return read_pdf(path, page_span, chunk_pages=chunk_pages)
     if page_span:
         return read_docx(path)[page_span[0]:page_span[1]]
     return read_docx(path)

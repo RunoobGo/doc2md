@@ -1,0 +1,261 @@
+"""work —— 队列消费进程（CH-449；低配机「较多文件」的第二条吞吐路径）。
+
+为什么需要它：`serve` 是同步转换的 HTTP 面，一次 `POST /jobs` 丢 200 个文件会把
+请求线程占满（并把 workers 个解析进程的内存同时抬起来）。ADR-30 明令不在 serve 内
+起常驻线程，所以异步化走「入队 + 独立 `doc2md work` 进程」——与 cron 同构：
+分进程、共用 state.sqlite（WAL + busy_timeout，CH-436 口径）。
+
+分工纪律：
+- 父进程 = 唯一 DB 写入者（claim / mark / save_ir / 事件），sqlite 不开跨进程共享连接；
+- 子进程 = 纯计算（`pipeline.batch._convert_one`），只回传紧凑摘要，不回传 IR 对象；
+- 认领用 `BEGIN IMMEDIATE` + `UPDATE ... WHERE status='queued'` 双条件，
+  两个 work 进程同时跑也不会重复消费（与 CH-412 的 uq_tasks_doc_active 附着语义一致）。
+
+日志纪律（CH-444 的第三条）：work 进程写自己的 `logs/work.jsonl`，
+不与 serve 的 app.jsonl、cron 的 cron.jsonl 同名——重命名式轮转只能有一个所有者。
+
+平台：Windows 无 fork，worker 函数与参数均可 pickle（batch 模块顶层），
+`ProcessPoolExecutor` 默认上下文即可，实测 fork / spawn 两种启动方式产物一致。
+"""
+from __future__ import annotations
+
+import json
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from . import config
+from .pipeline.batch import default_workers, run_batch
+from .scheduler import Scheduler
+from .storage.db import Store, now_iso
+from .storage.repo import save_ir
+
+
+@dataclass
+class WorkReport:
+    drained: int = 0
+    done: int = 0
+    failed: int = 0
+    rejected: int = 0
+    drift: int = 0
+    notes: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {"drained": self.drained, "done": self.done, "failed": self.failed,
+                "rejected": self.rejected, "drift": self.drift, "notes": self.notes}
+
+
+def claim(store: Store, limit: int) -> list[dict]:
+    """原子认领最多 limit 个 queued 作业 → 置 running（同事务，防双认领）。
+
+    消费参数取 `source_path` / `mode` 列（CH-448），进程崩溃后靠它们重新排队。
+    """
+    limit = max(1, int(limit))
+    out: list[dict] = []
+    with store.tx() as tx:
+        rows = tx.execute(
+            "SELECT job_id, doc_id, source_key, source_path, mode FROM tasks"
+            " WHERE status='queued' ORDER BY created_at LIMIT ?", (limit,)).fetchall()
+        for r in rows:
+            tx.execute("UPDATE tasks SET status='running', started_at=?, error_code=''"
+                       " WHERE job_id=? AND status='queued'", (now_iso(), r["job_id"]))
+            if tx.execute("SELECT changes()").fetchone()[0] != 1:
+                continue
+            out.append({"job_id": r["job_id"], "doc_id": r["doc_id"],
+                        "source_key": r["source_key"] or "",
+                        "path": r["source_path"] or "", "mode": r["mode"]})
+    return out
+
+
+def _out_dir(cfg: dict, root):
+    return config.path_setting(cfg, "paths.out", root, str(root / "out"))
+
+
+def reclaim_stale(store: Store, cfg: dict) -> int:
+    """遗骸回收（CH-448）：`doc2md work` 被 OOM killer 干掉是低配机常态，
+    其认领的 running 作业若超过 [perf].stale_job_minutes 未更新，重新置 queued。
+    只动带消费路径的 running 行（同步 serve 路径写的 running 不带 path 语义，不回收）。
+    """
+    minutes = int(config.get(cfg, "perf.stale_job_minutes", 30) or 0)
+    if minutes <= 0:
+        return 0
+    with store.tx() as tx:
+        rows = tx.execute(
+            "SELECT job_id FROM tasks WHERE status='running'"
+            " AND started_at IS NOT NULL AND started_at < datetime('now', ?)"
+            " AND source_path IS NOT NULL",
+            (f"-{minutes} minutes",)).fetchall()
+        for r in rows:
+            tx.execute("UPDATE tasks SET status='queued', started_at=NULL, error_code=''"
+                       " WHERE job_id=? AND status='running'", (r["job_id"],))
+    return len(rows)
+
+
+def drain_once(store: Store, cfg: dict, root, *, workers: int | None = None,
+               writer=None) -> WorkReport:
+    """认领一批 → 进程池转换 → 逐条落库。队列空时返回 drained=0。"""
+    rep = WorkReport()
+    n = workers if workers is not None else default_workers(cfg)
+    n = max(1, int(n))
+    jobs = claim(store, n)
+    if not jobs:
+        return rep
+    rep.drained = len(jobs)
+    by_path: dict[str, list[dict]] = {}
+    for j in jobs:
+        if not j.get("path"):
+            # 入队时未带路径（历史行 / 只给了 doc_id）→ 明确失败，不静默挂起
+            Scheduler(store).mark(j["job_id"], "failed", "E4001",
+                                  {"reason": "queued task has no source path"})
+            rep.failed += 1
+            rep.notes.append(f"{j['job_id']}: no path")
+            continue
+        by_path.setdefault(j["path"], []).append(j)
+
+    results: list[dict] = []
+    # 同批内可能有不同转换档位（mode 为 per-job），按 mode 分组跑池，
+    # 每组仍是同一批进程，不多开进程数上限。
+    by_mode: dict[str | None, list[str]] = {}
+    for path in by_path:
+        mode = next((j.get("mode") for j in by_path[path] if j.get("mode")), None)
+        by_mode.setdefault(mode, []).append(path)
+    for mode, group in by_mode.items():
+        results.extend(run_batch(group, cfg=cfg, out_dir=_out_dir(cfg, root),
+                                 workers=n, mode=mode))
+    sched = Scheduler(store)
+    for res in results:
+        for job in by_path.get(res["file"], []):
+            if res["status"] == "ok":
+                drift = _finish_ok(store, sched, job, res, writer=writer)
+                rep.done += 1
+                rep.drift += 1 if drift else 0
+            elif res["status"] == "rejected":
+                sched.mark(job["job_id"], "rejected", res.get("code", "E4221"),
+                           {"reason": res.get("message", "")})
+                rep.rejected += 1
+                _event(store, job, res, "job_rejected", writer)
+            else:
+                sched.mark(job["job_id"], "failed", res.get("code", "E5000"),
+                           {"reason": res.get("message", "")[:200]})
+                rep.failed += 1
+                _event(store, job, res, "job_failed", writer)
+    return rep
+
+
+def _finish_ok(store: Store, sched: Scheduler, job: dict, res: dict,
+               writer=None) -> bool:
+    """入库 + 状态推进。返回是否发生内容漂移（入队后源文件被改写）。"""
+    from .ir import hash_of_path
+    try:
+        actual, _ = hash_of_path(res["file"])
+    except OSError:
+        actual = ""
+    detail = {"path": job["path"], "zip": res["zip"], "blocks": res["blocks"]}
+    drift = bool(actual and res.get("doc_id") and actual != job["doc_id"])
+    if drift:
+        # 产物按消费时内容入库；任务留痕，不偷偷改 task.doc_id 主键语义
+        detail["content_drift"] = {"enqueued": job["doc_id"], "consumed": res["doc_id"]}
+    with store.tx() as tx:
+        tx.execute("UPDATE tasks SET detail_json=? WHERE job_id=?",
+                   (json.dumps(detail, ensure_ascii=False), job["job_id"]))
+    ir = _read_ir(res["zip"])
+    if ir is not None:
+        save_ir(store, ir)
+    sched.mark(job["job_id"], "done")
+    _event(store, job, res, "job_done", writer, doc_id=res.get("doc_id"))
+    return drift
+
+
+def _read_ir(zip_path: str):
+    """从产物 zip 回读 IR（子进程不回传对象；父进程以产物为准重建入库内容）。"""
+    import zipfile
+    from .ir import IR
+    try:
+        with zipfile.ZipFile(zip_path) as z:
+            name = next((n for n in z.namelist() if n.endswith("ir.json")), None)
+            if not name:
+                return None
+            return IR.from_dict(json.loads(z.read(name).decode("utf-8")))
+    except (OSError, ValueError, KeyError):
+        return None
+
+
+def _event(store: Store, job: dict, res: dict, code: str, writer,
+           doc_id: str | None = None) -> None:
+    """事件入库 + 落 work.jsonl（复用 api._emit，NFR-19/20 同一口径，CH-444）。"""
+    from .api import _emit
+    payload = {"blocks": int(res.get("blocks", 0) or 0), "source": "work",
+               "file": str(job.get("path", ""))[-64:]}
+    if code != "job_done" and res.get("code"):
+        payload["code"] = res["code"]
+    _emit(store, code, doc_id or job.get("doc_id"), job["job_id"], payload, writer)
+
+
+def queue_stats(store: Store) -> dict:
+    return {r["status"]: r["c"] for r in store.q(
+        "SELECT status, COUNT(*) c FROM tasks GROUP BY status")}
+
+
+def enqueue(sched: Scheduler, path: str | Path, *, mode: str | None = None,
+            idem_key: str | None = None) -> dict:
+    """只入队不算（CH-449 异步路径）。doc_id 仍按内容寻址（约定 14），
+    因此 `uq_tasks_doc_active` 的附着去重在入队阶段就已生效。
+
+    入队面把「类型 / 存在性」判定做掉，口径与同步路径一致（E4041 / E4151），
+    否则垃圾文件要等到消费进程才失败，HTTP 面等于放弃了输入安全判定。
+    消费参数（source_path / mode）走 tasks 独立列，附着到既有作业时不改对端行。
+    """
+    from .errors import E4041_NotFound
+    from .ir import hash_of_path
+    from .pipeline.s1_parse import sniff
+    p = Path(path)
+    if not p.is_file():
+        raise E4041_NotFound(f"path not found: {p}")
+    sniff(p)                                   # → E4151（magic 不合法）
+    doc_id, source_key = hash_of_path(p)
+    job = sched.submit(doc_id, source_key, idem_key=idem_key,
+                       source_path=str(p), mode=mode)
+    return {"file": p.name, "job_id": job.job_id, "doc_id": doc_id,
+            "status": "queued", "attached": job.attached,
+            "idempotency_hit": job.idem_hit}
+
+
+def run_work(cfg: dict, root, *, once: bool = False, max_jobs: int = 0,
+             workers: int | None = None, idle_seconds: float = 5.0,
+             on_report=None) -> WorkReport:
+    """消费循环：once=True 排空当前队列即退出；max_jobs>0 达量退出；否则轮询常驻。"""
+    from .ops.logging import RotatingJsonlWriter
+    store = Store(root / "state.sqlite")
+    reclaimed = reclaim_stale(store, cfg)
+    if reclaimed:
+        total.notes.append(f"reclaimed_stale={reclaimed}")
+    logs = config.path_setting(cfg, "paths.logs", root, str(root / "logs"))
+    writer = RotatingJsonlWriter(
+        logs, stem="work",
+        rotate_mb=float(config.get(cfg, "logs.rotate_mb", 50)),
+        rotate_keep=int(config.get(cfg, "logs.rotate_keep", 5)))
+    total = WorkReport()
+    writer.write({"code": "WORK_START", "root": str(root),
+                  "once": bool(once), "max_jobs": int(max_jobs or 0),
+                  "reclaimed_stale": reclaimed,
+                  "workers": workers if workers is not None else default_workers(cfg)})
+    writer.flush()
+    try:
+        while True:
+            rep = drain_once(store, cfg, root, workers=workers, writer=writer)
+            for k in ("drained", "done", "failed", "rejected", "drift"):
+                setattr(total, k, getattr(total, k) + getattr(rep, k))
+            total.notes.extend(rep.notes)
+            if on_report:
+                on_report(rep)
+            finished = total.done + total.failed + total.rejected
+            if max_jobs and finished >= max_jobs:
+                return total
+            if rep.drained == 0:
+                if once:
+                    return total              # 队列排空即退出（cron 式批量）
+                time.sleep(idle_seconds)
+    finally:
+        writer.write({"code": "WORK_STOP", **total.to_dict()})
+        writer.close()
+        store.close()

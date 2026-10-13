@@ -25,6 +25,18 @@ def doc_id_of(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()[:16]
 
 
+def hash_of_path(path, chunk_bytes: int = 1 << 20) -> tuple[str, str]:
+    """流式取 (doc_id, source_key)：与 `doc_id_of(content)` / `source_key_of(content)`
+    逐字节等价，但不把整份文件读进内存（CH-447，低配机大文件纪律）。"""
+    from pathlib import Path
+    h = hashlib.sha256()
+    with Path(path).open("rb") as f:
+        for blk in iter(lambda: f.read(chunk_bytes), b""):
+            h.update(blk)
+    d = h.hexdigest()
+    return d[:16], d[:24]
+
+
 def source_key_of(content: bytes) -> str:
     """整源键：同一来源所有版本可整源删除（FR-128）。内容哈希前缀即源身份。"""
     return hashlib.sha256(content).hexdigest()[:24]

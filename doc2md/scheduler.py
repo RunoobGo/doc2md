@@ -31,8 +31,13 @@ class Scheduler:
         self.store = store
 
     def submit(self, doc_id: str, source_key: str = "",
-               idem_key: str | None = None) -> Job:
-        """投递作业；命中去重路径时不新建。"""
+               idem_key: str | None = None, *, source_path: str | None = None,
+               mode: str | None = None) -> Job:
+        """投递作业；命中去重路径时不新建。
+
+        `source_path` / `mode`（CH-448）：异步队列的消费参数，独立列存放
+        （`detail_json` 是结果/失败明细的契约面，不混入管道数据）。
+        """
         with self.store.tx() as tx:
             if idem_key:
                 row = tx.execute("SELECT job_id, doc_id FROM tasks WHERE idem_key=? LIMIT 1",
@@ -49,8 +54,9 @@ class Scheduler:
             try:
                 tx.execute(
                     "INSERT INTO tasks(job_id, doc_id, source_key, status, idem_key,"
-                    " created_at) VALUES (?,?,?,?,?,?)",
-                    (job_id, doc_id, source_key, "queued", idem_key, now_iso()))
+                    " created_at, source_path, mode) VALUES (?,?,?,?,?,?,?,?)",
+                    (job_id, doc_id, source_key, "queued", idem_key, now_iso(),
+                     source_path, mode))
             except sqlite3.IntegrityError:
                 # 并发窗口：唯一索引挡住第二份进行中作业 → 附着
                 row = tx.execute(
@@ -76,6 +82,21 @@ class Scheduler:
     def get(self, job_id: str) -> dict | None:
         r = self.store.q1("SELECT * FROM tasks WHERE job_id=?", (job_id,))
         return dict(r) if r else None
+
+    def next_queued(self, limit: int = 1) -> list[dict]:
+        """只读窥视队列头部（queued），不改状态——消费方认领走 worker.claim。"""
+        rows = self.store.q(
+            "SELECT job_id, doc_id, source_key, detail_json FROM tasks"
+            " WHERE status='queued' ORDER BY created_at LIMIT ?", (max(1, int(limit)),))
+        out: list[dict] = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["payload"] = json.loads(d.get("detail_json") or "{}")
+            except (TypeError, ValueError):
+                d["payload"] = {}
+            out.append(d)
+        return out
 
     def active_for(self, doc_id: str) -> dict | None:
         r = self.store.q1(

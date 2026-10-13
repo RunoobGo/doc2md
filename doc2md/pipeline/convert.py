@@ -13,8 +13,9 @@ from pathlib import Path
 
 from .. import config
 from ..errors import WARN_TABLE_ACROSS_SHARD
-from ..ir import IR, doc_id_of, source_key_of
+from ..ir import IR, hash_of_path
 from ..llm import DEFAULT_OP_WHITELIST, apply_ops, offline_llm, scan_injection
+from ..ops.diskguard import assert_free_space
 from ..security.names import sanitize_name
 from . import s1_5_gate, s4_render
 from .s1_parse import read_any, sniff
@@ -46,12 +47,14 @@ def convert(path: str | Path, *, cfg: dict | None = None, mode: str | None = Non
             out_dir: str | Path | None = None, raw_name: str | None = None) -> Result:
     cfg = cfg or config.load()
     p = Path(path)
-    content = p.read_bytes()
-    doc_id, source_key = doc_id_of(content), source_key_of(content)
+    # CH-447：doc_id / source_key 走流式哈希，S1 走分块解析 —— 两者都不得把整本文档
+    # 一次性读进内存，否则「低配机跑大文件」在这一步就先 OOM。
+    doc_id, source_key = hash_of_path(p)
     raw = raw_name or p.name
     safe = sanitize_name(raw, int(config.get(cfg, "security.max_name_bytes", 128)))
 
-    pages_all = read_any(p)
+    chunk_pages = int(config.get(cfg, "s1.chunk_pages", 0)) or None
+    pages_all = read_any(p, chunk_pages=chunk_pages)
     total = len(pages_all)
     gate = s1_5_gate.check(pages_all,
                            min_chars=int(config.get(cfg, "s1_5.min_chars_per_page", 120)),
@@ -118,6 +121,9 @@ def convert(path: str | Path, *, cfg: dict | None = None, mode: str | None = Non
         meta.setdefault("notes", []).append("本文为分片转换，跨片表格未合并")
     zip_path = None
     if out_dir:
+        # NFR-6（CH-450）：写产物**前**按源大小 × 安全系数估体积，剩余空间不足即 413/E4131，
+        # 而不是写半截 zip 后再在 ENOSPC 上崩——低配 Win11 系统盘最常见的踩点。
+        assert_free_space(out_dir, p.stat().st_size, cfg=cfg, what=f"{doc_id}.zip")
         zip_path = package(ir, md, meta, Path(out_dir), cfg)
     return Result(doc_id=doc_id, source_key=source_key, source_name=safe, markdown=md,
                   ir=ir, meta=meta, metrics=metrics, gate=gate.detail(),

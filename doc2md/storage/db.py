@@ -18,7 +18,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-DB_VERSION = 3   # state.sqlite 结构版本（user_version）；与 IR 的 SCHEMA_VERSION=14 是两套口径
+DB_VERSION = 4   # state.sqlite 结构版本（user_version）；与 IR 的 SCHEMA_VERSION=14 是两套口径
 
 DDL = f"""
 PRAGMA journal_mode=WAL;
@@ -88,9 +88,14 @@ CREATE TABLE IF NOT EXISTS tasks (
   idem_key TEXT,
   created_at TEXT NOT NULL,
   started_at TEXT, finished_at TEXT,
-  error_code TEXT, detail_json TEXT DEFAULT '{{}}'
+  error_code TEXT, detail_json TEXT DEFAULT '{{}}',
+  source_path TEXT, mode TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_tasks_idem ON tasks(idem_key);
+-- CH-448（DB_VERSION=4）：队列入队即带消费路径与转换档位，独立列而非塞 detail_json：
+-- detail_json 是「结果/失败明细」契约面，队列管道数据混进去会让两者互相污染，
+-- 且不依赖 sqlite 的 JSON1 编译开关。
+CREATE INDEX IF NOT EXISTS ix_tasks_queued ON tasks(status, created_at);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_tasks_doc_active
   ON tasks(doc_id) WHERE status IN ('queued','running');
 
@@ -155,6 +160,13 @@ class Store:
         cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(blocks)")}
         if "revision" not in cols:
             self._conn.execute("ALTER TABLE blocks ADD COLUMN revision INTEGER NOT NULL DEFAULT 1")
+        tcols = {r["name"] for r in self._conn.execute("PRAGMA table_info(tasks)")}
+        if tcols and "source_path" not in tcols:
+            # CH-448：存量库补列（异步队列的消费路径）；NULL = 非队列行，消费方直接判失败
+            self._conn.execute("ALTER TABLE tasks ADD COLUMN source_path TEXT")
+            self._conn.execute("ALTER TABLE tasks ADD COLUMN mode TEXT")
+            self._conn.execute("CREATE INDEX IF NOT EXISTS ix_tasks_queued"
+                               " ON tasks(status, created_at)")
         tcols = {r["name"] for r in self._conn.execute("PRAGMA table_info(tokens)")}
         if tcols and "role" not in tcols:
             # §7.2 兼容期：存量 token 默认 admin

@@ -1,8 +1,9 @@
 # Doc2md 方案执行增补登记（方案 v1.1 · 附录 H）
 
 对应《Doc2md V1.0（可执行开发方案）》§8.2 变更登记流：**任何契约变更必须走 CH 编号登记**。
-本文件登记 v2.4 开发期（实现 + 实测验收）新发现的缺陷与更优做法，编号 CH-422 … CH-446
+本文件登记 v2.4 开发期（实现 + 实测验收）新发现的缺陷与更优做法，编号 CH-422 … CH-451
 （CH-401 … CH-421 已被 v2.4 需求/ADR 占用，见方案第一、二章；本登记从 CH-422 起续号）。
+CH-447 … CH-451 为「低端硬件（Win11 无 GPU / Mac mini M4 16GB）多文件吞吐」专项，动因见该组首条。
 
 每条给出：动因（实测问题 P-xx 口径）、落点（代码/测试）、证据（实测数字）、是否触及对外契约。
 
@@ -37,6 +38,11 @@
 | CH-444 | 缺陷 | NFR-19「轮转由服务内置执行」+ §4.6「服务启动清理 work/tmp」在 `serve` 面从未落地（只有 cron 做），`log_rotation` 只单测写入器 → 服务面伪覆盖；修时又暴露 serve/cron 双进程同轮 `app.jsonl` 互踩 | `api.py` `cron.py: sweep_tmp` `tests/test_v24_gates.py` | 运维契约（NFR-19） |
 | CH-445 | 缺陷 | README 解包口径写错：`unzip -y` 在 Info-ZIP 6.00 非法（吐 usage、退出码 10），`python -m zipfile -e` 把软链降级成普通文件（M3 循环防护静默失真） | `README.md` 测试节 | 文档/分发口径 |
 | CH-446 | 缺陷 | O12「6 条增量回归断言进 CI」落空 —— 仓库无任何 CI 配置，红线只靠人工执行 | `.github/workflows/ci.yml` | 交付流程 |
+| CH-447 | 更优方案 | 低端机 320 页样本整本 `read_pdf` 峰值驻留 1290MB（8GB Win11 上易触发交换）→ S1 分块重开 + 每页 `flush_cache` + 流式哈希，驻留降到 177MB 且产物零漂移 | `pipeline/s1_parse.py` `ir/model.py: hash_of_path` `config [s1]` | 无（产物等价） |
+| CH-448 | 更优方案 | 批量转换受 GIL 与单进程约束，30 文件串行 3.6s → 进程池（spawn 语义 = Windows 可用）2.6s；队列遗骸（崩溃遗留 running）无回收；`tasks` 需携带源路径/模式 → 真列 + `DB_VERSION=4` 迁移 | `pipeline/batch.py` `storage/db.py` `scheduler.py` `config [perf]` | 内部 schema（迁移幂等） |
+| CH-449 | 更优方案 | 低端机同步 `POST /jobs` 会把 HTTP 线程占满整个转换期 → `perf.queue_async` 只入队秒回 202，新增 `doc2md work` 消费者 + `GET /jobs` 状态面 + 独立 `work.jsonl` | `worker.py` `api.py` `cli.py` | API 新增可选口径（默认仍同步） |
+| CH-450 | 缺陷 | NFR-6「剩余空间不足须拒绝并给码」在方案有代号、代码零实现：磁盘写满时产物写一半（zip 截断不可解），比失败更糟 | `ops/diskguard.py` `pipeline/convert.py` `cron.py` `api.py` | 新增 413/E4131 复用 |
+| CH-451 | 缺陷 | Windows 控制台默认 cp936：emoji 文件名让 `serve` 日志行直接 `UnicodeEncodeError` 崩进程；`sniff()` 抛裸 `ValueError` 在 HTTP 面落 500 | `cli.py: _console_safe/_jline` `pipeline/s1_parse.py: sniff` | API 契约（415/E4151） |
 
 ---
 
@@ -418,6 +424,128 @@
 
 ---
 
+### CH-447 S1 分块解析 + 每页缓存清理 + 流式哈希（低端机内存驻留）
+
+- **动因**：目标机型为中低端 Win11（8GB、无 GPU）与 Mac mini M4（16GB）。320 页样本
+  `large_320p.pdf` 在改造前全量转换峰值驻留 **1290MB**（`resource.ru_maxrss`，含 pdfplumber
+  整本文档对象与页缓存常驻）；再叠加批量进程池就是数倍，8GB 机器直接进入交换。
+- **落码**：`s1_parse.read_pdf(path, page_span=None, chunk_pages=None)` 按 `chunk_pages` 分块，
+  每块**重开** pdfplumber 文档（`page_span` 语义不变，分片路径不受影响）；页取完即
+  `page.flush_cache()` 释放字符对象缓存；`ir.model.hash_of_path()` 改 1MB 流式 sha256
+  （原 `read_bytes()` 全量入内存）；默认 `[s1].chunk_pages = 32`，0 = 整本一次读完。
+  分块后若仍按「每行重扫全页 chars」取样式，CPU 开销随重开次数放大（profile 实测该项
+  占 320 页单文件 100s 中的 27s）→ 同步改为「top 偏移表 + bisect 区间」，
+  取回下标**再排序还原原始 char 次序**，保证 `Counter.most_common` 平票判定与逐行全扫
+  完全一致（120 页 / 5613 行抽查 0 处不符）。
+- **归因实测**（同一样本、只跑 `read_pdf`，峰值 RSS）：
+  | 配置 | 峰值 |
+  | --- | --- |
+  | chunk=0 + flush | 1003MB |
+  | chunk=0 + 无 flush | 1278MB |
+  | chunk=32 + flush | **168MB** |
+  | chunk=32 + 无 flush | 204MB |
+
+  即 flush 拿走大头、分块把上限绑死在页窗口大小上。全量转换口径：pre **1290MB** →
+  改造后 chunk=0 **176MB** / chunk=32 **177MB**（320 页样本，29.9s → 24.0s，顺带更快）。
+- **等价性（关键纪律）**：内存改造不得改变产物。对 6 个黄金样本做三态对比
+  （pre=HEAD git worktree、post chunk=0、post chunk=32），zip 逐条目 sha256、
+  `content.md` 先去 YAML front-matter（`elapsed_ms` 非确定）再比，`ir.json`/`report.html` 原样比 →
+  **TOTAL_MISMATCHES = 0**（脚本 `/tmp/eq3.py`，结果 `/tmp/equiv_v2.json`）。
+  分块边界另立单测（chunk 1/2/3/32 与整本一致，`tests/test_perf_lowend.py`），
+  字符切片用「偏移表 + 有序合并」保住 `Counter` 并列次序。
+- **契约影响**：无。产物字节级等价，仅驻留与耗时改善。
+
+### CH-448 批量进程池（spawn 语义 = Windows 可用）+ 队列遗骸回收
+
+- **动因**：「较多文件的转化」是本轮核心诉求。Python 多线程在纯解析/排版/序列化上被 GIL
+  卡死（实测 30 文件串行 3.6s，线程池无收益）；Windows 上没有 `fork`，任何并行实现必须
+  从 spawn 语义出发设计，否则开发机绿、Win11 用户崩。
+- **落码**：新增 `pipeline/batch.py`：`default_workers(cfg)`（`0 → min(4, cpu_count)`，
+  负数按 1，防止把家用机按满）；`run_batch(paths, *, cfg, mode, out_dir, workers, start_method, on_result)`
+  —— n==1 或单文件走串行（零进程开销），否则 `ProcessPoolExecutor`；worker 函数在模块顶层、
+  参数可 pickle、返回值是紧凑 dict（**IR 对象不跨进程搬运**，避免 spawn 下大对象序列化
+  成为新瓶颈）；单文件异常落为该文件的 `rejected/error` 记录，不炸整批。
+  `doc2md convert 目录` 接入 `--workers`，退出码聚合改 `rc = max(rc, ...)`（3 门禁 < 4 业务 < 5 系统）。
+- **spawn 安全验证**：基准脚本必须在 `if __name__ == '__main__':` 下（否则 spawn 递归
+  bootstrap 直接报错 —— 这是 Windows 用户最常见的第一个坑，写进示例与测试）。
+  实测 30 文件：serial **3.6s** → spawn-pool **2.6s**（n=2/4/8；4 CPU 机器上 >4 无增益，
+  与 `default_workers` 上限一致），产物与串行逐条目一致（参数化 `[None, "spawn"]`）。
+- **配套 schema**：队列需要携带源文件与模式。第一版把 `source_path/mode` 塞进
+  `tasks.detail_json`，随即否决：`detail_json` 是**结果/失败契约面**（API 与工单都读它），
+  且 `json_extract` 依赖 SQLite JSON1 编译开关，家用 Python 不保证。改为真列
+  `tasks.source_path TEXT` / `tasks.mode TEXT`（`DB_VERSION 3 → 4`，`_migrate` 内
+  `PRAGMA table_info` 判缺再 `ALTER`，幂等；附 `ix_tasks_queued(status, created_at)`）。
+- **遗骸回收**：`worker.reclaim_stale()` 把 `running` 且 `started_at` 超
+  `[perf].stale_job_minutes`（默认 30）的任务重回 `queued`，**仅限 `source_path IS NOT NULL`
+  的队列来源**，绝不动同步 `serve` 写入的行（语义不同的两类行混在一表，回收必须有来源标记）。
+- **契约影响**：内部 schema 升级（自动迁移，旧库可直接用）；不新增错误码、不改 HTTP 面。
+
+### CH-449 异步入队（`perf.queue_async`）+ `doc2md work` 消费者 + `GET /jobs`
+
+- **动因**：同步 `POST /jobs` 在 8GB 机器上会把 HTTP 线程占住整个转换期（几十秒），
+  客户端超时、重试、再入队 → 队列放大。低端机的正确形态是「入队秒回、后台按容量消化」。
+- **落码**：`[perf].queue_async = false`（默认不变，保持 §5.1 既有门禁口径）。开启后
+  `POST /jobs` 只 `sniff` + 内容寻址入队并返回 **202**（`consume_with: "doc2md work"`）；
+  新增 `GET /jobs?status=&limit=`（状态计数 + `source_path`/`mode`）；新增 `doc2md work`
+  （`--once` / `--max-jobs` / `--workers` / `--idle` / `--enqueue PATH` / `--status`），
+  内部 `claim()` 用同一 `BEGIN IMMEDIATE` 事务「SELECT queued … + UPDATE … WHERE status='queued'」
+  实现**原子领取**（两个 worker 并发不重做同一任务，有单测）；产物写完后按 `hash_of_path`
+  复核源文件，变了就在结果里标 `content_drift`（不改判，只留痕）。
+- **入队原子性（实测发现并修正）**：第一版边校验边入队，目录里混一个非文档文件时
+  请求整体 415 却**留下已入队的半成品**（活测看到队列 +1 并被消费）。改为先校验全部、
+  再全部入队 —— 要么全入队要么零副作用（复测 415 后队列增长 0）。
+- **日志归属（延续 CH-444）**：`work` 进程写自己的 `logs/work.jsonl`，与 `app.jsonl`/`cron.jsonl`
+  互不重命名（rename 轮转只能有一个属主）；日志只记元信息，无正文（NFR-20）。
+- **实测**：双进程活测 —— `POST /jobs` 指向 14 文件目录，返回 **202 / 13 个作业条目 / 13ms**
+  （同目录内 12 个副本内容寻址去重，落库 2 个 doc），`doc2md work --once` 全部 done，
+  队列产物与串行产物 **逐条目 sha256 一致**；`work/` 目录 0700；事件链 `job_queued → job_done`。
+- **契约影响**：新增可选配置口径（默认关闭，现有断言不变）；新增 `GET /jobs` 只读端点。
+
+### CH-450 NFR-6 磁盘剩余空间门禁（方案有要求、代码零实现）
+
+- **动因**：方案 NFR-6 要求空间不足时拒绝并报 413/E4131，H.3 之前无任何实现点。
+  真实后果不是「失败」而是「半成品」：磁盘写满时 zip 写到一半截断，产物不可解包、
+  库里却已留有记录，比直接报错难处理一个量级。低端笔记本（小 SSD + 满盘）最易命中。
+- **落码**：新增 `ops/diskguard.py`：`free_mb()`（沿父链找到存在的目录再 `disk_usage`，
+  异常按 0 保守处理）；`assert_free_space(target_dir, src_size, *, cfg, what)` ——
+  需求 = `max([perf].min_free_mb=512, 源大小 × [perf].disk_safety_factor=3)`，
+  **仅当两者都为 0 才关闭门禁**（第一版只判 `min_free_mb==0` 就关闭，导致系数配了也无效，
+  已由单测 `test_disk_gate_disabled_needs_both_zero` 固化正确语义）。
+  接入三处写盘入口：`convert()` 打包前（`out_dir`）、`cron` 本地快照前（db+wal 实际字节）与
+  外置卷备份前（快照大小）、`POST /jobs`（→ **413 / E4131**，`detail.rule="NFR-6"`）。
+  违规不落半成品：cron 侧记 `ok=False` 步骤且**不轮转**，convert 侧在写盘前就拒。
+- **实测**：tmpfs 限 40MB 作 `--out` → `doc2md convert` rc=4、
+  `E4131`（`need 512MB, free 40MB`），输出目录保持空（无截断 zip）；
+  `min_free_mb`/`disk_safety_factor` 组合四态单测覆盖。
+- **契约影响**：复用既有 E4131/413 段位（未新增错误码）；默认开启、阈值可配。
+
+### CH-451 Windows 控制台（cp936）现实：崩溃、乱码与错误码归位
+
+- **动因**：目标机型含中文 Windows。控制台输出编码为 cp936 时，含 emoji 的文件名会让
+  日志行 `print` 抛 `UnicodeEncodeError` —— 一个「显示问题」把服务进程干掉，属于低端机上
+  最容易踩到的稳定性坑。次生问题：`sniff()` 对非文档抛裸 `ValueError`，HTTP 面落 500。
+- **落码**：`cli._console_safe()` 在 `main()` 最前执行 —— 仅当 stdout/stderr 编码非 UTF-8 时
+  `reconfigure(errors="replace")`（不改用户终端、不假装能显示画外字符，只保证不崩）；
+  机器可读输出走 `cli._jline()`，强制 `ensure_ascii=True`，使 JSON 在 cp936 与 UTF-8 终端下
+  **字节一致**（管道/PowerShell 消费方不受代码页影响）；`sniff()` 统一抛
+  `E4151_UnsupportedType`（415），`OSError` 也归入该口径；`main()` 兜底 `OSError → E5031 / exit 5`。
+- **实测**：沙箱内用 `encoding="cp936", errors="strict"` 包装 stdout 复现改造前抛错、
+  改造后 `replace` 正常输出（单测 `test_cp936_console_repro`）；`--json` 输出为纯 ASCII，
+  非 `--json` 人读模式在 cp936 下可解码；目录混垃圾文件 → rc=4 且 stderr 有 `E4151` JSON 行；
+  `doc2md serve` + 伪造 `PK` 头但非 docx 的字节 → **415/E4151**（不再是 500），缺失路径 → 404。
+- **契约影响**：把此前的裸异常/500 归到既有 415/E4151、413/E4131 段位，未新增码值。
+
+### 低端机口径小结（本轮共同约束）
+
+保持 L1 纯规则路线，不引入 OCR/模型（方案 ADR 口径不变：GPU 对本流程无收益，
+文本 PDF/DOCX 转换是 CPU + 内存带宽问题）。可复制的家用机建议：
+`[s1].chunk_pages = 32`；`[perf].workers = 0`（自动 `min(4, CPU)`，8GB 机器**不要**手调 8，
+驻留 ≈ workers × chunk_pages）；文件多或希望界面不被卡住时开 `[perf].queue_async = true`
+并常驻 `doc2md work`；`[perf].min_free_mb` 保持默认 512 以拦满盘。
+以上量级均有上述实测支撑，非推断。
+
+---
+
 ## H.3 实现偏差登记（非缺陷，属落地口径）
 
 | 编号 | 项 | 说明 |
@@ -427,7 +555,7 @@
 | D-3 | `reindex` 事务边界 | 索引刷新必须在 `patch_block` 的 `store.tx()` **之外**（`reindex` 自带 `BEGIN IMMEDIATE`，嵌套即 `OperationalError`）。方案 B-13 伪码未标注，已在 `edits.py:54` 注释固化。 |
 | D-4 | 回滚 revision 取值 | 「回到 revision N 的内容」优先取 `from_revision==N` 那次的 `before`，缺失再退 `to_revision==N` 的 `after`；审计链首（初始态）与 `revision=1` 无审计时走同一回退路径。 |
 | D-5 | `DB_VERSION` 命名 | state.sqlite 结构版本从 `SCHEMA_VERSION` 改名 `DB_VERSION`，避免与 IR `SCHEMA_VERSION=14` 同词不同义（迁移判定曾读错对象）。 |
-| D-6 | B-14 慢测处置 | 门禁全量（35 项 → CH-444 后 40 项，`pytest -m gate`）≈1.5–2 分钟（实测 40 项 95.7s）；大样本 fixture 以 session 作用域共享（single/two_phase 各转换一次）。原 difflib 直译口径在本机不可完成（>300s），按 CH-428/429 替换后方可作为 CI 红线。 |
+| D-6 | B-14 慢测处置 | 门禁全量（35 项 → CH-444 后 40 项 → CH-447…451 后 **65 项**，`pytest -m gate`，实测 65 项 110.4s；全量 142 passed + 1 skipped 164.9s）；大样本 fixture 以 session 作用域共享（single/two_phase 各转换一次）。原 difflib 直译口径在本机不可完成（>300s），按 CH-428/429 替换后方可作为 CI 红线。 |
 | D-7 | 缺 `confirm=true` 的状态码 | 实现一度自造 `E4091/409`。方案未新增该码（§1.3 错误码段位冻结、v2.4 仅增补 E4133/E4251 语义），且**附录 E 第 10 项字面要求「缺 `confirm=true` 得 400」**。已回到 `E4001/400` + `detail.requires="confirm=true"`，并删除 `E4091` 类（登记为 CH-439）。 |
 
 ---
@@ -446,6 +574,13 @@
 | `watch_stability`（M3） | 48MB 真写盘 + 注入时钟：增长期入队 0 次；静默满 5s 恰好入队 1 次（`poll_all` 同断言，见 CH-443） | 成立 |
 | 资产可复现性 | 两次独立生成 `tests/golden` → 5135 个文件 sha256 全表一致；MANIFEST 逐条复核通过（见 CH-442） | 成立 |
 | 装机面 | 空 venv `pip install -e ".[dev]"` → `doctor` 全 ok、`serve` 起 `/healthz` 200、全量测试 EXIT=0（见 CH-441） | 成立 |
+| 产物等价（CH-447） | 6 黄金样本 × 三态（pre=HEAD worktree / chunk=0 / chunk=32），zip 逐条目 sha256（`content.md` 先去 front-matter）→ **TOTAL_MISMATCHES=0** | 成立（内存改造零漂移） |
+| 驻留（CH-447） | 320 页样本全量转换 **1290MB → 176MB(chunk=0) / 177MB(chunk=32)**；read_pdf 归因 1278 / 1003 / 204 / **168MB** | 成立 |
+| 吞吐（CH-448） | 30 文件 serial **3.6s** → spawn-pool **2.6s**（n=2/4/8，4 CPU 上 >4 无增益）；pool 与串行产物逐条目一致（含 `start_method="spawn"` 参数化 = Windows 语义） | 成立 |
+| 异步队列（CH-449） | 真双进程活测：`POST /jobs` → **202 / 13 作业 / 13ms**（未做转换）、`work --once` → `{"drained":2,"done":2}`、`GET /jobs counts {'done': 2}`、队列 vs 串行产物 sha256 全等；混坏文件目录 → 415/E4151 且 **queued 零增长** | 成立 |
+| 日志隔离（CH-449） | `app.jsonl` 3 行 / `work.jsonl` 4 行（含 `WORK_START`、`job_done`，无正文），`cron.jsonl` 未创建 | 成立 |
+| 磁盘门禁（CH-450） | tmpfs 40MB 作 `--out` → rc=4 / `E4131 need 512MB, free 40MB`，目录内 **0 文件**（无截断 zip） | 成立 |
+| cp936 控制台（CH-451） | `PYTHONIOENCODING=cp936` + `🔥报告.pdf` → rc=0、stderr 无 `UnicodeEncodeError`、`--json` 行纯 ASCII 可解析（`\ud83d\udd25` 转义）；serve 面伪 `PK` 非 docx → 415/E4151（原 500） | 成立 |
 
 > 说明：`delete_cascade` 的「搜索 0 残留」在 CH-435 之前对中文查询恒为 0，属**伪通过**；
 > 修复后同一断言在真实命中语料上复跑，才构成有效门禁。此为本轮最重要的验收教训。

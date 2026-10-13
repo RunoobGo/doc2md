@@ -10,6 +10,11 @@ logs = "work/logs"
 tmp = "work/tmp"
 vendor_models = "vendor/models/llm"
 
+[s1]
+chunk_pages = 32                       # CH-447：分块解析驻留上限（0 = 整本一次读完）
+                                       # 8GB Win11 / 16GB Mac mini 建议 32；320 页样本
+                                       # 峰值驻留实测 1025MB → 177MB
+
 [s1_5]
 sample_pages = "auto"                  # even5 = 附录 C-1 原口径；auto 见 CH-424 判定增强
 min_chars_per_page = 120
@@ -25,6 +30,15 @@ dedupe_overlap = true
 [s4]
 preserve_marks_strike = false          # CH-417：删除线默认关，开启才输出 ~~
 link_internal = "plain"                # CH-416：PDF goto / DOCX 书签链接降级为普通文本
+
+[perf]
+workers = 0                            # CH-448：批量转换进程数；0 = 自动 min(4, CPU)
+                                       # 8GB 内存机器别调到 8：驻留 ≈ workers × chunk_pages
+queue_async = false                    # CH-449：true → POST /jobs 只入队，由 `doc2md work` 消费
+                                       # false = 同步转换（§5.1 既有门禁口径）
+min_free_mb = 512                      # CH-450（NFR-6）：写产物/备份前的剩余空间下限；0 = 关闭门禁
+disk_safety_factor = 3                 # 需求 = 源大小 × 该系数
+stale_job_minutes = 30                 # CH-448：`doc2md work` 回收 running 超过该时长且崩溃遗骸（仅限队列来源）
 
 [watch]
 stable_seconds = 5                     # CH-411：大小 + mtime 连续 5s 无变化才入队

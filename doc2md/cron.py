@@ -37,6 +37,17 @@ class CronReport:
                            "steps": self.steps}, ensure_ascii=False, indent=2)
 
 
+def _db_bytes(state: Path) -> int:
+    """待备份量估算：主库 + WAL（快照消费的是 checkpoint 后的全量）。"""
+    total = 0
+    for p in (state, state.with_name(state.name + "-wal")):
+        try:
+            total += p.stat().st_size
+        except OSError:
+            pass
+    return total
+
+
 def sweep_tmp(cfg: dict, root: Path) -> int:
     """清理 work/tmp 残留（§4.6：服务启动与 cron --daily 共用同一路径口径）。"""
     tmp = config.path_setting(cfg, "paths.tmp", root, str(root / "tmp"))
@@ -83,26 +94,49 @@ def run(cfg: dict | None = None, root: Path | None = None, mode: str = "daily",
                           config.get(cfg, "ops.backup_external_encrypted", True)),
                       work_root=root)
     if with_backup:
-        snap = plan.snapshot(root / "state.sqlite")
-        rep.add("local_snapshot", path=str(snap), bytes=snap.stat().st_size)
+        # NFR-6（CH-450）：备份同样是写盘。快照大小 = 库大小（外置副本 ≈ ×1.05，
+        # AES-GCM + nonce），按同一系数口径预估；空间不足记为失败步骤而不是半截文件。
+        from .errors import Doc2mdError
+        from .ops.diskguard import assert_free_space
+        state = root / "state.sqlite"
+        snap = None
+        try:
+            assert_free_space(plan.local_dir, _db_bytes(state), cfg=cfg,
+                              what="local_snapshot")
+            snap = plan.snapshot(state)
+        except Doc2mdError as exc:
+            rep.add("local_snapshot", code=exc.code, message=exc.message, ok=False)
+            rep.ok = False
+        except OSError as exc:
+            rep.add("local_snapshot", error=str(exc)[:200], ok=False)
+            rep.ok = False
+        if snap is not None:
+            rep.add("local_snapshot", path=str(snap), bytes=snap.stat().st_size)
 
-        # 3) 外置加密增量（仅 weekly）
-        if mode == "weekly":
-            import os
-            phrase = os.environ.get(passphrase_env, "")
-            if not plan.external_dir:
-                # CH-433：未配置外置卷属「按配置跳过」，不是失败；
-                # 原逻辑先判 passphrase，会让没接外置卷的部署每周报一次 ok=False。
-                rep.add("external_backup", skipped="ops.backup_external_dir not configured")
-            elif not phrase:
-                rep.add("external_backup", skipped="no passphrase in env", ok=False)
-                rep.ok = False
-            else:
-                out = plan.to_external(snap, phrase)
-                rep.add("external_backup", path=str(out), bytes=out.stat().st_size,
-                        encrypted=True)
-        removed = plan.rotate()
-        rep.add("rotation", removed=[str(p) for p in removed])
+            # 3) 外置加密增量（仅 weekly）
+            if mode == "weekly":
+                import os
+                phrase = os.environ.get(passphrase_env, "")
+                if not plan.external_dir:
+                    # CH-433：未配置外置卷属「按配置跳过」，不是失败；
+                    # 原逻辑先判 passphrase，会让没接外置卷的部署每周报一次 ok=False。
+                    rep.add("external_backup", skipped="ops.backup_external_dir not configured")
+                elif not phrase:
+                    rep.add("external_backup", skipped="no passphrase in env", ok=False)
+                    rep.ok = False
+                else:
+                    try:
+                        assert_free_space(plan.external_dir, snap.stat().st_size, cfg=cfg,
+                                          what="external_backup")
+                        out = plan.to_external(snap, phrase)
+                        rep.add("external_backup", path=str(out), bytes=out.stat().st_size,
+                                encrypted=True)
+                    except Doc2mdError as exc:
+                        rep.add("external_backup", code=exc.code, message=exc.message,
+                                ok=False)
+                        rep.ok = False
+            removed = plan.rotate()
+            rep.add("rotation", removed=[str(p) for p in removed])
 
     # 4) tmp 清理（服务启动同样执行一次，见 api.create_app）
     cleaned = sweep_tmp(cfg, root)
