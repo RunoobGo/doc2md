@@ -78,6 +78,7 @@ def api_client(tmp_cfg, tmp_path):
     tokens = {r: auth.issue(st, r, f"test-{r}") for r in ("admin", "editor", "reader")}
     with app.test_client() as c:
         yield c, tokens
+    app.config["doc2md"]["writer"].close()   # CH-444：服务内置写入器随夹具回收
 
 
 def hdr(tokens: dict, role: str = "admin") -> dict:

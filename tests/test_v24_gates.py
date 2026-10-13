@@ -302,6 +302,14 @@ def test_delete_removes_artifacts(saved_doc):
 
 
 # --- 6. log_rotation（NFR-19 / M8）-------------------------------------------
+def _svc(tmp_path, tmp_cfg):
+    """真起一个服务实例（create_app），返回 (app, client, root)。"""
+    from doc2md.api import create_app
+    root = tmp_path / "work"
+    app = create_app(tmp_cfg, root)
+    return app, app.test_client(), root
+
+
 def test_log_rotation(tmp_path):
     w = RotatingJsonlWriter(tmp_path, rotate_mb=50, rotate_keep=5)
     w.rotate_bytes = 2048                          # 测试用小阈值
@@ -312,6 +320,95 @@ def test_log_rotation(tmp_path):
     assert [p.name for p in rotated] == [f"app.jsonl.{k}" for k in range(1, 6)]
     first = (tmp_path / "app.jsonl").read_text(encoding="utf-8").splitlines()[0]
     assert json.loads(first)["code"] == "E_LOG_ROTATE"
+
+
+def test_service_rotates_its_own_logs_without_restart(tmp_path, tmp_cfg, small_pdf):
+    """§5.1 字面口径：轮转发生在**服务进程内**且服务不重启。
+
+    旧用例只单测写入器，服务侧从未持有写入器（CH-444 修的就是这一点），
+    所以「注入 >50MB 日志自动轮转」在真实服务面上是伪覆盖。
+    """
+    app, client, root = _svc(tmp_path, tmp_cfg)
+    w = app.config["doc2md"]["writer"]
+    # 服务启动即自带一条 SERVICE_START
+    first = w._path.read_text(encoding="utf-8").splitlines()[0]
+    assert json.loads(first)["code"] == "SERVICE_START"
+    w.rotate_bytes = 1024                          # 小阈值模拟 >50MB
+    for i in range(80):
+        w.write({"i": i, "msg": "z" * 40})         # 全程不 close、不重建服务
+    assert w.rotations >= 1
+    rotated = sorted(root.glob("logs/app.jsonl.*"))
+    assert rotated, "服务内未产生轮转文件"
+    # 轮转后服务仍在同一实例上可用（未重启）
+    from doc2md import auth
+    st = app.config["doc2md"]["store"]
+    tok = auth.issue(st, "editor", "gate")
+    r = client.post("/jobs", json={"path": str(small_pdf)},
+                    headers={"X-Doc2md-Token": tok})
+    assert r.status_code == 202, r.get_json()
+    assert client.get("/healthz").status_code == 200
+    w.close()
+
+
+def test_service_business_events_land_in_logs(tmp_path, tmp_cfg, small_pdf):
+    """NFR-19 内置执行的另一半：事件除入库外必须进服务日志，且不含正文（NFR-20）。"""
+    from doc2md import auth
+    app, client, root = _svc(tmp_path, tmp_cfg)
+    st = app.config["doc2md"]["store"]
+    editor = auth.issue(st, "editor", "log")
+    h = {"X-Doc2md-Token": editor}
+    doc = client.post("/jobs", json={"path": str(small_pdf)}, headers=h) \
+                 .get_json()["jobs"][0]["doc_id"]
+    bid = client.get(f"/docs/{doc}", headers=h).get_json()["blocks"][0]["id"]
+    secret = "本条款涉及例外情况" * 12
+    client.patch(f"/docs/{doc}/blocks/{bid}",
+                 json={"text": secret, "base_revision": 1}, headers=h)
+    app.config["doc2md"]["writer"].close()
+    dumped = (root / "logs" / "app.jsonl").read_text(encoding="utf-8")
+    codes = [json.loads(l)["code"] for l in dumped.splitlines()]
+    assert "job_done" in codes and "text_edited" in codes
+    assert "本条款" not in dumped, "NFR-20：正文片段进了服务日志"
+
+
+def test_service_start_sweeps_work_tmp(tmp_path, tmp_cfg):
+    """§4.6：服务启动时清理 work/tmp 残留（此前只有 cron 做，服务面从未执行）。"""
+    tmp = Path(tmp_cfg["paths"]["tmp"])
+    (tmp / "stale").mkdir(parents=True)
+    (tmp / "stale" / "x.bin").write_bytes(b"old")
+    (tmp / "leftover.tmp").write_bytes(b"old")
+    app, _, _ = _svc(tmp_path, tmp_cfg)
+    assert not tmp.exists() or list(tmp.iterdir()) == [], "work/tmp 残留未被启动清理"
+    app.config["doc2md"]["writer"].close()
+
+
+def test_cron_and_service_do_not_share_one_log_file(tmp_path, tmp_cfg, cfg):
+    """CH-444：serve 与 cron 分离进程，各自重命名轮转同名 app.jsonl 会互相踩。"""
+    from doc2md import cron
+    app, _, root = _svc(tmp_path, tmp_cfg)
+    app.config["doc2md"]["writer"].close()
+    app_file = root / "logs" / "app.jsonl"
+    before = app_file.read_bytes()
+    assert before, "服务日志应已存在"
+    rep = cron.run(tmp_cfg, root=root, mode="daily")
+    assert rep.ok, rep.steps
+    assert app_file.read_bytes() == before, "cron 动了服务的活动日志"
+    assert (root / "logs" / "cron.jsonl").is_file(), "cron 应写自己的日志文件"
+
+
+def test_service_honours_rotate_config(tmp_path, cfg):
+    """写入器阈值来自 [logs]（服务侧同样生效，不只是 cron 侧）。"""
+    import copy
+    c = copy.deepcopy(cfg)
+    c["paths"] = dict(cfg.get("paths", {}))
+    c["paths"].update({"root": str(tmp_path / "work"), "out": str(tmp_path / "work/out"),
+                       "reports": str(tmp_path / "work/reports"),
+                       "logs": str(tmp_path / "work/logs"),
+                       "tmp": str(tmp_path / "work/tmp")})
+    c["logs"] = {"rotate_mb": 0.001, "rotate_keep": 2}
+    app, _, _ = _svc(tmp_path, c)
+    w = app.config["doc2md"]["writer"]
+    assert w.rotate_keep == 2 and w.rotate_bytes < 4096
+    w.close()
 
 
 def test_log_rotation_uses_inmemory_counter(tmp_path):

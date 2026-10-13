@@ -433,6 +433,7 @@ def test_dod11_drill_end_to_end(tmp_path, cfg, small_pdf, monkeypatch):
     for p in snaps + encs:
         os.utime(p, (old, old))
     assert len(plan.rotate()) == len(snaps) + len(encs)
+    app.config["doc2md"]["writer"].close()
     st.close()
 
 

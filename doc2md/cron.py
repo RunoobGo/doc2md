@@ -37,6 +37,20 @@ class CronReport:
                            "steps": self.steps}, ensure_ascii=False, indent=2)
 
 
+def sweep_tmp(cfg: dict, root: Path) -> int:
+    """清理 work/tmp 残留（§4.6：服务启动与 cron --daily 共用同一路径口径）。"""
+    tmp = config.path_setting(cfg, "paths.tmp", root, str(root / "tmp"))
+    cleaned = 0
+    if tmp.exists():
+        for p in tmp.iterdir():
+            try:
+                shutil.rmtree(p) if p.is_dir() else p.unlink()
+                cleaned += 1
+            except OSError:
+                pass
+    return cleaned
+
+
 def run(cfg: dict | None = None, root: Path | None = None, mode: str = "daily",
         passphrase_env: str = "DOC2MD_BACKUP_PASSPHRASE",
         with_backup: bool = True) -> CronReport:
@@ -46,7 +60,9 @@ def run(cfg: dict | None = None, root: Path | None = None, mode: str = "daily",
 
     store = Store(root / "state.sqlite")
     logs = config.path_setting(cfg, "paths.logs", root, str(root / "logs"))
-    writer = RotatingJsonlWriter(logs, stem="app",
+    # CH-444：cron 与 serve 是两个进程，各自轮转同名 app.jsonl 会互相踩（重命名式
+    # 轮转会让对端继续写进已轮出的文件）。serve 拥有 app.jsonl，cron 只写 cron.jsonl。
+    writer = RotatingJsonlWriter(logs, stem="cron",
                                  rotate_mb=float(config.get(cfg, "logs.rotate_mb", 50)),
                                  rotate_keep=int(config.get(cfg, "logs.rotate_keep", 5)))
 
@@ -88,16 +104,8 @@ def run(cfg: dict | None = None, root: Path | None = None, mode: str = "daily",
         removed = plan.rotate()
         rep.add("rotation", removed=[str(p) for p in removed])
 
-    # 4) tmp 清理（服务启动同样执行一次）
-    tmp = config.path_setting(cfg, "paths.tmp", root, str(root / "tmp"))
-    cleaned = 0
-    if tmp.exists():
-        for p in tmp.iterdir():
-            try:
-                shutil.rmtree(p) if p.is_dir() else p.unlink()
-                cleaned += 1
-            except OSError:
-                pass
+    # 4) tmp 清理（服务启动同样执行一次，见 api.create_app）
+    cleaned = sweep_tmp(cfg, root)
     rep.add("tmp_clean", removed=cleaned)
 
     # 5) 日志轮转检查

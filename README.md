@@ -72,10 +72,25 @@ launchctl list | grep doc2md          # 校验（R6）：应列出两个标签
 `--daily` = 日报 → 本地快照 → tmp 清理 → 日志轮转检查；`--weekly` = `--daily` 超集 + 外置加密增量。
 口令不要写进 plist；用 `launchctl setenv DOC2MD_BACKUP_PASSPHRASE …` 或 Keychain 包装脚本注入。
 
+## 日志（NFR-19 / CH-444）
+
+轮转由**服务自身**执行，不依赖 newsyslog/cron：`doc2md serve` 启动即打开 `work/logs/app.jsonl`，
+按 `[logs].rotate_mb`（默认 50MB）或跨 UTC 日滚动到 `app.jsonl.1 … .{rotate_keep}`，
+轮转事件记于新文件首行 `{"code":"E_LOG_ROTATE", …}`；服务启动同时清理 `work/tmp/` 残留。
+`job_done` / `text_edited` / `settings_updated` / `system_reload` 除入 events 表外同步落该日志，
+正文类字段一律以 sha256 指纹写入（NFR-20）。
+
+`doc2md cron` 是与 serve 分离的进程，各写自己的 `work/logs/cron.jsonl`（同阈值同轮转器），
+不与服务的活动文件互踩。
+
 ## 验收与测试
 
+§5.1 的 6 条 merge-gate 已进 CI（`.github/workflows/ci.yml`，CH-446）：`merge-gate` job 跑
+`pytest -m gate`（Python 3.11/3.12/3.13 矩阵，失败阻断合并），`full-suite` job 依赖它跑全量 +
+黄金样本可复现性 + `doc2md doctor`。
+
 ```bash
-pytest -m gate            # §5.1 六条 merge-gate（红线，全绿方可合并；共 35 项，≈2 分钟）
+pytest -m gate            # §5.1 六条 merge-gate（红线，全绿方可合并；共 40 项，≈1.5 分钟）
 pytest tests/             # 全量（含 M0/M2/M3/M4M6/M5/M6c/M8/M9a/DoD）
 python3 tests/make_golden.py            # 重建黄金样本（输出目录随脚本位置，--golden 可覆盖）
 python3 tests/make_golden.py --force    # 强制重生成
@@ -84,8 +99,10 @@ python3 tests/make_golden.py --force    # 强制重生成
 黄金样本集逐字节可复现（CH-442）：同一脚本跑两遍产物 sha256 全表一致，`MANIFEST.json`
 的哈希绑定可复核。分发包**不含** `tests/golden/bigfile.bin`（120MB，CH-443 已把
 「大文件拷贝中途不入队」的判定搬进 `tests/test_m3_bigcopy.py`，该资产为可选项，
-需要时由生成器现补）；`dirs/symlink_loop/A↔B` 为**相对**悬空链接，换目录解包后仍然有效
-（须以保留符号链接的方式解包，如 `unzip -y` 或 `tar`）。
+需要时由生成器现补）；`dirs/symlink_loop/A↔B` 为**相对**悬空链接，换目录解包后仍然有效。
+解包口径（实测）：`tar` 与 Info-ZIP `unzip`（**默认即可**，按 unix mode `120000` 还原软链）
+都保留符号链接；`unzip -y` 在 Info-ZIP 6.00 上不是合法选项（直接吐 usage 并退出码 10），
+`python -m zipfile -e` 会把链接**降级成普通文件**（防护用例随即失真）——两者都不要用。
 
 六条门禁（§5.1）：`shard_two_phase`、`malicious_filenames`、`injection_resistance`、
 `edit_optimistic_lock`、`delete_cascade`、`log_rotation`；
@@ -93,5 +110,5 @@ python3 tests/make_golden.py --force    # 强制重生成
 
 ## 已知实现偏差登记
 
-方案执行期间发现的缺陷与更优做法按 §8.2 变更登记流逐条登记，编号 CH-422 … CH-443，
+方案执行期间发现的缺陷与更优做法按 §8.2 变更登记流逐条登记，编号 CH-422 … CH-446，
 正文见 `docs/plan-delta-v1.1.md`（附录 H）。

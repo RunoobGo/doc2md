@@ -1,7 +1,7 @@
 # Doc2md 方案执行增补登记（方案 v1.1 · 附录 H）
 
 对应《Doc2md V1.0（可执行开发方案）》§8.2 变更登记流：**任何契约变更必须走 CH 编号登记**。
-本文件登记 v2.4 开发期（实现 + 实测验收）新发现的缺陷与更优做法，编号 CH-422 … CH-443
+本文件登记 v2.4 开发期（实现 + 实测验收）新发现的缺陷与更优做法，编号 CH-422 … CH-446
 （CH-401 … CH-421 已被 v2.4 需求/ADR 占用，见方案第一、二章；本登记从 CH-422 起续号）。
 
 每条给出：动因（实测问题 P-xx 口径）、落点（代码/测试）、证据（实测数字）、是否触及对外契约。
@@ -34,6 +34,9 @@
 | CH-441 | 缺陷 | `pyproject` 依赖清单与实装导入不符（虚声明 pypdf/Jinja2/PyYAML/watchdog、漏声明 Flask），`doctor` 又按另一套清单自检 | `pyproject.toml` `cli.py: DEPENDENCY_MODULES` | 安装/运维面 |
 | CH-442 | 缺陷 | 黄金样本集自身不可逐字节复现（reportlab 写 `/CreationDate`、docx 写 zip mtime 与 core 日期），且生成器写死绝对路径 + 循环链接用绝对目标 | `tests/make_golden.py` | 资产可信度 |
 | CH-443 | 缺陷 | 「300MB 拷贝中途不入队」这条 M3 验收无测试消费，120MB `bigfile.bin` 成了纯占位资产 | `tests/test_m3_bigcopy.py` | 验收覆盖 |
+| CH-444 | 缺陷 | NFR-19「轮转由服务内置执行」+ §4.6「服务启动清理 work/tmp」在 `serve` 面从未落地（只有 cron 做），`log_rotation` 只单测写入器 → 服务面伪覆盖；修时又暴露 serve/cron 双进程同轮 `app.jsonl` 互踩 | `api.py` `cron.py: sweep_tmp` `tests/test_v24_gates.py` | 运维契约（NFR-19） |
+| CH-445 | 缺陷 | README 解包口径写错：`unzip -y` 在 Info-ZIP 6.00 非法（吐 usage、退出码 10），`python -m zipfile -e` 把软链降级成普通文件（M3 循环防护静默失真） | `README.md` 测试节 | 文档/分发口径 |
+| CH-446 | 缺陷 | O12「6 条增量回归断言进 CI」落空 —— 仓库无任何 CI 配置，红线只靠人工执行 | `.github/workflows/ci.yml` | 交付流程 |
 
 ---
 
@@ -338,6 +341,73 @@
   `test_large_copy_via_poll_all` / `test_golden_bigfile_is_optional_and_regenerable` /
   `test_bigfile_is_not_a_mandatory_fixture`。
 
+### CH-444 NFR-19 的「服务内置执行」从未在服务面落地（附双进程轮转互踩）
+
+- **动因**：NFR-19 字面是「轮转由**服务内置**执行（禁止依赖 newsyslog/cron）」，§4.6 另加一句
+  「**服务启动时**清理 `work/tmp/` 残留」。核对 `HEAD:doc2md/api.py`：全文件 `writer` 出现 0 次、
+  `paths.tmp` 出现 0 次 —— `create_app()` 既不持有 `RotatingJsonlWriter`，也不扫 tmp；
+  写入器只在 `cron.run()` 里创建，而 cron 按 ADR-30 是与 serve **分离的进程**。
+  即：真实长跑的服务从不写 `work/logs/*.jsonl`，50MB/跨日轮转与启动清扫都只在 `doc2md cron` 跑时发生。
+  §5.1 的 `log_rotation` 门禁当时只有一条**写入器单元测试**（自己 `new` 一个 writer、自己调小阈值），
+  从未在任何服务实例上验证「注入 >50MB → 自动轮转且服务不重启」这条红线，属 CH-435/CH-443 同类
+  「资产/断言存在、运行面无人消费」的伪覆盖。
+- **落码**：`api.create_app()` 依 `[paths].logs` + `[logs].rotate_mb/keep` 建写入器存入
+  `app.config["doc2md"]["writer"]`，启动即落一条 `SERVICE_START`；`_emit()` 增加可选 `writer`
+  入参，`job_done` / `text_edited` / `settings_updated` / `system_reload` 四条事件除入库外
+  同步进内置日志（NFR-20 由写入器自身 scrub 保证）；`cron.py` 抽出 `sweep_tmp(cfg, root)`，
+  serve 启动与 `cron --daily` 共用同一路径口径（CH-432 的 `path_setting`）。
+- **连带缺陷（同条修复）**：serve 与 cron 都用 `stem="app"` 时，两进程各自对 `app.jsonl`
+  做**重命名式**轮转 —— 一方轮转后，另一方仍持旧 inode 继续写，内容落进已轮出的 `.1`，
+  `keep` 份数与「当前活动文件」口径双双失真。改为 serve 拥有 `app.jsonl`、cron 写自己的
+  `cron.jsonl`（同目录、同阈值、同轮转器），二者互不重命名对方的活动文件。
+- **测试**（`tests/test_v24_gates.py` 新增 5 项，§5.1 第 6 条断言由 1 条单元测试扩为 7 条）：
+  `test_service_rotates_its_own_logs_without_restart`（真起服务、调小阈值写 80 条 → 同实例
+  出现 `logs/app.jsonl.*` 且轮转后 `/jobs` 仍 202、`/healthz` 仍 200 —— 对应「服务不重启」字面）、
+  `test_service_business_events_land_in_logs`（`job_done`/`text_edited` 入日志且不含正文）、
+  `test_service_start_sweeps_work_tmp`、`test_cron_and_service_do_not_share_one_log_file`
+  （跑 `cron --daily` 后服务 `app.jsonl` 字节不变、`cron.jsonl` 另立）、
+  `test_service_honours_rotate_config`；原有 `test_log_rotation` /
+  `test_log_rotation_uses_inmemory_counter` / `test_logs_contain_no_document_text` 三条保留。
+- **实测**：`pytest -m gate` → **40 passed**（原 35）95.7s；全量 `pytest` →
+  **117 passed, 1 skipped** in 136.1s，EXIT=0。
+- **真进程复核**（不止 Flask test client）：空 root 起 `doc2md serve`（`[logs].rotate_mb = 0.0002`），
+  启动即 `work/logs/app.jsonl` 首行
+  `{"code":"SERVICE_START","root":"work","tmp_cleaned":1,"rotate_mb":0.0002,"keep":3}`，
+  预置的 `work/tmp/loose.bin` 被清扫、`work/` 实测 `700`；同一进程连打 3 次 `POST /jobs`（真 PDF、
+  真 60 块）后目录出现 `app.jsonl` + `app.jsonl.1`，轮转文件首行 `E_LOG_ROTATE`，
+  服务不重启继续接活；随后**独立进程** `doc2md cron --daily` 跑通，`app.jsonl*` md5 逐一未变，
+  cron 自己落 `cron.jsonl` —— CH-444 的双进程互踩面直接排除。
+
+### CH-445 README 解包口径错误：`unzip -y` 不存在、`python -m zipfile` 会降级软链
+
+- **动因**：CH-442 把 `symlink_loop/A↔B` 改成相对悬空链接后，README 写了
+  「须以保留符号链接的方式解包，如 `unzip -y` 或 `tar`」。实测两条都不成立：
+  ① Info-ZIP `unzip 6.00`（Linux 发行版常见版本）**没有 `-y` 这个 modifier**，
+  `unzip -q -y l.zip -d out` 直接打印 usage 并**退出码 10**，照 README 操作的人解不出任何东西；
+  ② `python -m zipfile -e` 不识别 unix mode `120000`，把 A/B 还原成**内容为 "B"/"A" 的普通文件**，
+  于是 `test_shipped_symlink_loop_is_relative` 的 `is_symlink()` 断言失败、
+  M3 的循环目录防护在解包机上静默失去被测对象（与 CH-442 记录的「绝对目标 → 断链退化」同一失效形态）。
+- **落码**：README 改为实测口径 —— `tar` 与 **默认参数**的 Info-ZIP `unzip`（按 mode `120000`
+  还原软链）即可；明确点名 `unzip -y` 与 `python -m zipfile -e` **不要用**及各自后果。
+- **证据**（同一 zip，条目 mode `0o120777`）：`unzip -q l.zip -d out3` → `A -> symlink_loop/B`、
+  `B -> symlink_loop/A` 完好；`unzip -q -y ...` → usage + rc=10；
+  `python -m zipfile -e l.zip out4` → `-rw-r--r-- A`（14 字节普通文件）。
+
+### CH-446 O12「6 条增量回归断言进 CI」落空：仓库无 CI 配置
+
+- **动因**：方案第九章 O12 与 §5.3 明确要求 6 条断言进 CI 作 merge-gate 红线，
+  但交付时仓库 `.github/` 不存在（`ls .github` → No such file or directory），
+  门禁只在开发机 `pytest -m gate` 手工跑过 —— 一条没有强制执行点的「红线」等价于没有红线。
+- **落码**：`.github/workflows/ci.yml` 分两层：`merge-gate` job 跑 `pytest -m gate`
+  （python 3.11 / 3.12 / 3.13 矩阵，`requires-python = ">=3.11"` 的边界与当前稳定版都覆盖），
+  失败即阻断；`full-suite` job 依赖前者，跑全量 + `test_golden_repro.py`（CH-442 可复现性）
+  + `doc2md doctor`（CH-441 依赖单一口径）。
+- **口径**：CI 只消费既有 pytest 标记（`-m gate`），不新增测试脚本或第二套断言入口，
+  避免「本地绿、CI 定义另一条红线」的漂移。
+- **未验证项（诚实标注）**：本沙箱无 GitHub Actions 运行器，workflow 只在本地逐条
+  复现命令（`pip install -e ".[dev]"` → `pytest -m gate` → `doc2md doctor`）验证可执行，
+  **首次远端运行结果需回来看**；矩阵 3.11/3.13 同理为按 `requires-python` 推导，非实测。
+
 ---
 
 ## H.3 实现偏差登记（非缺陷，属落地口径）
@@ -349,7 +419,7 @@
 | D-3 | `reindex` 事务边界 | 索引刷新必须在 `patch_block` 的 `store.tx()` **之外**（`reindex` 自带 `BEGIN IMMEDIATE`，嵌套即 `OperationalError`）。方案 B-13 伪码未标注，已在 `edits.py:54` 注释固化。 |
 | D-4 | 回滚 revision 取值 | 「回到 revision N 的内容」优先取 `from_revision==N` 那次的 `before`，缺失再退 `to_revision==N` 的 `after`；审计链首（初始态）与 `revision=1` 无审计时走同一回退路径。 |
 | D-5 | `DB_VERSION` 命名 | state.sqlite 结构版本从 `SCHEMA_VERSION` 改名 `DB_VERSION`，避免与 IR `SCHEMA_VERSION=14` 同词不同义（迁移判定曾读错对象）。 |
-| D-6 | B-14 慢测处置 | 门禁全量（35 项，`pytest -m gate`）≈2 分钟；大样本 fixture 以 session 作用域共享（single/two_phase 各转换一次）。原 difflib 直译口径在本机不可完成（>300s），按 CH-428/429 替换后方可作为 CI 红线。 |
+| D-6 | B-14 慢测处置 | 门禁全量（35 项 → CH-444 后 40 项，`pytest -m gate`）≈1.5–2 分钟（实测 40 项 95.7s）；大样本 fixture 以 session 作用域共享（single/two_phase 各转换一次）。原 difflib 直译口径在本机不可完成（>300s），按 CH-428/429 替换后方可作为 CI 红线。 |
 | D-7 | 缺 `confirm=true` 的状态码 | 实现一度自造 `E4091/409`。方案未新增该码（§1.3 错误码段位冻结、v2.4 仅增补 E4133/E4251 语义），且**附录 E 第 10 项字面要求「缺 `confirm=true` 得 400」**。已回到 `E4001/400` + `detail.requires="confirm=true"`，并删除 `E4091` 类（登记为 CH-439）。 |
 
 ---
@@ -364,7 +434,7 @@
 | `edit_optimistic_lock` | 双写：200 / **425 E4251**（`current_revision=2`）、正文未被覆盖、审计 `before` 与 revision 对应、缺 `base_revision` → 400 | 成立 |
 | `delete_cascade` | 400 + E4001（缺 confirm，附录 E 字面口径，见 CH-439）→ 200 → GET 404；搜索 0 残留（CH-435 后该断言才是**真判定**）；留痕无正文字段；`cascade.files` 与产物实际清零一致（CH-440） | 成立 |
 | `delete_fail_closed` | monkeypatch `Path.unlink` 造故障 → 500/E5031（`detail.failed=1`）+ 库行保留 + 残文件仍在 + `deletions` 无记录；撤销后重试 → 文件与行同时清零 | 成立（CH-440） |
-| `log_rotation` | 阈值轮转 + `app.jsonl.1..5` + 首行 `E_LOG_ROTATE`；内存字节计数（stat 口径实测放大 4 倍） | 成立 |
+| `log_rotation` | **服务面**（CH-444 后）：真起 `create_app` → 启动落 `SERVICE_START` + 清扫 `work/tmp`；同实例内写满阈值即产 `logs/app.jsonl.1..5`（首行 `E_LOG_ROTATE`），轮转后 `/jobs` 仍 202、`/healthz` 仍 200（「服务不重启」字面成立）；`job_done`/`text_edited` 入日志且无正文（NFR-20）；`cron --daily` 与服务各写 `cron.jsonl`/`app.jsonl` 互不重命名 | 成立（CH-444） |
 | `watch_stability`（M3） | 48MB 真写盘 + 注入时钟：增长期入队 0 次；静默满 5s 恰好入队 1 次（`poll_all` 同断言，见 CH-443） | 成立 |
 | 资产可复现性 | 两次独立生成 `tests/golden` → 5135 个文件 sha256 全表一致；MANIFEST 逐条复核通过（见 CH-442） | 成立 |
 | 装机面 | 空 venv `pip install -e ".[dev]"` → `doctor` 全 ok、`serve` 起 `/healthz` 200、全量测试 EXIT=0（见 CH-441） | 成立 |

@@ -12,9 +12,11 @@ import json
 from pathlib import Path
 
 from . import auth, config
+from .cron import sweep_tmp
 from .edits import patch_block, rollback
 from .errors import (ApiError, E4001_BadRequest, E4031_Forbidden, E4041_NotFound,
                      E4133_DirTooWide, Doc2mdError)
+from .ops.logging import RotatingJsonlWriter
 from .pipeline.convert import convert
 from .scheduler import Scheduler
 from .security.dirguard import WalkLimits, guard_walk
@@ -35,11 +37,26 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
         _deep(cfg, json.loads(override.read_text(encoding="utf-8")))
     store = Store(root / "state.sqlite")
     sched = Scheduler(store)
+    # NFR-19：轮转由服务内置执行（禁止依赖 newsyslog/cron）——服务自己持有写入器；
+    # §4.6 同时要求「服务启动时清理 work/tmp 残留」，与 cron --daily 共用 sweep_tmp。
+    logs = config.path_setting(cfg, "paths.logs", root, str(root / "logs"))
+    writer = RotatingJsonlWriter(
+        logs, stem="app",
+        rotate_mb=float(config.get(cfg, "logs.rotate_mb", 50)),
+        rotate_keep=int(config.get(cfg, "logs.rotate_keep", 5)))
+    tmp_cleaned = sweep_tmp(cfg, root)
+    writer.write({"code": "SERVICE_START", "root": str(root), "tmp_cleaned": tmp_cleaned,
+                  "rotate_mb": writer.rotate_mb, "keep": writer.rotate_keep})
+    writer.flush()
     app = Flask("doc2md")
-    app.config["doc2md"] = {"cfg": cfg, "store": store, "root": root, "sched": sched}
+    app.config["doc2md"] = {"cfg": cfg, "store": store, "root": root, "sched": sched,
+                            "writer": writer}
 
     def cur() -> dict:
         return app.config["doc2md"]["cfg"]
+
+    def logw() -> RotatingJsonlWriter:
+        return app.config["doc2md"]["writer"]
 
     def tok() -> str | None:
         return request.headers.get("X-Doc2md-Token") or (
@@ -105,7 +122,7 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
             save_ir(store, res.ir)
             j = sched.submit(res.doc_id, res.source_key, idem_key=idem)
             sched.mark(j.job_id, "done")
-            _emit(store, "job_done", res.doc_id, j.job_id, {"blocks": len(res.ir.blocks)})
+            _emit(store, "job_done", res.doc_id, j.job_id, {"blocks": len(res.ir.blocks)}, logw())
             out.append({"file": f.name, "job_id": j.job_id, "doc_id": res.doc_id,
                         "attached": j.attached, "idempotency_hit": j.idem_hit,
                         "sharded": res.ir.sharded, "shard_count": res.ir.shard_count})
@@ -139,7 +156,7 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
                           require_base_revision=bool(
                               config.get(cur(), "api.base_revision_required", True)))
         _emit(store, "text_edited", doc_id, None, {"block_id": block_id,
-                                                   "revision": res["revision"]})
+                                                   "revision": res["revision"]}, logw())
         return jsonify(res)
 
     @app.post("/docs/<doc_id>/blocks/<block_id>/rollback")
@@ -238,14 +255,14 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
         override = root / "settings_override.json"
         override.write_text(json.dumps(b, ensure_ascii=False, indent=2), encoding="utf-8")
         override.chmod(0o600)
-        _emit(store, "settings_updated", None, None, {"keys": sorted(b.keys())})
+        _emit(store, "settings_updated", None, None, {"keys": sorted(b.keys())}, logw())
         return jsonify({"updated": sorted(b.keys())})
 
     @app.post("/system/reload")
     def reload_():
         need("system_reload")
         app.config["doc2md"]["cfg"] = config.load()
-        _emit(store, "system_reload", None, None, {})
+        _emit(store, "system_reload", None, None, {}, logw())
         return jsonify({"reloaded": True, "ts": now_iso()})
 
     @app.post("/tokens")
@@ -284,13 +301,19 @@ def _deep(dst: dict, src: dict) -> dict:
 
 
 def _emit(store: Store, code: str, doc_id: str | None, job_id: str | None,
-          payload: dict) -> None:
-    """事件入库：payload 不得含正文片段（NFR-20）。"""
+          payload: dict, writer: RotatingJsonlWriter | None = None) -> None:
+    """事件入库 + 同记录落内置日志（NFR-19：轮转由服务自身执行，不靠 newsyslog/cron）。
+
+    payload 不得含正文片段（NFR-20）：入库走 `_scrub`，写日志走写入器自身的 scrub。
+    """
     with store.tx() as tx:
         tx.execute("INSERT INTO events(ts, code, doc_id, job_id, payload_json)"
                    " VALUES (?,?,?,?,?)",
                    (now_iso(), code, doc_id, job_id,
                     json.dumps(_scrub(payload), ensure_ascii=False)))
+    if writer is not None:
+        writer.write({"code": code, "doc_id": doc_id, "job_id": job_id, **payload})
+        writer.flush()
 
 
 def _scrub(d: dict) -> dict:
