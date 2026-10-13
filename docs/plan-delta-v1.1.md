@@ -405,8 +405,16 @@
 - **口径**：CI 只消费既有 pytest 标记（`-m gate`），不新增测试脚本或第二套断言入口，
   避免「本地绿、CI 定义另一条红线」的漂移。
 - **未验证项（诚实标注）**：本沙箱无 GitHub Actions 运行器，workflow 只在本地逐条
-  复现命令（`pip install -e ".[dev]"` → `pytest -m gate` → `doc2md doctor`）验证可执行，
+  复现命令（干净 venv：`pip install -e ".[dev]"` → `doc2md doctor` 全 ok →
+  `pytest -m gate` **40 passed** → `tests/test_golden_repro.py` 7 passed → 全量
+  **117 passed, 1 skipped** EXIT=0），
   **首次远端运行结果需回来看**；矩阵 3.11/3.13 同理为按 `requires-python` 推导，非实测。
+- **推送阻塞（登记待办）**：含 `.github/workflows/*` 的提交被 GitHub 直接拒绝 ——
+  `remote rejected: refusing to allow a Personal Access Token to create or update workflow
+  .github/workflows/ci.yml without `workflow` scope`。fine-grained PAT 需在
+  「Repo permissions → **Workflows**: read and write」补权限（Actions 只读用于本地看运行结果）。
+  故本轮把代码/文档/测试与 workflow 拆成两个提交，前者已推 `dc15a26`，
+  CI 配置留在本地待令牌补齐后单独推送。
 
 ---
 

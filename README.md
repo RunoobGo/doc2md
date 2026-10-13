@@ -85,9 +85,11 @@ launchctl list | grep doc2md          # 校验（R6）：应列出两个标签
 
 ## 验收与测试
 
-§5.1 的 6 条 merge-gate 已进 CI（`.github/workflows/ci.yml`，CH-446）：`merge-gate` job 跑
+§5.1 的 6 条 merge-gate 的 CI 定义见 `.github/workflows/ci.yml`（CH-446）：`merge-gate` job 跑
 `pytest -m gate`（Python 3.11/3.12/3.13 矩阵，失败阻断合并），`full-suite` job 依赖它跑全量 +
 黄金样本可复现性 + `doc2md doctor`。
+> 现状：workflow 文件尚未进远端（令牌缺 `Workflows` 权限，GitHub 拒推 `.github/workflows/*`，
+> 见附录 H CH-446）。补权限后推送即为强制红线；在此之前门禁仍需人工 `pytest -m gate`。
 
 ```bash
 pytest -m gate            # §5.1 六条 merge-gate（红线，全绿方可合并；共 40 项，≈1.5 分钟）
