@@ -109,15 +109,16 @@ rename 轮转只能有一个属主，三类进程三份文件。
 | `docs/plan-delta-v1.1.md` | 已归档存根，指向方案 v2.0（原 v1.0 附录 H 的增量登记已整体迁入 v2.0 第十一/十二章） |
 | `doc2md/ops/backup.md` | 备份介质与恢复演练细则 |
 
-跟踪约定：契约变更、缺陷、更优做法一律按登记流写入方案 v2.0 第十一章（当前编号至 `CH-452`，下一条 `CH-453`），实测数字进第十二章并标注语料与测量方法；规格发生变化时同步主题篇章节与本文相应小节，并递增 `doc2md.PLAN_VERSION`（管线契约变化另递增 `PIPELINE_VERSION`）。
+跟踪约定：契约变更、缺陷、更优做法一律按登记流写入方案 v2.0 第十一章（当前编号至 `CH-453`，下一条 `CH-454`），实测数字进第十二章并标注语料与测量方法；规格发生变化时同步主题篇章节与本文相应小节，并递增 `doc2md.PLAN_VERSION`（管线契约变化另递增 `PIPELINE_VERSION`）。
 
 ## 验收与测试
 
 六条 merge-gate 的 CI 定义见 `.github/workflows/ci.yml`：`merge-gate` job 跑
 `pytest -m gate`（Python 3.11/3.12/3.13 矩阵，失败阻断合并），`full-suite` job 依赖它跑全量 +
 黄金样本可复现性 + `doc2md doctor`。
-> 现状：workflow 文件尚未进远端（令牌缺 `Workflows` 权限，GitHub 拒推 `.github/workflows/*`，
-> 见方案 v2.0 CH-446 与待办 T1）。补权限后推送即为强制红线；在此之前门禁仍需人工 `pytest -m gate`。
+> 现状：workflow 已进远端，每次 push 到 `main` 触发 run（首轮四作业全绿：merge-gate 3.11/3.12/3.13 + full-suite）。
+> 但本仓库是 private + 免费计划，分支保护/规则集 API 返回 403，**无法把 merge-gate 设为必需检查**，
+> 因此「失败不可合并」尚未强制生效（见方案 v2.0 CH-446/CH-453 与待办 T1）。合并前仍需人工 `pytest -m gate` 判绿。
 
 ```bash
 pytest -m gate            # 红线层：六条 merge-gate + 低配机专项（全绿方可合并；共 65 项，72–110s 视机器负载）
