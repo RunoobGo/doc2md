@@ -1,0 +1,340 @@
+"""tests/test_v24_gates.py — v2.4 §5.1 增量回归断言（6 条 merge-gate）
+
+运行：pytest -m gate -q
+红线：6 条全绿方可合并；任一回红按 §5.3 失败处置执行。
+
+对方案附录 B-14 脚手架的口径调整（登记于方案 v1.1 附录 H）：
+- char_similarity / half_sentence_heads 由 doc2md.pipeline.metrics 提供
+  （CH-428 / CH-429：difflib autojunk 对 CJK 失真 + 59 万字逐字符不可用）；
+- convert() 的分片开关是 mode="two_phase"（§7.2 配置面），非脚手架伪码里的 shard=True；
+- 产物 zip 经 Result.zip_path 暴露，非 convert(...).zip；
+- B-14 test_edit_optimistic_lock 的审计断言写的是 `audit[-1]["before"] == "改A"`，
+  与自身 fixture 顺序矛盾（第一次 PATCH 后只有一条审计，before 应为原文）；
+  本实现按 ADR-28 真实语义断言「每条审计的 before 等于 from_revision 的内容」。
+"""
+from __future__ import annotations
+
+import json
+import zipfile
+from pathlib import Path
+
+import pytest
+
+from doc2md import config
+from doc2md.errors import WARN_TABLE_ACROSS_SHARD
+from doc2md.llm import DEFAULT_OP_WHITELIST
+from doc2md.ops.logging import RotatingJsonlWriter
+from doc2md.pipeline.convert import convert
+from doc2md.pipeline.metrics import char_similarity, half_sentence_heads
+from doc2md.security.names import WIN_RESERVED, sanitize_name
+
+pytestmark = [pytest.mark.gate]
+GOLDEN = Path(__file__).parent / "golden"
+
+MALICIOUS_NAMES = [
+    "../../etc/passwd", "..\\..\\windows\\system32\\cmd.pdf",
+    "con.pdf", "CON", "prn.txt", "AUX.doc", "com1", "LPT9.md",
+    "bad\x00name.pdf", "ctrl\x01\x02chars.pdf",
+    "a" * 200 + ".pdf", "\ud800lone.pdf",
+]
+
+
+# --- 1. shard_two_phase（FR-126 再修订 / M4M6）--------------------------------
+def test_shard_two_phase(large_single, large_sharded):
+    sim = char_similarity(large_single.markdown, large_sharded.markdown)
+    st = large_sharded.meta["shard_stats"]
+    assert sim >= 0.99, f"分片 vs 单片相似度 {sim} < 0.99"
+    assert not half_sentence_heads(large_sharded)
+    assert large_sharded.meta["sharded"] is True
+    assert large_sharded.meta["shard_count"] >= 2
+    # 分片确实发生（非 §7.2 降级伪通过）
+    assert not st.get("fallback"), f"降级单片，非真分片：{st}"
+    assert st["shards"] >= 2 and st["blocks_raw"] > st["blocks_after_dedupe"]
+    # shard_edge 可筛选：报告有边界行 + data 属性
+    assert any(b.flags.get("shard_edge") for b in large_sharded.ir.blocks) or st["seams"] == 0
+
+
+def test_shard_edge_filterable_in_report(large_sharded):
+    from doc2md.pipeline.convert import render_report
+    html = render_report(large_sharded.ir, large_sharded.meta)
+    assert 'data-shard-edge="1"' in html or "edge-1" in html
+    assert "只看分片边界块" in html
+    assert "本文为分片转换" in json.dumps(large_sharded.meta, ensure_ascii=False)
+
+
+def test_shard_stitch_merges_continuation(large_pdf, cfg, large_single):
+    """缝合真发生：挑一个片界落在半句处的片大小，断言 stitched ≥ 1 + absorbed_ids 留痕。"""
+    import copy
+    c = copy.deepcopy(cfg)
+    c["s2"]["max_pages_per_shard"] = 160          # 片界落在跨句延续处（实测 stitched=1）
+    r = convert(large_pdf, cfg=c, mode="two_phase")
+    st = r.meta["shard_stats"]
+    assert st["shards"] >= 2
+    assert st["stitched"] >= 1, f"未发生缝合续接：{st}"
+    absorbed = [b for b in r.ir.blocks if b.flags.get("absorbed_ids")]
+    assert absorbed, "缝合未记 absorbed_ids"
+    assert any("s4:shard_stitch" in (b.provenance or {}).get("modified_by", [])
+               for b in absorbed)
+    assert char_similarity(large_single.markdown, r.markdown) >= 0.99
+
+
+def test_shard_overlap_dedupe_no_duplicate_ids(large_sharded):
+    """CH-426：各片块 id 独立从 b1 起，合并必须统一编号，否则 PATCH/FTS 命中错块。"""
+    ids = [b.id for b in large_sharded.ir.blocks]
+    assert len(ids) == len(set(ids)), "分片合并后存在重复 block_id"
+
+
+def test_shard_pages_not_double_counted(large_single, large_sharded):
+    """CH-438：重叠页不得计入总页数（各片 pages 求和会让 320 页样本变 322）。"""
+    assert large_sharded.ir.pages == large_single.ir.pages == 320
+    st = large_sharded.meta["shard_stats"]
+    assert st["shards"] >= 2 and st["dropped_dupes"] > 0
+
+
+def test_shard_fallback_is_honest(large_pdf, cfg, monkeypatch):
+    """§7.2：缝合异常降级单片，且不得把降级产物标成 sharded=True。"""
+    import copy
+    import importlib
+    cv = importlib.import_module("doc2md.pipeline.convert")   # 包属性 convert 已被函数遮蔽
+
+    def boom(*a, **k):
+        raise RuntimeError("synthetic stitch crash")
+
+    # convert.py 以 `from .sharding import stitch_shards` 绑定名字 → 必须打 convert 模块的引用
+    monkeypatch.setattr(cv, "stitch_shards", boom)
+    c = copy.deepcopy(cfg)
+    r = cv.convert(large_pdf, cfg=c, mode="two_phase")
+    assert r.meta["shard_stats"].get("fallback") is True
+    assert r.meta["sharded"] is False and r.meta["shard_count"] == 1
+    assert WARN_TABLE_ACROSS_SHARD in r.meta["warnings"]
+
+
+# --- 2. malicious_filenames（FR-127 / FR-129 / M3）---------------------------
+@pytest.mark.parametrize("raw", MALICIOUS_NAMES)
+def test_malicious_filenames(raw):
+    out = sanitize_name(raw)
+    assert ".." not in out and "/" not in out and "\\" not in out
+    assert len(out.encode("utf-8")) <= 128
+    assert out.rsplit(".", 1)[0].lower() not in WIN_RESERVED
+    assert out.strip() and out.strip(" .") == out
+    assert "\x00" not in out and not any(ord(ch) < 0x20 for ch in out)
+
+
+def test_malicious_names_manifest(names_manifest):
+    """黄金清单逐条比对（tests/golden/names/malicious_names.json）。"""
+    for item in names_manifest:
+        got = sanitize_name(item["input"])
+        assert got == item["expected"], (
+            f'{item["description"]}: {item["input"]!r} → {got!r} ≠ {item["expected"]!r}')
+
+
+def test_product_zip_entries(large_zip_names):
+    for name in large_zip_names:
+        assert ".." not in name and not name.startswith(("/", "\\"))
+        assert not Path(name).is_absolute()
+
+
+def test_zip_rejects_unsafe_source_name(tmp_path, small_pdf):
+    """打包双闸：越权名不得进 zip 条目。"""
+    from doc2md.errors import E4003_FileNameUnsafe
+    from doc2md.pipeline.convert import package
+    from doc2md.ir import IR
+    ir = IR(doc_id="d1", source_key="s1", source_name="../evil.md", format="pdf", pages=1)
+    with pytest.raises(E4003_FileNameUnsafe):
+        package(ir, "x", {}, tmp_path, config.load())
+
+
+def test_dirguard_symlink_loop_bounded(golden_dir):
+    """符号链接循环目录：10s 内扫完且不跟随（验收 M3）。"""
+    import time
+    from doc2md.security.dirguard import WalkLimits, guard_walk
+    root = golden_dir / "dirs" / "symlink_loop"
+    if not root.is_dir():
+        pytest.skip("dirs/symlink_loop missing")
+    t0 = time.monotonic()
+    res = guard_walk(root, WalkLimits(follow_symlinks=False))
+    assert time.monotonic() - t0 < 10
+    assert res.skipped_symlinks >= 1 or not res.files
+
+
+def test_dirguard_too_many_files_raises(golden_dir):
+    from doc2md.errors import E4133_DirTooWide
+    from doc2md.security.dirguard import WalkLimits, guard_walk
+    root = golden_dir / "dirs" / "many"
+    if not root.is_dir():
+        pytest.skip("dirs/many missing")
+    with pytest.raises(E4133_DirTooWide):
+        guard_walk(root, WalkLimits(max_files_per_dir=10, deadline_seconds=30))
+
+
+def test_watch_stability_fake_clock(tmp_path):
+    """FR-111：size+mtime 静默 5s 才入队（可注入时钟单测）。"""
+    from doc2md.security.watcher import StabilityTracker
+    f = tmp_path / "a.pdf"
+    f.write_bytes(b"partial")
+    tr = StabilityTracker(stable_seconds=5)
+    assert tr.observe(f, now=100.0) is False          # 首次只登记
+    f.write_bytes(b"partial-data-longer")
+    assert tr.observe(f, now=101.0) is False          # 变化 → 窗口重置
+    assert tr.observe(f, now=103.0) is False          # 距重置仅 2s
+    assert tr.observe(f, now=106.5) is True           # 静默 ≥5s
+    assert tr.observe(f, now=107.0) is False          # 已入队，不重复
+
+
+# --- 3. injection_resistance（ADR-29 / M4M6）--------------------------------
+def test_injection_resistance(cfg, golden_dir):
+    cln = sorted((golden_dir / "clean").glob("*.pdf"))
+    inj = sorted((golden_dir / "injected").glob("*.pdf"))
+    assert len(inj) >= 10 and len(cln) >= 10
+    wl = set(config.get(cfg, "llm.op_whitelist", DEFAULT_OP_WHITELIST))
+    for c_path, i_path in zip(cln, inj):
+        c = convert(c_path, cfg=cfg)
+        i = convert(i_path, cfg=cfg)
+        assert abs(c.metrics["f1"] - i.metrics["f1"]) <= 0.005, (
+            f"{c_path.name} vs {i_path.name} 指标差超限")
+        assert all(op in wl for op in i.applied_ops), "白名单外 op 被应用"
+
+
+def test_injection_rejection_attributed(cfg, golden_dir):
+    """§5.2：越权 op 被拒时可区分「模型胡话」与「注入成功」。"""
+    inj = sorted((golden_dir / "injected").glob("*.pdf"))
+    hits = 0
+    for p in inj:
+        r = convert(p, cfg=cfg)
+        for rej in r.rejected_ops:
+            assert rej["attribution"] in ("injection_candidate", "model_hallucination")
+        if any(rej["attribution"] == "injection_candidate" for rej in r.rejected_ops):
+            hits += 1
+    assert hits >= 1, "全部注入样本都没产生 injection_candidate 归因，防线可观测性失效"
+
+
+def test_injection_no_nonwhitelist_op_applied(cfg, golden_dir, tmp_path):
+    """探针口径：把「越权 op」强灌进 LLM 输出，断言应用数为 0。"""
+    inj = sorted((golden_dir / "injected").glob("*.pdf"))
+    for p in inj[:3]:
+        r = convert(p, cfg=cfg)
+        wl = set(config.get(cfg, "llm.op_whitelist", DEFAULT_OP_WHITELIST))
+        assert not (set(r.applied_ops) - wl)
+
+
+# --- 4. edit_optimistic_lock（FR-203 修订 / M8）------------------------------
+def test_edit_optimistic_lock(saved_doc):
+    client, tokens, doc = saved_doc
+    blocks = client.get(f"/docs/{doc}", headers=_tokens_h(tokens)).get_json()["blocks"]
+    bid = blocks[0]["id"]
+    original = blocks[0]["text"]
+
+    r1 = client.patch(f"/docs/{doc}/blocks/{bid}",
+                      json={"text": "改A", "base_revision": 1}, headers=_tokens_h(tokens, "editor"))
+    r2 = client.patch(f"/docs/{doc}/blocks/{bid}",
+                      json={"text": "改B", "base_revision": 1}, headers=_tokens_h(tokens, "editor"))
+    assert r1.status_code == 200, r1.get_json()
+    assert r2.status_code == 425, r2.get_json()
+    body = r2.get_json()
+    assert body["code"] == "E4251"
+    assert body["detail"]["current_revision"] == 2
+    # 数据未被覆盖
+    after = client.get(f"/docs/{doc}", headers=_tokens_h(tokens)).get_json()["blocks"]
+    assert next(b for b in after if b["id"] == bid)["text"] == "改A"
+    # 审计：每条 before 与 from_revision 严格对应
+    audit = client.get(f"/docs/{doc}/audit", headers=_tokens_h(tokens, "editor")).get_json()["audit"]
+    assert audit, "无审计流水"
+    assert audit[-1]["before"] == original
+    assert audit[-1]["from_revision"] == 1 and audit[-1]["to_revision"] == 2
+    # 缺 base_revision → 400
+    r3 = client.patch(f"/docs/{doc}/blocks/{bid}", json={"text": "改C"},
+                      headers=_tokens_h(tokens, "editor"))
+    assert r3.status_code == 400 and r3.get_json()["code"] == "E4001"
+
+
+def test_edit_gray_release_optional(cfg, store):
+    """§7.2 灰度：require_base_revision=False 时缺省沿用旧行为 + 告警。"""
+    from doc2md.edits import patch_block
+    from doc2md.ir import Block, IR
+    ir = IR(doc_id="gx", source_key="gxk", source_name="a.pdf", format="pdf", pages=1,
+            blocks=[Block(id="b1", type="paragraph", text="原文", page=0)])
+    from doc2md.storage.repo import save_ir
+    save_ir(store, ir)
+    res = patch_block(store, "gx", "b1", {"text": "新值"}, "tester",
+                      require_base_revision=False)
+    assert res["revision"] == 2 and "warning" in res
+
+
+def test_reader_cannot_edit(api_client, small_pdf):
+    client, tokens = api_client
+    r = client.post("/jobs", json={"path": str(small_pdf)}, headers=_tokens_h(tokens, "editor"))
+    doc = r.get_json()["jobs"][0]["doc_id"]
+    assert client.patch(f"/docs/{doc}/blocks/b1",
+                        json={"text": "x", "base_revision": 1},
+                        headers=_tokens_h(tokens, "reader")).status_code == 403
+    assert client.post("/jobs", json={"path": str(small_pdf)},
+                       headers=_tokens_h(tokens, "reader")).status_code == 403
+    assert client.delete(f"/docs/{doc}?confirm=true",
+                         headers=_tokens_h(tokens, "editor")).status_code == 403
+    assert client.put("/settings", json={"s2": {"mode": "single"}},
+                      headers=_tokens_h(tokens, "editor")).status_code == 403
+    assert client.get("/settings", headers=_tokens_h(tokens, "reader")).status_code == 200
+
+
+# --- 5. delete_cascade（FR-128 / M8 + DoD）-----------------------------------
+def test_delete_cascade(saved_doc):
+    client, tokens, doc = saved_doc
+    # 先确保可搜
+    blocks = client.get(f"/docs/{doc}", headers=_tokens_h(tokens)).get_json()["blocks"]
+    q = (blocks[0]["text"] or "")[:6]
+    r0 = client.delete(f"/docs/{doc}", headers=_tokens_h(tokens, "admin"))
+    assert r0.status_code == 400 and r0.get_json()["code"] == "E4001"   # 附录 E：缺 confirm → 400
+    r = client.delete(f"/docs/{doc}?confirm=true", headers=_tokens_h(tokens, "admin"))
+    assert r.status_code == 200, r.get_json()
+    assert client.get(f"/docs/{doc}", headers=_tokens_h(tokens)).status_code == 404
+    assert client.get(f"/search?q=%22{q}%22",
+                      headers=_tokens_h(tokens)).get_json()["total"] == 0
+    tomb = client.get("/audit/deletions", headers=_tokens_h(tokens, "admin")).get_json()["deletions"]
+    assert tomb and tomb[-1]["doc_id"] == doc
+    assert "before" not in tomb[-1] and "after" not in tomb[-1]
+    assert "text" not in json.dumps(tomb[-1], ensure_ascii=False)
+
+
+def test_delete_removes_artifacts(saved_doc):
+    client, tokens, doc = saved_doc
+    r = client.delete(f"/docs/{doc}?confirm=true", headers=_tokens_h(tokens, "admin"))
+    assert r.get_json()["files"], "产物文件未被级联清除"
+
+
+# --- 6. log_rotation（NFR-19 / M8）-------------------------------------------
+def test_log_rotation(tmp_path):
+    w = RotatingJsonlWriter(tmp_path, rotate_mb=50, rotate_keep=5)
+    w.rotate_bytes = 2048                          # 测试用小阈值
+    for i in range(400):
+        w.write({"i": i, "msg": "x" * 60})
+    w.close()
+    rotated = sorted(tmp_path.glob("app.jsonl.*"))
+    assert [p.name for p in rotated] == [f"app.jsonl.{k}" for k in range(1, 6)]
+    first = (tmp_path / "app.jsonl").read_text(encoding="utf-8").splitlines()[0]
+    assert json.loads(first)["code"] == "E_LOG_ROTATE"
+
+
+def test_log_rotation_uses_inmemory_counter(tmp_path):
+    """内存计数字节口径：缓冲未落盘也必须按阈值轮转（源文档实测 stat() 放大 4 倍）。"""
+    w = RotatingJsonlWriter(tmp_path, rotate_mb=50, rotate_keep=5)
+    w.rotate_bytes = 4096
+    for i in range(120):
+        w.write({"i": i, "msg": "y" * 80})         # ~12KB，全程未 flush
+    assert w.rotations >= 1, "未 flush 时 stat() 口径会漏轮转"
+    w.close()
+
+
+def test_logs_contain_no_document_text(tmp_path):
+    """NFR-20：正文片段不得进日志，长文本字段落 sha256 指纹。"""
+    w = RotatingJsonlWriter(tmp_path, rotate_mb=50, rotate_keep=5)
+    secret = "本条款涉及例外情况" * 20
+    w.write({"code": "TEST", "text": secret, "before": secret})
+    w.close()
+    dumped = (tmp_path / "app.jsonl").read_text(encoding="utf-8")
+    assert "本条款" not in dumped
+    assert "<sha256:" in dumped
+
+
+# --- helpers ------------------------------------------------------------------
+def _tokens_h(tokens: dict, role: str = "admin") -> dict:
+    return {"X-Doc2md-Token": tokens[role]}

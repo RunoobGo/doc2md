@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Doc2md 日任务（附录 C-2 / ADR-30）：00:00 UTC 触发 doc2md cron --daily。
+     安装：cp ops/launchd/md.doc2md.cron.plist ~/Library/LaunchAgents/
+     校验：launchctl list | grep doc2md  （应列出 md.doc2md.cron 与 md.doc2md.cron.weekly）
+     注：ProgramArguments 路径按实际部署前缀改写（方案示例为 /Users/you/doc2md）。 -->
+<plist version="1.0"><dict>
+  <key>Label</key><string>md.doc2md.cron</string>
+  <key>ProgramArguments</key><array>
+    <string>/Users/you/doc2md/env/bin/doc2md</string>
+    <string>cron</string><string>--daily</string></array>
+  <key>StartCalendarInterval</key><dict>
+    <key>Hour</key><integer>0</integer><key>Minute</key><integer>0</integer></dict>
+  <key>EnvironmentVariables</key><dict><key>TZ</key><string>UTC</string></dict>
+  <key>StandardOutPath</key><string>/Users/you/doc2md/work/logs/launchd-daily.out</string>
+  <key>StandardErrorPath</key><string>/Users/you/doc2md/work/logs/launchd-daily.err</string>
+</dict></plist>

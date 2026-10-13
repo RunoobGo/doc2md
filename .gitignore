@@ -1,0 +1,26 @@
+# 运行期产物（work/ 为数据边界，绝不入库）
+work/
+env/
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+
+# 状态库与备份（含正文，NFR-20 数据边界）
+state.sqlite*
+*.sqlite-wal
+*.sqlite-shm
+settings_override.json
+*.enc
+tokenizer.manifest.json
+*.vocab
+vocab.jsonl
+
+# 可选大资产（CH-443：分发包不内置，由 tests/make_golden.py 现补）
+tests/golden/bigfile.bin
+
+# 编辑器 / 系统
+.DS_Store

@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "doc2md"
+version = "2.4.0"
+description = "文本型 PDF / DOCX → Markdown 离线转换管线（Doc2md）"
+requires-python = ">=3.11"
+dependencies = [
+  "pdfplumber>=0.11",
+  "python-docx>=1.1",
+  "cryptography>=42",
+  "Flask>=3",
+]
+
+[project.optional-dependencies]
+# 测试与黄金样本生成（tests/make_golden.py 用 reportlab 造 PDF、pypdf 数页数）
+dev = ["pytest>=8", "reportlab>=4", "pypdf>=4"]
+
+[project.scripts]
+doc2md = "doc2md.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["doc2md*"]
+
+[tool.setuptools.package-data]
+# CH-441：删去不存在的 prompts/*.md  glob（本仓库无该目录，声明只会在打包日志里挂空条目）
+doc2md = ["static/*"]

@@ -1,0 +1,77 @@
+[
+  {
+    "input": "../../etc/passwd",
+    "expected": "passwd",
+    "description": "\u8def\u5f84\u7a7f\u8d8a"
+  },
+  {
+    "input": "C:\\Windows\\System32\\config.pdf",
+    "expected": "config.pdf",
+    "description": "Windows \u8def\u5f84"
+  },
+  {
+    "input": "con.pdf",
+    "expected": "_con.pdf",
+    "description": "Windows \u4fdd\u7559\u540d con"
+  },
+  {
+    "input": "CON",
+    "expected": "_CON",
+    "description": "Windows \u4fdd\u7559\u540d CON"
+  },
+  {
+    "input": "prn.txt",
+    "expected": "_prn.txt",
+    "description": "Windows \u4fdd\u7559\u540d prn"
+  },
+  {
+    "input": "AUX.doc",
+    "expected": "_AUX.doc",
+    "description": "Windows \u4fdd\u7559\u540d AUX"
+  },
+  {
+    "input": "com1",
+    "expected": "_com1",
+    "description": "Windows \u4fdd\u7559\u540d com1"
+  },
+  {
+    "input": "LPT9.md",
+    "expected": "_LPT9.md",
+    "description": "Windows \u4fdd\u7559\u540d LPT9"
+  },
+  {
+    "input": "nul.",
+    "expected": "_nul",
+    "description": "Windows \u4fdd\u7559\u540d nul"
+  },
+  {
+    "input": "bad\u0000name.pdf",
+    "expected": "badname.pdf",
+    "description": "NUL \u5b57\u7b26"
+  },
+  {
+    "input": "ctrl\u0001\u0002chars.pdf",
+    "expected": "ctrl__chars.pdf",
+    "description": "\u63a7\u5236\u5b57\u7b26"
+  },
+  {
+    "input": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.pdf",
+    "expected": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.pdf",
+    "description": "\u8d85\u957f\u6587\u4ef6\u540d"
+  },
+  {
+    "input": "\u5408\u540c A(\u6700\u7ec8\u7248).pdf",
+    "expected": "\u5408\u540c A_\u6700\u7ec8\u7248_.pdf",
+    "description": "CJK + \u7279\u6b8a\u5b57\u7b26"
+  },
+  {
+    "input": "   spaced  .pdf  ",
+    "expected": "spaced  .pdf",
+    "description": "\u9996\u5c3e\u7a7a\u767d"
+  },
+  {
+    "input": ".hidden.pdf",
+    "expected": "hidden.pdf",
+    "description": "\u9690\u85cf\u6587\u4ef6"
+  }
+]

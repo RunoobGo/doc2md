@@ -1,0 +1,57 @@
+# Doc2md 部署样例配置（附录 C-1 全文 + 本仓库实现增量）
+# 复制为项目根 doc2md.toml，或 $DOC2MD_HOME/doc2md.toml。
+# 全部键均有内置默认值（doc2md/config/default_toml.py），本文件只列需要按部署改写的项。
+
+[paths]
+root = "work"                          # 相对路径会随 root 一起迁移（CH-432）；--root 可覆盖
+out = "work/out"
+reports = "work/reports"
+logs = "work/logs"
+tmp = "work/tmp"
+vendor_models = "vendor/models/llm"
+
+[s1_5]
+sample_pages = "auto"                  # even5 = 附录 C-1 原口径；auto 见 CH-424 判定增强
+min_chars_per_page = 120
+reject_on_any_bad_page = true
+page_detail_in_report = true
+
+[s2]
+mode = "auto"                          # auto / single / two_phase（§7.2 灰度开关）
+max_pages_per_shard = 300
+shard_overlap_pages = 2
+dedupe_overlap = true
+
+[s4]
+preserve_marks_strike = false          # CH-417：删除线默认关，开启才输出 ~~
+link_internal = "plain"                # CH-416：PDF goto / DOCX 书签链接降级为普通文本
+
+[watch]
+stable_seconds = 5                     # CH-411：大小 + mtime 连续 5s 无变化才入队
+follow_symlinks = false
+max_depth = 20
+skip_hidden = true
+max_files_per_dir = 5000               # 超限 413 / E4133（CH-410）
+
+[api]
+bind = "127.0.0.1"                     # 离线单机：只回环，不对外
+port = 8090
+token_roles = ["admin", "editor", "reader"]
+revoke_effective_seconds = 5
+base_revision_required = true          # false = 乐观锁灰度 optional 阶段
+
+[logs]
+rotate_mb = 50                         # CH-413：≥50MB 或跨 UTC 日轮转，保留 5 份
+rotate_keep = 5
+
+[ops]
+events_retention_days = 30
+backup_local_dir = "work/reports/backups"
+backup_external_dir = "/Volumes/doc2md-backup"   # 注释掉 = 周报按配置跳过（CH-433）
+backup_external_encrypted = true       # NFR-18：false 会被拒绝执行（PermissionError）
+backup_rotation_days = 14              # FR-128：已删数据 ≤14 天从全部副本轮出
+work_dir_mode = "700"                  # CH-437：work/ 权限由备份路径实际落实
+
+[chunks]
+tokenizer = "gguf-embedded"            # CH-402：vocab 从生产 GGUF 导出
+manifest = "vendor/models/llm/tokenizer.manifest.json"

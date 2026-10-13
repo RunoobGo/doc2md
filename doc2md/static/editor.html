@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Doc2md 审阅编辑器（M9a 最小前端）</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 14px/1.6 system-ui, "PingFang SC", "Microsoft YaHei", sans-serif;
+         margin: 0; padding: 16px; max-width: 960px; }
+  h1 { font-size: 16px; margin: 0 0 12px; }
+  .bar { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+  input, button, select { font: inherit; padding: 4px 8px; }
+  input[type=text] { min-width: 180px; }
+  .blk { border: 1px solid #8884; border-radius: 6px; padding: 8px 10px; margin: 6px 0; }
+  .meta { font-size: 12px; opacity: .75; display: flex; gap: 10px; flex-wrap: wrap; }
+  textarea { width: 100%; box-sizing: border-box; min-height: 54px; font: inherit; }
+  .edge { border-color: #e08a00; }
+  .hit  { background: #ffe9a8; color: #000; }
+  #log { white-space: pre-wrap; font-family: ui-monospace, monospace; font-size: 12px;
+         border-top: 1px dashed #8886; margin-top: 12px; padding-top: 8px; }
+  .warn { color: #c0392b; }
+</style>
+</head>
+<body>
+<h1>Doc2md 审阅编辑器 · M9a（revision 锁定与重取）</h1>
+
+<div class="bar">
+  <label>Token <input type="text" id="tok" size="34" placeholder="doc2md serve token --role editor"></label>
+  <label>doc_id <input type="text" id="doc" size="20"></label>
+  <button id="load">载入</button>
+  <label>搜索 <input type="text" id="q" size="16"></label>
+  <button id="go">检索</button>
+  <label><input type="checkbox" id="onlyEdge">只看分片边界块</label>
+</div>
+
+<div id="blocks"></div>
+<div id="log"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const locked = new Map();          // block_id -> 载入时锁定的 base_revision
+
+function log(msg, bad) {
+  const el = $("log");
+  el.textContent = `[${new Date().toISOString().slice(11,19)}] ${msg}\n` + el.textContent;
+  el.classList.toggle("warn", !!bad);
+}
+
+async function api(path, opt) {
+  const r = await fetch(path, Object.assign({ headers: {
+    "X-Doc2md-Token": $("tok").value.trim(),
+    "Content-Type": "application/json" } }, opt || {}));
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) { const e = new Error(j.message || `${r.status}`); e.body = j; e.status = r.status; throw e; }
+  return j;
+}
+
+async function load() {
+  const d = $("doc").value.trim();
+  if (!d) return log("先填 doc_id", true);
+  const j = await api(`/docs/${d}`);
+  locked.clear();
+  $("blocks").innerHTML = "";
+  j.blocks.forEach(b => {
+    locked.set(b.id, b.revision);
+    const div = document.createElement("div");
+    div.className = "blk" + (b.flags && b.flags.shard_edge ? " edge" : "");
+    div.dataset.bid = b.id;
+    div.innerHTML =
+      `<div class="meta"><b>${b.id}</b><span>${b.type}${b.level ? " h" + b.level : ""}</span>` +
+      `<span>p.${b.page ?? "-"}</span><span>rev ${b.revision}</span>` +
+      (b.flags && b.flags.absorbed_ids && b.flags.absorbed_ids.length
+        ? `<span title="缝合吸收">吸收 ${b.flags.absorbed_ids.join(",")}</span>` : "") +
+      (b.immutable ? "<span>immutable</span>" : "") + "</div>" +
+      `<textarea ${b.immutable ? "disabled" : ""}>${esc(b.text || "")}</textarea>` +
+      `<div class="meta"><button data-act="save">保存</button>` +
+      `<button data-act="refresh">重取</button><button data-act="audit">审计</button></div>`;
+    $("blocks").appendChild(div);
+  });
+  log(`载入 ${j.blocks.length} 块（sharded=${!!j.sharded}，pages=${j.pages}）`);
+}
+
+function esc(s) { return (s || "").replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c])); }
+
+async function save(bid) {
+  const ta = document.querySelector(`[data-bid="${bid}"] textarea`);
+  const base = locked.get(bid);                  // 打开时锁定的 revision（FR-203）
+  try {
+    const r = await api(`/docs/${$("doc").value.trim()}/blocks/${bid}`, {
+      method: "PATCH",
+      body: JSON.stringify({ text: ta.value, base_revision: base })
+    });
+    locked.set(bid, r.revision);
+    log(`${bid} 保存成功 → rev ${r.revision}（搜索索引已同步刷新，CH-418）`);
+    await refetch(bid);
+  } catch (e) {
+    if (e.status === 425) {                      // 冲突 → 重取后再编辑，不覆盖他人改动
+      const cur = e.body.detail && e.body.detail.current_revision;
+      log(`${bid} 冲突 E4251：服务端 rev=${cur}。已重取最新内容，请核对后再保存。`, true);
+      await refetch(bid, cur);
+    } else log(`${bid} 失败：${e.message}`, true);
+  }
+}
+
+async function refetch(bid, rev) {
+  const d = $("doc").value.trim();
+  const j = await api(`/docs/${d}`);
+  const b = j.blocks.find(x => x.id === bid);
+  if (!b) return;
+  if (rev === undefined) rev = b.revision;
+  locked.set(bid, rev);
+  document.querySelector(`[data-bid="${bid}"] textarea`).value = b.text || "";
+  log(`${bid} 已重取（本地锁定 rev=${rev}）`);
+}
+
+async function showAudit(bid) {
+  const j = await api(`/docs/${$("doc").value.trim()}/audit?block_id=${encodeURIComponent(bid)}`);
+  $("log").textContent = j.audit.map(a =>
+    `${a.ts} ${a.actor} rev ${a.from_revision}→${a.to_revision} reason=${a.reason || "-"}` +
+    `\n  before: ${(a.before || "").slice(0, 80)}`).join("\n") + "\n" + $("log").textContent;
+}
+
+async function doSearch() {
+  const q = $("q").value.trim();
+  document.querySelectorAll(".hit").forEach(e => e.classList.remove("hit"));
+  if (!q) return;
+  const j = await api(`/search?q=${encodeURIComponent(q)}`);
+  log(`检索「${q}」→ ${j.total} 命中（mode=${j.mode}）`);
+  (j.hits || []).forEach(h => {
+    const el = document.querySelector(`[data-bid="${h.block_id}"] textarea`);
+    if (el) el.classList.add("hit");
+  });
+}
+
+$("blocks").addEventListener("click", (ev) => {
+  const btn = ev.target.closest("button[data-act]");
+  if (!btn) return;
+  const bid = btn.closest(".blk").dataset.bid;
+  ({ save: () => save(bid), refresh: () => refetch(bid), audit: () => showAudit(bid) })[btn.dataset.act]();
+});
+$("load").onclick = load;
+$("go").onclick = doSearch;
+$("q").addEventListener("keydown", e => { if (e.key === "Enter") doSearch(); });
+$("onlyEdge").addEventListener("change", e => {
+  document.querySelectorAll(".blk").forEach(el => {
+    const isEdge = el.classList.contains("edge");
+    if (e.target.checked && !isEdge) el.style.display = "none";
+    else el.style.display = "";
+  });
+});
+</script>
+</body>
+</html>
