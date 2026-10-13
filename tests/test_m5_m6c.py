@@ -1,7 +1,7 @@
 """tests/test_m5_m6c.py —— M5 渲染规则分级（CH-416/417）+ M6c 并发投递防护（CH-412）。
 
-M5 验收（方案 §4.6）：默认配置下输出不含 `~~`，且不含 `](#` 或 `#page-` 类自造锚点。
-M6c 验收（方案 §4.7）：doc_id 唯一索引 + submit 附着语义单测通过；
+M5 验收（方案 v2.0 4.5）：默认配置下输出不含 `~~`，且不含 `](#` 或 `#page-` 类自造锚点。
+M6c 验收（方案 v2.0 5.4）：doc_id 唯一索引 + submit 附着语义单测通过；
        与 Idempotency-Key 去重构成同一机制的两条路径。
 """
 from __future__ import annotations

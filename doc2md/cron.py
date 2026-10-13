@@ -1,6 +1,6 @@
 """doc2md cron —— 定时任务承载（ADR-30 / CH-414 / P-62）。
 
-执行语义（§3.4）：
+执行语义（方案 v2.0 6.5）：
   --daily  = 日报（NFR-14）→ 本地快照备份（FR-607）→ tmp 清理 → 日志轮转检查
   --weekly = --daily 的超集：先完整执行 --daily（幂等），再增量打包至外置加密卷（NFR-18）
 不装 cron、不在 serve 内起常驻线程；由 launchd StartCalendarInterval 触发。
@@ -49,7 +49,7 @@ def _db_bytes(state: Path) -> int:
 
 
 def sweep_tmp(cfg: dict, root: Path) -> int:
-    """清理 work/tmp 残留（§4.6：服务启动与 cron --daily 共用同一路径口径）。"""
+    """清理 work/tmp 残留（方案 v2.0 6.5：服务启动与 cron --daily 共用同一路径口径）。"""
     tmp = config.path_setting(cfg, "paths.tmp", root, str(root / "tmp"))
     cleaned = 0
     if tmp.exists():

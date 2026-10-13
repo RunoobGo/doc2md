@@ -1,4 +1,4 @@
-"""doc2md CLI —— §4.4 / ADR-30 字面入口（命名纪律：小写 doc2md）。
+"""doc2md CLI —— 方案 v2.0 附录 B / ADR-30 字面入口（命名纪律：小写 doc2md）。
 
     doc2md serve [--host --port --root --config]        # 起 API 服务（不内置线程，ADR-30）
     doc2md serve token [--role admin|editor|reader] [--label] [--revoke TOKEN]
@@ -77,7 +77,7 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--host")
     serve.add_argument("--port", type=int)
     tok = serve.add_subparsers(dest="sub")
-    t = tok.add_parser("token", help="token 管理（API 等价物，§4.4）")
+    t = tok.add_parser("token", help="token 管理（API 等价物，方案 v2.0 附录 C）")
     _add_common(t)
     t.add_argument("--role", choices=("admin", "editor", "reader"), default="admin")
     t.add_argument("--label", default="")
@@ -231,8 +231,8 @@ def cmd_convert(args: argparse.Namespace) -> int:
     if not files:
         print(_jline({"status": "empty", "path": str(src)}), file=sys.stderr)
         return rc
-    # CH-448：目录投递走有界进程池（GIL 下线程池对解析无增益，实测 4 进程 30 文件
-    # 3.8s → 2.1s）；产物与串行逐字节一致（等价性由门禁把住）。`--workers 1` 退回串行。
+    # CH-448：目录投递走有界进程池（GIL 下线程池对解析无增益；实测口径见方案 v2.0 第十二
+    # 章吞吐表）；产物与串行逐字节一致（等价性由门禁把住）。`--workers 1` 退回串行。
     workers = args.workers if args.workers is not None else default_workers(cfg)
     if len(files) > 1 and workers > 1:
         results = run_batch(files, cfg=cfg, mode=args.mode, out_dir=out, workers=workers)

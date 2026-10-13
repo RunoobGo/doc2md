@@ -1,4 +1,4 @@
-"""API —— v2.4 增补与修订（§3.6，锚点 v2.1 §7.2）。
+"""API —— v2.4 增补与修订（方案 v2.0 附录 C；上游锚点 v2.1 §7.2 / v2.4 §3.6）。
 
 新增：DELETE /docs/{id}?confirm=true、DELETE /sources/{key}?confirm=true
 修订：PATCH 必填 base_revision + 425/E4251 + current_revision；
@@ -38,7 +38,7 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
     store = Store(root / "state.sqlite")
     sched = Scheduler(store)
     # NFR-19：轮转由服务内置执行（禁止依赖 newsyslog/cron）——服务自己持有写入器；
-    # §4.6 同时要求「服务启动时清理 work/tmp 残留」，与 cron --daily 共用 sweep_tmp。
+    # 方案 v2.0 6.5 同时要求「服务启动时清理 work/tmp 残留」，与 cron --daily 共用 sweep_tmp。
     logs = config.path_setting(cfg, "paths.logs", root, str(root / "logs"))
     writer = RotatingJsonlWriter(
         logs, stem="app",
@@ -109,7 +109,7 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
 
         # CH-449：[perf].queue_async = true → 只入队、立即 202 返回，由 `doc2md work` 消费。
         # 低配机上「一次丢一个目录」不应把 HTTP 线程占住（也不应同时起步 N 个解析进程）。
-        # 默认 false = 同步转换，既有 §5.1 门禁契约（jobs[].doc_id 立即可用）不变。
+        # 默认 false = 同步转换，既有红线契约（方案 v2.0 5.4：jobs[].doc_id 立即可用）不变。
         if bool(config.get(cur(), "perf.queue_async", False)):
             from .pipeline.s1_parse import sniff
             from .worker import enqueue

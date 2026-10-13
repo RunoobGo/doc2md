@@ -169,7 +169,7 @@ class Store:
                                " ON tasks(status, created_at)")
         tcols = {r["name"] for r in self._conn.execute("PRAGMA table_info(tokens)")}
         if tcols and "role" not in tcols:
-            # §7.2 兼容期：存量 token 默认 admin
+            # 方案 v2.0 8.5 兼容期：存量 token 默认 admin
             self._conn.execute("ALTER TABLE tokens ADD COLUMN role TEXT NOT NULL DEFAULT 'admin'")
         self._migrate_fts()
 
