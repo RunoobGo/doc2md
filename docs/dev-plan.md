@@ -12,7 +12,7 @@
 ## 阅读指南
 
 - **想理解产品与规格**：读第一–九章。叙述顺序为「定位 → 需求 → 架构与代码结构与技术栈 → 管线 → 契约 → 安全运维 → 低配机运行 → 质量验收 → 实施计划」，每一章只依赖前一章已建立的概念。
-- **想找代码在哪里、由谁调用**：读 3.6（代码层结构与依赖纪律），逐模块清单查附录 G。
+- **想找代码在哪里、由谁调用**：读 3.5（模块地图）与 3.6（依赖方向与结构纪律），逐模块的行数、公开符号与引用方查附录 G。
 - **想知道用了什么、没用什么**：读 3.7（技术栈与选型边界），依赖闭包与版本口径同见该节。
 - **想查具体取值**：查附录 A（配置全表）、B（CLI 全表）、C（API 全表）、D（错误码与告警码）、E（数据库结构）、F（门禁断言清单）、G（模块与代码清单）。
 - **想知道为什么某处是这样、改过什么**：查登记篇第十一章（CH-422 … CH-454 逐条登记）与第十二章（实测证据汇总、实现偏差、本文档变更记录）。
@@ -268,7 +268,7 @@ Doc2md 有意保持「一个包、多个入口」，每个入口职责单一，�
 | 加密 | `cryptography` 50.0.1（AESGCM + Scrypt） | — | NFR-18 的容器格式需要 AEAD + KDF；口令只来自环境变量 |
 | 配置 | 标准库 `tomllib`（只读） | — | 写路径不存在 → 部署态配置不会被程序改写（`PUT /settings` 落的是 JSON 覆写层，见 5.7） |
 | 日志 | 自研 `ops/logging.py`（JSONL + rename 轮转） | — | **不使用标准库 `logging`**：需求是「按进程属主、按字节阈值自轮转的结构化 JSONL」，`RotatingFileHandler` 的多进程重命名语义正是历史上互踩的形态（6.5） |
-| 测试 | pytest 9.1.1 + `pytest.ini` 三个 marker | — | `gate` / `milestone` / `slow` 三个 marker。`slow` 声明后零使用；`milestone` 声明的 `M4M6` 也从未出现（实际用的是组合名 `M0+M2`）——声明与使用的漂移没有任何工具会报（D-12） |
+| 测试 | pytest 9.1.1 + `pytest.ini` 三个 marker | — | `gate`（红线）与 `milestone`（任务卡归属）有实际消费；`slow` 声明后零使用，`milestone` 声明里的 `M4M6` 也从未出现（实际用组合名 `M0+M2`），且未开 `--strict-markers`——声明与使用的漂移没有任何工具会报（D-12 / T10） |
 | 打包 | setuptools（`pyproject.toml`），`[project.scripts] doc2md = "doc2md.cli:main"` | — | 与 CI 的 `pip install -e ".[dev]"` 同一口径；不引入 hatch/flit |
 | CI | GitHub Actions（`.github/workflows/ci.yml`） | — | merge-gate 三版本矩阵 + full-suite 依赖层（8.6、12.1） |
 
