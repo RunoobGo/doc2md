@@ -12,6 +12,6 @@
 
 PIPELINE_VERSION = "2.4.0"
 SCHEMA_VERSION = 14          # IR 约定 14（文件名与内容的边界）落地
-PLAN_VERSION = "2.1"         # 开发方案文档版本（docs/dev-plan.md，文件名不带版本号）
+PLAN_VERSION = "2.3"         # 开发方案文档版本（docs/dev-plan.md，文件名不带版本号）
 
 __all__ = ["PIPELINE_VERSION", "SCHEMA_VERSION", "PLAN_VERSION"]
