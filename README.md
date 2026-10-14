@@ -41,14 +41,14 @@ curl -s "localhost:8090/search?q=例外" -H "X-Doc2md-Token: $TOK"
 
 ## 配置
 
-内置默认值见 `doc2md/config/default_toml.py`；部署样例见 `config/doc2md.example.toml`；逐键语义与默认值见方案 v2.0 附录 A。
+内置默认值见 `doc2md/config/default_toml.py`；部署样例见 `config/doc2md.example.toml`；逐键语义与默认值见方案 附录 A。
 读取顺序：默认 → `--config` → `./doc2md.toml` → `$DOC2MD_HOME/doc2md.toml`。
 
 相对路径（`work/out`、`work/reports/backups` 等）会随 `[paths].root` / `--root` 一起迁移（CH-432）。
 
 ## 低配机器（Win11 无 GPU / Mac mini 16GB）
 
-文本管线是 CPU + 内存带宽问题，GPU 无收益；下列口径全部有实测支撑（方案 v2.0 第七章 + 第十二章证据）：
+文本管线是 CPU + 内存带宽问题，GPU 无收益；下列口径全部有实测支撑（方案 第七章 + 第十二章证据）：
 
 | 键 | 默认 | 说明 |
 | --- | --- | --- |
@@ -105,11 +105,11 @@ rename 轮转只能有一个属主，三类进程三份文件。
 
 | 文档 | 作用 |
 | --- | --- |
-| **`docs/dev-plan-v2.0.md`** | **开发方案主文档（唯一权威）**。主题篇（一–九章）为当前有效规格，正文不含变更编号；附录 A–F 是配置 / CLI / API / 错误码 / 数据库 / 门禁的查询表；登记篇（十–十二章）集中记录阶段性变更与优化项、实测证据与未验证项 |
-| `docs/plan-delta-v1.1.md` | 已归档存根，指向方案 v2.0（原 v1.0 附录 H 的增量登记已整体迁入 v2.0 第十一/十二章） |
+| **`docs/dev-plan.md`** | **开发方案主文档（唯一权威）**。主题篇（一–九章）为当前有效规格，正文不含变更编号，其中 3.5–3.7 给代码层结构、依赖纪律与技术栈选型边界；附录 A–G 是配置 / CLI / API / 错误码 / 数据库 / 门禁 / 模块清单的查询表；登记篇（十–十二章）集中记录阶段性变更与优化项、实测证据与未验证项 |
+| `docs/plan-delta-v1.1.md` | 已归档存根，指向方案（原 v1.0 附录 H 的增量登记已整体迁入 v2.0 第十一/十二章） |
 | `doc2md/ops/backup.md` | 备份介质与恢复演练细则 |
 
-跟踪约定：契约变更、缺陷、更优做法一律按登记流写入方案 v2.0 第十一章（当前编号至 `CH-453`，下一条 `CH-454`），实测数字进第十二章并标注语料与测量方法；规格发生变化时同步主题篇章节与本文相应小节，并递增 `doc2md.PLAN_VERSION`（管线契约变化另递增 `PIPELINE_VERSION`）。
+跟踪约定：契约变更、缺陷、更优做法一律按登记流写入方案 第十一章（当前编号至 `CH-454`，下一条 `CH-455`），实测数字进第十二章并标注语料与测量方法；规格发生变化时同步主题篇章节与本文相应小节，并递增 `doc2md.PLAN_VERSION`（管线契约变化另递增 `PIPELINE_VERSION`）。
 
 ## 验收与测试
 
@@ -118,7 +118,7 @@ rename 轮转只能有一个属主，三类进程三份文件。
 黄金样本可复现性 + `doc2md doctor`。
 > 现状：workflow 已进远端，每次 push 到 `main` 触发 run（首轮四作业全绿：merge-gate 3.11/3.12/3.13 + full-suite）。
 > 但本仓库是 private + 免费计划，分支保护/规则集 API 返回 403，**无法把 merge-gate 设为必需检查**，
-> 因此「失败不可合并」尚未强制生效（见方案 v2.0 CH-446/CH-453 与待办 T1）。合并前仍需人工 `pytest -m gate` 判绿。
+> 因此「失败不可合并」尚未强制生效（见方案 CH-446/CH-453 与待办 T1）。合并前仍需人工 `pytest -m gate` 判绿。
 
 ```bash
 pytest -m gate            # 红线层：六条 merge-gate + 低配机专项（全绿方可合并；共 65 项，72–110s 视机器负载）
@@ -137,7 +137,7 @@ python3 tests/make_golden.py --force    # 强制重生成
 
 六条门禁：`shard_two_phase`、`malicious_filenames`、`injection_resistance`、
 `edit_optimistic_lock`、`delete_cascade`、`log_rotation`；另含本实现补强的 CJK 检索、渲染分级、
-目录递归防护与低配机专项断言（完整清单见方案 v2.0 附录 F）。
+目录递归防护与低配机专项断言（完整清单见方案 附录 F）。
 
 正文里出现的 `CH-xxx` 只是索引，条目原文与实测证据统一收录在
-`docs/dev-plan-v2.0.md` 第十一、十二章。
+`docs/dev-plan.md` 第十一、十二章。

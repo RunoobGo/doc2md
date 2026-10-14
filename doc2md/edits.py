@@ -7,7 +7,7 @@
 ④ 审计 before 取自库里当前值，与 from_revision 严格对应；
 ⑤ 提交后触发搜索索引刷新（CH-418，≤5s）。
 
-方案 v2.0 8.5 灰度：require_base_revision=False 时为 optional 阶段（缺省沿用旧行为并告警）。
+方案 8.5 灰度：require_base_revision=False 时为 optional 阶段（缺省沿用旧行为并告警）。
 """
 from __future__ import annotations
 

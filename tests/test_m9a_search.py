@@ -5,7 +5,7 @@
   现在走 aux（unigram+bigram）列，并按 text 列 LIKE 复核字组连续性；
 - CH-418 / FR-208 补充：编辑提交后 ≤5s 可检索到新内容（索引刷新在 PATCH 内同步完成）；
 - 旧库迁移：无 aux 列的 v2 FTS 虚表 → 重建 + 回填（CH-435 迁移路径）；
-- M8 补充：token 吊销即时生效（≤5s 内新请求 401，方案 v2.0 5.5 验收）。
+- M8 补充：token 吊销即时生效（≤5s 内新请求 401，方案 5.5 验收）。
 """
 from __future__ import annotations
 

@@ -8,7 +8,7 @@
 口径纪律：全部断言以「产物逐条目内容等价」为准——性能改动不得改变任何一个字节，
 等价性另有离线三态复核（HEAD 版 / 分块关 / 分块开）留档。
 
-运行：pytest -m gate -q（并入红线层，方案 v2.0 8.1 / 附录 F）
+运行：pytest -m gate -q（并入红线层，方案 8.1 / 附录 F）
 """
 from __future__ import annotations
 

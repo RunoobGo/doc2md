@@ -1,4 +1,4 @@
-# Doc2md 部署样例配置（上游 C-1 基线 + 本仓库实现增量；逐键语义见方案 v2.0 附录 A）
+# Doc2md 部署样例配置（上游 C-1 基线 + 本仓库实现增量；逐键语义见方案 附录 A）
 # 复制为项目根 doc2md.toml，或 $DOC2MD_HOME/doc2md.toml。
 # 全部键均有内置默认值（doc2md/config/default_toml.py），本文件只列需要按部署改写的项。
 
@@ -16,13 +16,13 @@ chunk_pages = 32                       # CH-447：分块解析驻留上限（0 =
                                        # 峰值驻留实测 1025MB → 177MB
 
 [s1_5]
-sample_pages = "auto"                  # even5 = 上游原口径；auto 为判定增强（CH-424，方案 v2.0 第十一章）
+sample_pages = "auto"                  # even5 = 上游原口径；auto 为判定增强（CH-424，方案 第十一章）
 min_chars_per_page = 120
 reject_on_any_bad_page = true
 page_detail_in_report = true
 
 [s2]
-mode = "auto"                          # auto / single / two_phase（方案 v2.0 4.3）
+mode = "auto"                          # auto / single / two_phase（方案 4.3）
 max_pages_per_shard = 300
 shard_overlap_pages = 2
 dedupe_overlap = true
@@ -35,7 +35,7 @@ link_internal = "plain"                # CH-416：PDF goto / DOCX 书签链接�
 workers = 0                            # CH-448：批量转换进程数；0 = 自动 min(4, CPU)
                                        # 8GB 内存机器别调到 8：驻留 ≈ workers × chunk_pages
 queue_async = false                    # CH-449：true → POST /jobs 只入队，由 `doc2md work` 消费
-                                       # false = 同步转换（方案 v2.0 5.4 既有契约）
+                                       # false = 同步转换（方案 5.4 既有契约）
 min_free_mb = 512                      # CH-450（NFR-6）：写产物/备份前的剩余空间下限；0 = 关闭门禁
 disk_safety_factor = 3                 # 需求 = 源大小 × 该系数
 stale_job_minutes = 30                 # CH-448：`doc2md work` 回收 running 超过该时长且崩溃遗骸（仅限队列来源）

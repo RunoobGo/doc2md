@@ -1,12 +1,12 @@
-"""tests/test_v24_gates.py — 红线层 6 条 merge-gate（方案 v2.0 8.1 / 附录 F）
+"""tests/test_v24_gates.py — 红线层 6 条 merge-gate（方案 8.1 / 附录 F）
 
 运行：pytest -m gate -q
-红线：6 条全绿方可合并；任一回红按方案 v2.0 8.1 分层处置执行。
+红线：6 条全绿方可合并；任一回红按方案 8.1 分层处置执行。
 
-对上游蓝本 B-14 的口径调整（登记见方案 v2.0 第十一、十二章）：
+对上游蓝本 B-14 的口径调整（登记见方案 第十一、十二章）：
 - char_similarity / half_sentence_heads 由 doc2md.pipeline.metrics 提供
   （CH-428 / CH-429：difflib autojunk 对 CJK 失真 + 59 万字逐字符不可用）；
-- convert() 的分片开关是 mode="two_phase"（方案 v2.0 4.3 配置面），非蓝本伪码里的 shard=True；
+- convert() 的分片开关是 mode="two_phase"（方案 4.3 配置面），非蓝本伪码里的 shard=True；
 - 产物 zip 经 Result.zip_path 暴露，非 convert(...).zip；
 - B-14 test_edit_optimistic_lock 的审计断言写的是 `audit[-1]["before"] == "改A"`，
   与自身 fixture 顺序矛盾（第一次 PATCH 后只有一条审计，before 应为原文）；
@@ -47,7 +47,7 @@ def test_shard_two_phase(large_single, large_sharded):
     assert not half_sentence_heads(large_sharded)
     assert large_sharded.meta["sharded"] is True
     assert large_sharded.meta["shard_count"] >= 2
-    # 分片确实发生（非降级伪通过，方案 v2.0 4.3）
+    # 分片确实发生（非降级伪通过，方案 4.3）
     assert not st.get("fallback"), f"降级单片，非真分片：{st}"
     assert st["shards"] >= 2 and st["blocks_raw"] > st["blocks_after_dedupe"]
     # shard_edge 可筛选：报告有边界行 + data 属性
@@ -92,7 +92,7 @@ def test_shard_pages_not_double_counted(large_single, large_sharded):
 
 
 def test_shard_fallback_is_honest(large_pdf, cfg, monkeypatch):
-    """方案 v2.0 4.3：缝合异常降级单片，且不得把降级产物标成 sharded=True。"""
+    """方案 4.3：缝合异常降级单片，且不得把降级产物标成 sharded=True。"""
     import copy
     import importlib
     cv = importlib.import_module("doc2md.pipeline.convert")   # 包属性 convert 已被函数遮蔽
@@ -196,7 +196,7 @@ def test_injection_resistance(cfg, golden_dir):
 
 
 def test_injection_rejection_attributed(cfg, golden_dir):
-    """方案 v2.0 8.1（injection_resistance）：越权 op 被拒时可区分「模型胡话」与「注入成功」。"""
+    """方案 8.1（injection_resistance）：越权 op 被拒时可区分「模型胡话」与「注入成功」。"""
     inj = sorted((golden_dir / "injected").glob("*.pdf"))
     hits = 0
     for p in inj:
@@ -248,7 +248,7 @@ def test_edit_optimistic_lock(saved_doc):
 
 
 def test_edit_gray_release_optional(cfg, store):
-    """方案 v2.0 8.5 灰度：require_base_revision=False 时缺省沿用旧行为 + 告警。"""
+    """方案 8.5 灰度：require_base_revision=False 时缺省沿用旧行为 + 告警。"""
     from doc2md.edits import patch_block
     from doc2md.ir import Block, IR
     ir = IR(doc_id="gx", source_key="gxk", source_name="a.pdf", format="pdf", pages=1,
@@ -323,7 +323,7 @@ def test_log_rotation(tmp_path):
 
 
 def test_service_rotates_its_own_logs_without_restart(tmp_path, tmp_cfg, small_pdf):
-    """红线字面口径：轮转发生在**服务进程内**且服务不重启（方案 v2.0 6.5）。
+    """红线字面口径：轮转发生在**服务进程内**且服务不重启（方案 6.5）。
 
     旧用例只单测写入器，服务侧从未持有写入器（CH-444 修的就是这一点），
     所以「注入 >50MB 日志自动轮转」在真实服务面上是伪覆盖。
@@ -371,7 +371,7 @@ def test_service_business_events_land_in_logs(tmp_path, tmp_cfg, small_pdf):
 
 
 def test_service_start_sweeps_work_tmp(tmp_path, tmp_cfg):
-    """方案 v2.0 6.5：服务启动时清理 work/tmp 残留（此前只有 cron 做，服务面从未执行）。"""
+    """方案 6.5：服务启动时清理 work/tmp 残留（此前只有 cron 做，服务面从未执行）。"""
     tmp = Path(tmp_cfg["paths"]["tmp"])
     (tmp / "stale").mkdir(parents=True)
     (tmp / "stale" / "x.bin").write_bytes(b"old")

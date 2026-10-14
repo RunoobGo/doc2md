@@ -69,7 +69,7 @@ def store(tmp_path):
 
 @pytest.fixture
 def api_client(tmp_cfg, tmp_path):
-    """(client, tokens) —— 用真实 Flask test client 覆盖红线层的三条 API 门禁（方案 v2.0 8.1）。"""
+    """(client, tokens) —— 用真实 Flask test client 覆盖红线层的三条 API 门禁（方案 8.1）。"""
     from doc2md import auth
     from doc2md.api import create_app
     from doc2md.storage.db import Store

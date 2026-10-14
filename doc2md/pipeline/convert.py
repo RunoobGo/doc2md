@@ -1,6 +1,6 @@
 """convert —— 管线编排（S1 → S1.5 → S2 → [S3/S4]×片 → 缝合 → LLM → 渲染）。
 
-分片模式（方案 v2.0 4.3）：s2.mode = single / two_phase / auto。
+分片模式（方案 4.3）：s2.mode = single / two_phase / auto。
 auto：页数 > max_pages_per_shard 时走两阶段，否则单片。
 """
 from __future__ import annotations
@@ -89,7 +89,7 @@ def convert(path: str | Path, *, cfg: dict | None = None, mode: str | None = Non
             ir, stats = stitch_shards(
                 shard_irs, max_pages,
                 dedupe=bool(config.get(cfg, "s2.dedupe_overlap", True)))
-        except Exception as exc:                       # 方案 v2.0 4.3 降级：异常即单片 + 报告标注
+        except Exception as exc:                       # 方案 4.3 降级：异常即单片 + 报告标注
             ir, stats = _fallback_single(pages_all, shard_irs[0], doc_id, source_key,
                                          safe, raw, fmt, total, reason=str(exc))
     else:
