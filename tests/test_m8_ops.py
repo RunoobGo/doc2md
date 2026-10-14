@@ -312,6 +312,43 @@ def _cron_cfg(cfg: dict, tmp_path: Path, external: bool = False) -> dict:
 
 
 # --- cron 日报 / 周报（CH-433 语义） ----------------------------------------
+def test_events_purge_honours_retention_boundary(tmp_path, cfg):
+    """保留期边界必须按「时刻」而非「日期」判定（CH-455 同源缺陷）。
+
+    events.ts 由 api._emit 用 now_iso() 写成 ISO 带 `+00:00`，SQL 原来直比
+    `ts < datetime('now', '-30 days')`；SQLite 在第 11 位比字符（'T'=0x54 >
+    ' '=0x20），于是**边界日当天**已过期的行会被判为未过期——保留期实际最长
+    溢出 24 小时。断言取「30 天 + 1 小时」这条刚好跨过边界的行，它在缺陷版
+    里会被留下。
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from doc2md import cron
+
+    c = _cron_cfg(cfg, tmp_path)
+    root = tmp_path / "work"
+    store = Store(root / "state.sqlite")          # _cron_cfg 已建目录，首次连接建库
+    now = datetime.now(timezone.utc)
+
+    def seed(tag: str, ts: datetime) -> str:
+        jid = f"job-{tag}"
+        with store.tx() as tx:
+            tx.execute("INSERT INTO events(ts, code, doc_id, job_id, payload_json)"
+                       " VALUES (?,?,?,?,?)",
+                       (ts.isoformat(timespec="milliseconds"), "TEST", f"doc-{tag}", jid, "{}"))
+        return jid
+
+    keep = seed("keep", now - timedelta(days=29))
+    seed("over", now - timedelta(days=30, hours=1))            # 已过 30 天保留期
+    seed("way", now - timedelta(days=45))
+    r = cron.run(c, root=root, mode="daily", with_backup=False)
+    step = next(s for s in r.steps if s["step"] == "events_purge")
+    assert step["removed"] == 2, (step, r.steps)
+    left = {row["job_id"] for row in store.q("SELECT job_id FROM events")}
+    assert left == {keep}, left
+    store.close()
+
+
 def test_cron_daily_ok_and_weekly_skips_without_external(tmp_path, cfg):
     from doc2md import cron
     c = _cron_cfg(cfg, tmp_path)

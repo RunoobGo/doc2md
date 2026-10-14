@@ -145,7 +145,6 @@ def test_cli_convert_dir_uses_pool(tmp_path, cfg, monkeypatch):
 def test_queue_async_enqueue_then_work(tmp_cfg, tmp_path, api_ready_cfg):
     """POST /jobs 只入队 → GET /jobs 可见 → `doc2md work --once` 消费入库、可检索。"""
     from doc2md import worker
-    from doc2md.storage.db import Store
     cfg = api_ready_cfg
     app, client, tokens = _app(tmp_cfg, tmp_path, cfg, async_queue=True)
     src = GOLDEN / "small_3p.pdf"
@@ -214,6 +213,70 @@ def test_work_fails_jobs_without_path(tmp_path, cfg):
     row = store.q1("SELECT status, error_code FROM tasks WHERE job_id=?", (j.job_id,))
     assert row["status"] == "failed" and row["error_code"] == "E4001"
     store.close()
+
+
+def _stale_running_row(store, minutes: int, *, with_path: bool = True) -> str:
+    """造一条「被崩溃的 work 进程遗留在 running」的作业，started_at 往回推 minutes 分钟。
+
+    时间串必须用 now_iso() 的真实格式（ISO + '+00:00'），否则测不出回收谓词的
+    比较缺陷——历史 bug 正是「测试里写 sqlite 风格的时间串能过、真实写入格式不过」。
+    """
+    from datetime import datetime, timedelta, timezone
+
+    ts = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat(timespec="milliseconds")
+    with store.tx() as tx:
+        tx.execute(
+            "INSERT INTO tasks(job_id, doc_id, source_key, status, created_at,"
+            " started_at, source_path, mode) VALUES (?,?,?,?,?,?,?,?)",
+            (f"job-stale-{minutes}", f"doc-stale-{minutes}", f"src-stale-{minutes}",
+             "running", ts, ts, ("/tmp/x.pdf" if with_path else None), "auto"))
+    return f"job-stale-{minutes}"
+
+
+def test_reclaim_stale_matches_real_timestamp_format(tmp_path, cfg):
+    """CH-448 的遗骸回收必须真的能命中 work.claim() 写下的时间格式（缺陷修复）。
+
+    started_at 由 now_iso() 写成 `...T..:..:..+00:00`，而 SQL 侧原来是
+    `started_at < datetime('now', ?)` —— SQLite 的字符串比较在 'T'(0x54) 对
+    ' '(0x20) 处就分胜负，任何同日的过期作业都判不出来：OOM 后的遗骸永远
+    停在 running，队列看起来「有活干」却永不动。断言按真实格式给，不给宽松值。
+    """
+    from doc2md import worker
+    from doc2md.storage.db import Store
+
+    root = tmp_path / "work"
+    root.mkdir()
+    store = Store(root / "state.sqlite")
+    jid = _stale_running_row(store, 99)                    # 远超 30 分钟阈值
+    fresh = _stale_running_row(store, 5, with_path=False)  # 未过期 + 无消费路径
+    assert worker.reclaim_stale(store, cfg) == 1
+    assert store.q1("SELECT status FROM tasks WHERE job_id=?", (jid,))["status"] == "queued"
+    # 未过期、以及不带消费路径的行都不得被动（同步 serve 路径语义保持不被回收）
+    row = store.q1("SELECT status, started_at FROM tasks WHERE job_id=?", (fresh,))
+    assert row["status"] == "running" and row["started_at"]
+    store.close()
+
+
+def test_run_work_reports_reclaimed_without_crashing(tmp_path, cfg):
+    """run_work 启动时若真有遗骸，必须把 reclaimed_stale 记进报告而不是崩掉。
+
+    历史缺陷：`total.notes.append(...)` 写在 `total = WorkReport()` 之前，
+    于是**唯一「回收真的发生了」的分支**必抛 NameError。低配机上 OOM 后重启
+    work 正是最常见路径，崩溃等于放弃 CH-448 的整个恢复设计。
+    """
+    from doc2md import worker
+    from doc2md.storage.db import Store
+
+    root = tmp_path / "work"
+    (root / "logs").mkdir(parents=True)
+    store = Store(root / "state.sqlite")
+    _stale_running_row(store, 99)
+    store.close()
+
+    rep = worker.run_work(cfg, root, once=True, workers=1)
+    assert any(n.startswith("reclaimed_stale=1") for n in rep.notes), rep.notes
+    dumped = (root / "logs" / "work.jsonl").read_text(encoding="utf-8")
+    assert '"reclaimed_stale": 1' in dumped
 
 
 def test_work_writes_its_own_log(tmp_path, cfg):

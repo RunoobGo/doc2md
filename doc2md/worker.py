@@ -80,9 +80,13 @@ def reclaim_stale(store: Store, cfg: dict) -> int:
     if minutes <= 0:
         return 0
     with store.tx() as tx:
+        # `datetime(started_at)` 不是冗余：started_at 由 now_iso() 写成
+        # `YYYY-MM-DDTHH:MM:SS.mmm+00:00`，而 datetime('now') 给 `YYYY-MM-DD HH:MM:SS`。
+        # SQLite 的字符串比较在第 11 位就分出胜负（'T'=0x54 > ' '=0x20），
+        # 直比起作用的同日内过期作业永远判不出来（缺陷 CH-455）。
         rows = tx.execute(
             "SELECT job_id FROM tasks WHERE status='running'"
-            " AND started_at IS NOT NULL AND started_at < datetime('now', ?)"
+            " AND started_at IS NOT NULL AND datetime(started_at) < datetime('now', ?)"
             " AND source_path IS NOT NULL",
             (f"-{minutes} minutes",)).fetchall()
         for r in rows:
@@ -226,6 +230,7 @@ def run_work(cfg: dict, root, *, once: bool = False, max_jobs: int = 0,
     """消费循环：once=True 排空当前队列即退出；max_jobs>0 达量退出；否则轮询常驻。"""
     from .ops.logging import RotatingJsonlWriter
     store = Store(root / "state.sqlite")
+    total = WorkReport()
     reclaimed = reclaim_stale(store, cfg)
     if reclaimed:
         total.notes.append(f"reclaimed_stale={reclaimed}")
@@ -234,7 +239,6 @@ def run_work(cfg: dict, root, *, once: bool = False, max_jobs: int = 0,
         logs, stem="work",
         rotate_mb=float(config.get(cfg, "logs.rotate_mb", 50)),
         rotate_keep=int(config.get(cfg, "logs.rotate_keep", 5)))
-    total = WorkReport()
     writer.write({"code": "WORK_START", "root": str(root),
                   "once": bool(once), "max_jobs": int(max_jobs or 0),
                   "reclaimed_stale": reclaimed,

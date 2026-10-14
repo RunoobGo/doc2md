@@ -150,7 +150,10 @@ def run(cfg: dict | None = None, root: Path | None = None, mode: str = "daily",
     # 6) 事件保留期清理（[ops].events_retention_days）
     days = int(config.get(cfg, "ops.events_retention_days", 30))
     with store.tx() as tx:
-        n = tx.execute("DELETE FROM events WHERE ts < datetime('now', ?)",
+        # datetime(ts) 必要（同 CH-455 的 worker.reclaim_stale）：ts 由 now_iso()
+        # 写成 ISO 带 '+00:00'，与 datetime('now') 的空格分隔式直比起作用，
+        # 边界日当天的过期行会因 'T' > ' ' 被判为「未过期」，保留期实际最多溢出 24h。
+        n = tx.execute("DELETE FROM events WHERE datetime(ts) < datetime('now', ?)",
                        (f"-{days} days",)).rowcount
     rep.add("events_purge", removed=n, retention_days=days)
 
