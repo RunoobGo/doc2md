@@ -63,7 +63,10 @@ def _convert(path: str | Path, *, cfg: dict, mode: str | None,
     safe = sanitize_name(raw, int(config.get(cfg, "security.max_name_bytes", 128)))
 
     chunk_pages = int(config.get(cfg, "s1.chunk_pages", 0)) or None
-    pages_all = read_any(p, chunk_pages=chunk_pages)
+    # CH-459（A-13）：sniff 一次直传 read_any——原实现 read_any 内嗅探后
+    # 分片前又 sniff(p) 一次，同一文件多开一遍（magic + zip 目录）。
+    fmt = sniff(p)
+    pages_all = read_any(p, chunk_pages=chunk_pages, fmt=fmt)
     total = len(pages_all)
     gate = s1_5_gate.check(pages_all,
                            min_chars=int(config.get(cfg, "s1_5.min_chars_per_page", 120)),
@@ -79,7 +82,6 @@ def _convert(path: str | Path, *, cfg: dict, mode: str | None,
         spans = [(0, total)]
 
     t0 = time.monotonic()
-    fmt = sniff(p)
     shard_irs: list[IR] = []
     for si, (lo, hi) in enumerate(spans):
         sub = pages_all[lo:hi]

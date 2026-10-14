@@ -41,6 +41,9 @@ def _render_block(b: Block, **opt) -> str:
     if b.type == "list_item":
         t = re.sub(r"^\s*[·•‣∙○●■□\-\*]\s+", "", text)
         return "- " + _inline(t, b, **opt)
+    if b.type == "page_break":
+        # CH-459：GFM 无分页符语法——结构信息留在 IR / 审阅页，Markdown 不落字节
+        return ""
     if b.type == "code":
         return "```\n" + text + "\n```"
     if b.type == "quote":
@@ -58,13 +61,15 @@ def _inline(text: str, b: Block, *, preserve_strike: bool, link_internal: str) -
         text = f"*{text}*"
     if marks.get("strikethrough") and preserve_strike:
         text = f"~~{text}~~"
+    # CH-459：块级 links 至多渲染一条（行内跨度级链接不在 IR 模型内——
+    # 多条并列时取首条可渲染的，其余留存在 IR/审阅面，不制造错标数据）
     for lk in b.links or []:
         url, label = lk.get("url", ""), lk.get("text") or text
         if is_external(url):
-            text = f"[{label}]({url})"
-        elif link_internal == "anchor":
-            text = f"[{label}](#{lk.get('dest', '')})"
-        # plain：保持纯文本，不产生锚点语法
+            return f"[{label}]({url})"
+        if link_internal == "anchor":
+            return f"[{label}](#{lk.get('dest', '')})"
+        # plain：内部链接保持纯文本，不产生锚点语法
     return text
 
 

@@ -324,13 +324,98 @@ def _discover_model(vendor_models: str) -> str:
 
 
 def apply_ops(ir, accepted: list[dict]) -> int:
+    """白名单 op 的落地实现（CH-459：原仅 fix_heading_level 有实现，其余四个
+    过校验、计入 applied_ops 却静默无效——「计数成功、产物没变」比拒绝更坏）。
+
+    五个 op 的语义（保守定义，全部可回滚可审计）：
+    - fix_heading_level：按 op 给定 level 改写标题层级；
+    - fix_list_marker：把列表项行首标记规范化为 op 给定标记（默认 `-`）；
+    - mark_table_boundary：给块打 table_boundary 旗标（审阅面筛选用，不改正文）；
+    - split_block：按字符偏移把块切成两块（新块 id 加 `s` 后缀，不重排后续 id——
+      外部引用按 id 寻址，重排会让审计/FTS 命中错块）；
+    - merge_block：把目标块文本并入前一块（absorbed_ids 留痕，与缝合同构）。
+    基座纪律：本函数不 import 包内其他模块（方案 3.6），CJK/拉丁拼接规则本地实现。
+    """
     n = 0
     for op in accepted:
         b = next((x for x in ir.blocks if x.id == op.get("target")), None)
         if b is None:
             continue
-        if op["op"] == "fix_heading_level":
+        name = op.get("op")
+        if name == "fix_heading_level":
             b.level = op.get("level", b.level)
             b.provenance.setdefault("modified_by", []).append("llm:fix_heading_level")
             n += 1
+        elif name == "fix_list_marker":
+            marker = str(op.get("marker", "-"))[:3] or "-"
+            new = re.sub(r"^\s*[·•‣∙○●■□\-\*]\s+", marker + " ", b.text or "")
+            if new != b.text:
+                b.text = new
+                b.provenance.setdefault("modified_by", []).append("llm:fix_list_marker")
+                n += 1
+        elif name == "mark_table_boundary":
+            b.flags["table_boundary"] = True
+            b.provenance.setdefault("modified_by", []).append("llm:mark_table_boundary")
+            n += 1
+        elif name == "split_block":
+            if _split_block(ir, b, op):
+                n += 1
+        elif name == "merge_block":
+            if _merge_block(ir, b):
+                n += 1
     return n
+
+
+def _split_block(ir, b, op: dict) -> bool:
+    """按 at（字符偏移，缺省取文本中点）切块；空侧不切。"""
+    text = b.text or ""
+    at = op.get("at")
+    try:
+        at = int(at)
+    except (TypeError, ValueError):
+        at = len(text) // 2
+    if at <= 0 or at >= len(text):
+        return False
+    head, tail = text[:at].rstrip(), text[at:].lstrip()
+    if not head or not tail:
+        return False
+    b.text = head
+    n = 1
+    while any(x.id == f"{b.id}s{n}" for x in ir.blocks):
+        n += 1
+    # 用目标块自身的类构造（基座纪律：本模块不 import 包内 ir 模块）
+    nb = type(b)(id=f"{b.id}s{n}", type=b.type, text=tail, level=b.level,
+                 font=dict(b.font or {}), marks=dict(b.marks or {}),
+                 page=b.page,
+                 flags={k: v for k, v in (b.flags or {}).items()
+                        if k != "shard_edge"},
+                 immutable=b.immutable)
+    nb.provenance.setdefault("modified_by", []).append("llm:split_block")
+    b.provenance.setdefault("modified_by", []).append("llm:split_block")
+    ir.blocks.insert(ir.blocks.index(b) + 1, nb)
+    return True
+
+
+def _merge_block(ir, b) -> bool:
+    """并入前一块（无前一块 / 前块是结构块时拒绝——段落合并没有合理目标）。"""
+    idx = ir.blocks.index(b)
+    if idx == 0:
+        return False
+    prev = ir.blocks[idx - 1]
+    if prev.type not in ("paragraph", "list_item"):
+        return False
+    a, t = (prev.text or "").rstrip(), (b.text or "").lstrip()
+    if not a or not t:
+        return False
+    joiner = "" if (_cjk(a[-1]) or _cjk(t[0])) else " "
+    prev.text = a + joiner + t
+    prev.flags.setdefault("absorbed_ids", [])
+    if b.id not in prev.flags["absorbed_ids"]:
+        prev.flags["absorbed_ids"].append(b.id)
+    prev.provenance.setdefault("modified_by", []).append("llm:merge_block")
+    ir.blocks.remove(b)
+    return True
+
+
+def _cjk(ch: str) -> bool:
+    return bool(ch) and ord(ch[0]) > 0x2E80

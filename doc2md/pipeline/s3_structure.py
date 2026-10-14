@@ -2,6 +2,17 @@
 
 R-03：标题判定（字号 + 粗体 + 编号形态）
 R-04：编号连续性（用于分片缝合与层级校正）
+
+CH-459（FR-104 收口）：`BLOCK_TYPES` 声明七类，本模块原只产三类。
+本轮补齐 table / code / quote / page_break 四类的**保守检测**——
+- table：S1 已按行内横向间隙聚出单元格（`Line.row`），本层按「连续行 + 列数对齐 +
+  行首对齐 + 行尾非句末标点」成组，组装为 GFM（S4 原样透传）；
+- code：围栏行（``` / ~~~）配对、等宽字体行连续段（`Line.mono`）、
+  4 空格 / 制表符缩进行（Markdown 语义，仅空段起算）；
+- quote：`>` 前缀行或整行 CJK 引号包裹，连续行并块；
+- page_break：行内 form-feed（DOCX 分页符由 S1 合成该信号）。
+全部检测遵循「宁漏勿误」：漏判只退化为段落（原行为），误判会污染正文。
+另落 FR-107/108 的块级链接附着（`Line.link` → `Block.links`，每块至多一条）。
 """
 from __future__ import annotations
 
@@ -19,74 +30,290 @@ _BULLET = re.compile(r"^\s*([·•‣∙○●■□\-\*])\s+")
 # 只认标点，不认小写字母/数字：拉丁正文的跨行由 _can_continue 处理，避免误并。
 _CONT_HEAD = re.compile(r"^\s*([　，、。；：！？〉》」』】〕）”…—])")
 
+# CH-459：四类新块的检测式
+_FENCE = re.compile(r"^\s{0,3}(```|~~~)")
+_QUOTE_PREFIX = re.compile(r"^\s{0,3}>\s?")
+_QUOTE_OPEN = "「『“‘"
+_QUOTE_CLOSE = "」』”’"
+_SENT_END = ("。", "！", "？", "；", ".", "!", "?", ";", "：", ":")
+# 表格行组约束：行首 x0 对齐容差（pt）与最少行数
+_ROW_X0_TOL = 3.0
+_ROW_MIN = 2
+
 
 def _continuation_led(text: str) -> bool:
     t = (text or "").strip()
     return bool(t) and bool(_CONT_HEAD.match(t)) and t[0] not in "（(【《「『"
 
 
-def _join_back(blocks: list[Block], text: str, font: dict) -> bool:
-    """把续句行并回最近的内容块；成功返回 True。"""
+def _join_back(blocks: list[Block], text: str, font: dict) -> Block | None:
+    """把续句行并回最近的内容块；成功返回被并入的块，失败返回 None。
+
+    CH-459：遇到 quote / code / table / page_break 即止步——这些是结构块，
+    续句穿过它们并回更前的段落会制造错位（原实现它们不存在，该分支不可达）。
+    标题块照旧可穿过（CH-430：页眉/编号标题插在折行中间是常态）。
+    """
     for b in reversed(blocks):
         if b.type in ("paragraph", "list_item"):
             b.text = (b.text or "") + _join_line(b.text or "", text.strip())
             b.flags.setdefault("joined_across_break", True)
             if font and not b.font:
                 b.font = dict(font)
-            return True
-    return False
+            return b
+        if b.type == "heading":
+            continue
+        return None
+    return None
+
+
+def _is_quote_line(text: str) -> bool:
+    t = (text or "").strip()
+    if not t:
+        return False
+    if _QUOTE_PREFIX.match(t):
+        return True
+    return len(t) >= 2 and t[0] in _QUOTE_OPEN and t[-1] in _QUOTE_CLOSE
+
+
+def _quote_text(text: str) -> str:
+    t = text.strip()
+    if t.startswith(">"):
+        return re.sub(r"^\s{0,3}>\s?", "", t)
+    return t
+
+
+def _gfm_table(rows: list[list[str]]) -> str:
+    """行单元格 → GFM 表格文本（列数不齐补齐到最多列；单元格内 | 转义）。"""
+    ncols = max(len(r) for r in rows)
+    padded = [(r + [""] * ncols)[:ncols] for r in rows]
+    esc = [[c.replace("|", "\\|").replace("\n", " ").strip() for c in row]
+           for row in padded]
+    head, body = esc[0], esc[1:]
+    sep = "| " + " | ".join(["---"] * ncols) + " |"
+    lines = ["| " + " | ".join(head) + " |", sep]
+    lines += ["| " + " | ".join(r) + " |" for r in body]
+    return "\n".join(lines)
+
+
+def _attach_link(b: Block, ln) -> None:
+    """CH-459：行级链接 → 块级 links（每块至多一条；S4 的 [text](url) 消费它）。
+
+    内部链接（PDF GoTo / DOCX 书签）同样记录：`link_internal` 口径下 S4 默认
+    不产生锚点语法（plain），`dest` 留给 anchor 模式与审阅面。
+    """
+    if ln.link:
+        b.links = [{"url": ln.link, "text": (b.text or "").strip(),
+                    "dest": ln.link_dest or ""}]
+    elif ln.link_internal:
+        b.links = [{"url": "", "text": (b.text or "").strip(), "dest": ln.link_dest or ""}]
 
 
 def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
-    """页级行 → 块序列（段落合并 / 标题判定 / 列表判定）。"""
+    """页级行 → 块序列（段落合并 / 标题判定 / 列表判定 / 表格代码引用分页）。"""
     blocks: list[Block] = []
     if base_size is None:
         base_size = _modal_size(pages)
     seq = 0
+    # CH-459：跨页存续的聚集状态
+    code_buf: list[str] | None = None          # None = 不在代码块内
+    code_mode = ""                             # fence（显式围栏）| indent | mono
+    quote_buf: list[str] = []
+    row_buf: list[list[str]] = []
+    row_x0: list[float] = []
+    row_lines: list = []                       # 行缓冲（组不成表时退回段落用）
+    quote_page = 0
+    row_page = 0
+
+    def emit_code(page: int) -> None:
+        nonlocal seq, code_buf
+        buf = list(code_buf or [])
+        while buf and not buf[-1]:
+            buf.pop()
+        while buf and not buf[0]:
+            buf.pop(0)
+        if buf:
+            blocks.append(Block(id=f"b{seq + 1}", type="code",
+                                text="\n".join(buf), page=page))
+            seq += 1
+        code_buf = None
+
+    def flush_para() -> None:
+        nonlocal seq, para_buf, para_font, para_page, para_lines
+        before = len(blocks)
+        _flush(para_buf, blocks, seq, para_font, para_page)
+        if len(blocks) > before:              # 段缓冲非空且缝合后非空才落块
+            for ln in para_lines:             # CH-459：取段内首条带链接行
+                if ln.link or ln.link_internal:
+                    _attach_link(blocks[-1], ln)
+                    break
+        seq += 1
+        para_buf = []
+        para_lines = []
+
+    def flush_quote() -> None:
+        nonlocal seq, quote_buf
+        if quote_buf:
+            blocks.append(Block(id=f"b{seq + 1}", type="quote",
+                                text="\n".join(quote_buf), page=quote_page))
+            seq += 1
+        quote_buf = []
+
+    def flush_rows(as_table: bool) -> None:
+        nonlocal seq, row_buf, row_x0, row_lines
+        if not row_lines:
+            return
+        if as_table and len(row_buf) >= _ROW_MIN:
+            blocks.append(Block(id=f"b{seq + 1}", type="table",
+                                text=_gfm_table(row_buf), page=row_page))
+        else:                                   # 组不成表：逐行退回段落（漏判不误判）
+            for i, ln in enumerate(row_lines):
+                blocks.append(Block(id=f"b{seq + 1}", type="paragraph",
+                                    text=ln.text.strip(), font=_font(ln),
+                                    page=row_page))
+                if i == 0 and (ln.link or ln.link_internal):
+                    _attach_link(blocks[-1], ln)
+        seq += 1
+        row_buf, row_x0, row_lines = [], [], []
+
     for page in pages:
         para_buf: list[str] = []
+        para_lines: list = []                   # 与 para_buf 同步的 Line 行缓冲
         para_font: dict = {}
         para_page = page.index
         for ln in page.lines:
+            # --- page_break（CH-459：form-feed 行，DOCX 分页符的信号形态）---
+            # 必须先于 rstrip 判定：\x0c 是 Python 空白字符，rstrip 会把它剥掉，
+            # 放到空行分支之后该分支永假（CH-459 收尾自查实测确认）。
+            if "\x0c" in ln.text:
+                flush_para()
+                flush_quote()
+                flush_rows(True)             # 行组被结构行终止：按事实判定
+                if code_buf is not None:
+                    emit_code(page.index)
+                blocks.append(Block(id=f"b{seq + 1}", type="page_break",
+                                    text=ln.text.replace("\x0c", "").strip(),
+                                    page=page.index))
+                seq += 1
+                continue
             text = ln.text.rstrip()
+            # --- 空行：代码块内保留（代码含空行），否则冲刷段/引用缓冲 ---
+            # 行组缓冲不在此冲刷：跨页表格靠它在页界存续（页界不产生空行），
+            # 且空行不会丢内容（单元格结构不受影响）；引用缓冲必须冲刷——
+            # 否则两段独立引用被并成一块、段间空行丢失（GFM 下两个引用块
+            # 与一个含空行的引用块渲染等价，按块界拆更利审阅与编辑）。
             if not text.strip():
-                _flush(para_buf, blocks, seq, para_font, para_page)
-                seq += 1
-                para_buf = []
+                if code_buf is not None:
+                    code_buf.append("")
+                    continue
+                flush_para()
+                flush_quote()
                 continue
-            lvl = _heading_level(text, ln.size, base_size, ln.bold)
+            # --- 代码围栏（CH-459）---
+            if _FENCE.match(text):
+                flush_para()
+                flush_quote()
+                flush_rows(True)             # 行组被结构行终止：按事实判定
+                if code_buf is None:
+                    code_buf, code_mode = [], "fence"
+                elif code_mode == "fence":
+                    emit_code(page.index)
+                else:                           # 缩进/等宽块内的围栏行是普通内容
+                    code_buf.append(text)
+                continue
+            # --- 代码块累积中（CH-459：三种模式各自的关闭条件）---
+            if code_buf is not None:
+                if code_mode == "mono" and not ln.mono:
+                    emit_code(page.index)       # 等宽段结束：落块后本行走常规分流
+                elif code_mode == "indent" and not (
+                        text.startswith("    ") or text.startswith("\t")):
+                    emit_code(page.index)       # 缩进段结束
+                else:
+                    code_buf.append(re.sub(r"^(    |\t)", "", text)
+                                    if code_mode == "indent" else text)
+                    continue
+            # --- 缩进代码（Markdown 语义：4 空格 / 制表符，仅空段起算）---
+            if (text.startswith("    ") or text.startswith("\t")) and not para_buf:
+                flush_quote()
+                flush_rows(True)             # 行组被结构行终止：按事实判定
+                code_buf, code_mode = [re.sub(r"^(    |\t)", "", text)], "indent"
+                continue
+            # --- 标题（CH-459：DOCX Heading 样式提示优先于启发式）---
+            lvl = _heading_level(text, ln.size, base_size, ln.bold,
+                                 hint=ln.level_hint)
             if lvl:
-                _flush(para_buf, blocks, seq, para_font, para_page)
+                flush_para()
+                flush_quote()
+                flush_rows(True)             # 行组被结构行终止：按事实判定
+                _append(Block(id=f"b{seq + 1}", type="heading", text=text.strip(),
+                              level=lvl, font=_font(ln), page=page.index), blocks, seq)
                 seq += 1
-                para_buf = []
-                seq = _append(Block(id=f"b{seq + 1}", type="heading", text=text.strip(),
-                                    level=lvl, font=_font(ln), page=page.index), blocks, seq)
+                _attach_link(blocks[-1], ln)
                 continue
+            # --- 列表（既有口径不变）---
             if _BULLET.match(text):
-                _flush(para_buf, blocks, seq, para_font, para_page)
+                flush_para()
+                flush_quote()
+                flush_rows(True)             # 行组被结构行终止：按事实判定
+                _append(Block(id=f"b{seq + 1}", type="list_item", text=text.strip(),
+                              font=_font(ln), page=page.index), blocks, seq)
                 seq += 1
-                para_buf = []
-                seq = _append(Block(id=f"b{seq + 1}", type="list_item", text=text.strip(),
-                                    font=_font(ln), page=page.index), blocks, seq)
+                _attach_link(blocks[-1], ln)
+                continue
+            # --- 表格行候选（CH-459：S1 已聚出单元格）---
+            row_ok = bool(ln.row) and len(ln.row) >= 2 and (
+                ln.row_explicit or not ln.row[-1].rstrip().endswith(_SENT_END))
+            if row_ok:
+                if not row_buf:
+                    flush_para()
+                    flush_quote()
+                    row_page = page.index
+                elif abs(ln.x0 - (sum(row_x0) / len(row_x0))) > _ROW_X0_TOL:
+                    flush_rows(True)            # 行首跳变：切组，各自判定
+                    row_page = page.index
+                row_buf.append(list(ln.row))
+                row_x0.append(ln.x0)
+                row_lines.append(ln)
+                continue
+            if row_buf:
+                flush_rows(True)
+            # --- 引用块（CH-459：段间边界起算，段中引用行按保守口径留在段内）---
+            if _is_quote_line(text) and not para_buf:
+                if not quote_buf:
+                    quote_page = page.index
+                quote_buf.append(_quote_text(text))
+                continue
+            # --- 等宽字体连续段 → 代码块（CH-459）---
+            if ln.mono and not para_buf:
+                code_buf, code_mode = [text], "mono"
                 continue
             # CH-430：续句标点起头 → 无条件并回上一个内容块（可跨标题/空行打断）
-            if _continuation_led(text) and not para_buf and _join_back(blocks, text, _font(ln)):
-                continue
+            if _continuation_led(text) and not para_buf:
+                back = _join_back(blocks, text, _font(ln))
+                if back is not None:
+                    if (ln.link or ln.link_internal) and not back.links:
+                        _attach_link(back, ln)
+                    continue
             # 普通正文行：句子未结束则续接同段
             if para_buf and _can_continue(para_buf[-1]):
                 para_buf.append(text.strip())
+                para_lines.append(ln)
             elif para_buf:
-                _flush(para_buf, blocks, seq, para_font, para_page)
-                seq += 1
+                flush_para()
                 para_buf = [text.strip()]
+                para_lines = [ln]
                 para_font = _font(ln)
                 para_page = page.index
             else:
                 para_buf = [text.strip()]
+                para_lines = [ln]
                 para_font = _font(ln)
                 para_page = page.index
-            seq = seq  # noop（保持编号语义清晰）
-        _flush(para_buf, blocks, seq, para_font, para_page)
+        flush_para()
+    # 收尾：跨页状态落块
+    flush_quote()
+    flush_rows(True)
+    if code_buf is not None:
+        emit_code(0)
     ir = IR(doc_id="", source_key="", blocks=blocks, pages=len(pages))
     for i, b in enumerate(ir.blocks, start=1):
         b.id = f"b{i}"
@@ -114,8 +341,15 @@ def _modal_size(pages: list[RawPage]) -> float:
     return c.most_common(1)[0][0] if c else 10.0
 
 
-def _heading_level(text: str, size: float, base: float, bold: bool) -> int | None:
-    """R-03：字号显著大于正文，或编号 + 短行 + 粗体。"""
+def _heading_level(text: str, size: float, base: float, bold: bool,
+                   hint: int | None = None) -> int | None:
+    """R-03：字号显著大于正文，或编号 + 短行 + 粗体。
+
+    CH-459：`hint` 为 DOCX 段落样式显式声明的层级（"Heading N"）——
+    显式声明优先于任何启发式（原实现对无编号的 DOCX 标题全部漏判成段落）。
+    """
+    if hint:
+        return hint
     t = text.strip()
     if not t or len(t) > 80:
         return None
