@@ -173,6 +173,7 @@ def _finish_ok(store: Store, sched: Scheduler, job: dict, res: dict,
 def _read_ir(zip_path: str):
     """从产物 zip 回读 IR（子进程不回传对象；父进程以产物为准重建入库内容）。"""
     import zipfile
+
     from .ir import IR
     try:
         with zipfile.ZipFile(zip_path) as z:

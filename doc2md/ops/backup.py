@@ -9,8 +9,6 @@ macOS 部署可选 encrypted sparsebundle（见 ops/backup.md）。
 from __future__ import annotations
 
 import os
-import shutil
-import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -49,6 +47,7 @@ class BackupPlan:
     rotation_days: int = 14
     encrypted_external: bool = True
     work_root: Path | None = None      # M8：work/ 权限 700 的落点（缺省从 local_dir 反推）
+    work_dir_mode: str = "700"         # ops.work_dir_mode（CH-456：原为硬编码 0o700）
 
     def snapshot(self, state_db: Path, ts: datetime | None = None) -> Path:
         """本地快照（work/ 内可明文，前提是 work/ 权限 700）。"""
@@ -60,9 +59,11 @@ class BackupPlan:
         src = sqlite3.connect(str(state_db))
         dstc = sqlite3.connect(str(dst))
         src.backup(dstc)
-        dstc.close(); src.close()
-        _enforce_dir_mode(self.local_dir, 0o700)
-        _enforce_dir_mode(self._resolve_work_root(), 0o700)
+        dstc.close()
+        src.close()
+        mode = _parse_mode(self.work_dir_mode)
+        _enforce_dir_mode(self.local_dir, mode)
+        _enforce_dir_mode(self._resolve_work_root(), mode)
         return dst
 
     def _resolve_work_root(self) -> Path:
@@ -107,6 +108,14 @@ class BackupPlan:
                     p.unlink()
                     removed.append(p)
         return removed
+
+
+def _parse_mode(value) -> int:
+    """`ops.work_dir_mode` 取值解析：接受 "700" / 0o700 / 448 三种写法。"""
+    if isinstance(value, int):
+        return value
+    text = str(value).strip()
+    return int(text, 8) if text else 0o700
 
 
 def _enforce_dir_mode(path: Path, mode: int) -> None:

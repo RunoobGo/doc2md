@@ -10,11 +10,11 @@ out = "work/out"
 reports = "work/reports"
 logs = "work/logs"
 tmp = "work/tmp"
-vendor_models = "vendor/models/llm"
+vendor_models = "vendor/models/llm"    # 本地模型资产根（CH-456 / T2：llm.mode=server 时定位 gguf 与模型名）
 
 [run]
-profile = "standard"                   # v2.1 冻结：三档 lite/standard/strict
-offline_assert = true                  # 出站网络断言（NFR 离线纪律）
+profile = "standard"                   # v2.1 冻结：三档 lite/standard/strict；CH-456 落地为键集覆盖
+offline_assert = true                  # 出站网络断言（NFR-离线纪律）；CH-456 起为可开关运行期守护
 
 [s1]
 chunk_pages = 32                       # CH-447：每重新打开一次文档最多解析多少页（0 = 整本一次读完）
@@ -68,9 +68,16 @@ revoke_effective_seconds = 5           # NFR-9：吊销即时生效窗口
 base_revision_required = true          # ADR-28 / 方案 8.5：false = 灰度 optional 阶段
 
 [llm]
+mode = "offline"                       # CH-456 / T2：offline = 确定性占位实现（默认，主链路零网络）；
+                                       # server = 本地 llama-server（仅 127.0.0.1，NFR-1）
+fallback = true                        # server 不可用时回退 offline 占位实现，保持主链路不中断；
+                                       # false = 明确失败（E5041 / HTTP 503）
+timeout_ms = 15000                     # 单次请求超时（连接 + 读取合计）
+model = ""                             # 请求里的模型名；空 = 取 paths.vendor_models 下发现的 gguf 文件名
 bind = "127.0.0.1"
 port = 8080
-auth = false                           # P-55 / CH-408：已知接受项登记
+auth = false                           # P-55 / CH-408：已知接受项登记；true 时口令走
+                                       # DOC2MD_LLM_TOKEN 环境变量（Bearer），不落配置不入日志
 op_whitelist = ["split_block", "merge_block", "fix_heading_level",
                 "fix_list_marker", "mark_table_boundary"]
 
@@ -87,5 +94,5 @@ work_dir_mode = "700"
 
 [security]
 max_name_bytes = 128                   # FR-127
-sanitize_fail_action = "reject"        # 不设降级（方案 6.1）【声明性：代码未读取】
+sanitize_fail_action = "reject"        # 冻结键（CH-456）：唯一合法值，配错即启动期 ValueError
 '''

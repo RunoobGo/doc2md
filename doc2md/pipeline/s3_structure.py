@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import re
 
-from ..ir import Block, IR
+from ..ir import IR, Block
 from .s1_parse import RawPage
 
 _NUM = re.compile(r"^\s*(\d+(?:\.\d+)*)\s*[、\.::]?\s*")
@@ -50,16 +50,22 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
         for ln in page.lines:
             text = ln.text.rstrip()
             if not text.strip():
-                _flush(para_buf, blocks, seq, para_font, para_page); seq += 1; para_buf = []
+                _flush(para_buf, blocks, seq, para_font, para_page)
+                seq += 1
+                para_buf = []
                 continue
             lvl = _heading_level(text, ln.size, base_size, ln.bold)
             if lvl:
-                _flush(para_buf, blocks, seq, para_font, para_page); seq += 1; para_buf = []
+                _flush(para_buf, blocks, seq, para_font, para_page)
+                seq += 1
+                para_buf = []
                 seq = _append(Block(id=f"b{seq + 1}", type="heading", text=text.strip(),
                                     level=lvl, font=_font(ln), page=page.index), blocks, seq)
                 continue
             if _BULLET.match(text):
-                _flush(para_buf, blocks, seq, para_font, para_page); seq += 1; para_buf = []
+                _flush(para_buf, blocks, seq, para_font, para_page)
+                seq += 1
+                para_buf = []
                 seq = _append(Block(id=f"b{seq + 1}", type="list_item", text=text.strip(),
                                     font=_font(ln), page=page.index), blocks, seq)
                 continue
@@ -71,9 +77,14 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
                 para_buf.append(text.strip())
             elif para_buf:
                 _flush(para_buf, blocks, seq, para_font, para_page)
-                seq += 1; para_buf = [text.strip()]; para_font = _font(ln); para_page = page.index
+                seq += 1
+                para_buf = [text.strip()]
+                para_font = _font(ln)
+                para_page = page.index
             else:
-                para_buf = [text.strip()]; para_font = _font(ln); para_page = page.index
+                para_buf = [text.strip()]
+                para_font = _font(ln)
+                para_page = page.index
             seq = seq  # noop（保持编号语义清晰）
         _flush(para_buf, blocks, seq, para_font, para_page)
     ir = IR(doc_id="", source_key="", blocks=blocks, pages=len(pages))

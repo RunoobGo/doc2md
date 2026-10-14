@@ -11,7 +11,7 @@ import threading
 
 import pytest
 
-from doc2md.ir import Block, IR
+from doc2md.ir import IR, Block
 from doc2md.pipeline.s4_render import assert_render_contract, is_external, render
 from doc2md.scheduler import Scheduler
 

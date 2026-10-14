@@ -11,9 +11,9 @@
 """
 from __future__ import annotations
 
+from .errors import E4001_BadRequest, E4041_NotFound, E4251_RevisionConflict
 from .storage.db import Store, now_iso
 from .storage.repo import list_blocks, reindex
-from .errors import E4001_BadRequest, E4041_NotFound, E4251_RevisionConflict
 
 
 def patch_block(store: Store, doc_id: str, block_id: str, body: dict, actor: str,

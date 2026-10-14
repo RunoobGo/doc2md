@@ -14,20 +14,32 @@ from pathlib import Path
 from . import auth, config
 from .cron import sweep_tmp
 from .edits import patch_block, rollback
-from .errors import (ApiError, E4001_BadRequest, E4031_Forbidden, E4041_NotFound,
-                     E4133_DirTooWide, Doc2mdError)
+from .errors import (
+    ApiError,
+    Doc2mdError,
+    E4001_BadRequest,
+    E4031_Forbidden,
+    E4041_NotFound,
+)
 from .ops.logging import RotatingJsonlWriter
 from .pipeline.convert import convert
 from .scheduler import Scheduler
 from .security.dirguard import WalkLimits, guard_walk
 from .storage.db import Store, now_iso
-from .storage.repo import delete_doc, delete_source, get_doc, list_blocks, save_ir, search
+from .storage.repo import (
+    delete_doc,
+    delete_source,
+    get_doc,
+    list_blocks,
+    save_ir,
+    search,
+)
 
 SCRIPT_UA_HINTS = ("python-requests", "curl/", "doc2md-cli", "httpx", "go-http-client")
 
 
 def create_app(cfg: dict | None = None, root: Path | None = None):
-    from flask import Flask, jsonify, request, Response
+    from flask import Flask, Response, jsonify, request
 
     cfg = cfg or config.load()
     root = Path(root) if root else config.path_setting(cfg, "paths.root", ".")
@@ -315,7 +327,9 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
     def create_token():
         need("token_admin")
         role = body().get("role", "reader")
-        return jsonify({"token": auth.issue(store, role, body().get("label", "")),
+        return jsonify({"token": auth.issue(store, role, body().get("label", ""),
+                                            allowed=config.get(cur(), "api.token_roles",
+                                                               auth.ROLES)),
                         "role": role})
 
     @app.delete("/tokens/<token>")

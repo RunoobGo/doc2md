@@ -2,6 +2,8 @@ name: ci
 
 # 方案 8.6：6 条红线断言进 CI（merge-gate），失败阻断合并。
 # 分层口径：merge-gate 只跑 `-m gate`（红线，阻断合并）；全量 + 可复现性作为信息面。
+# CH-456（方案 T10）：ruff 静态检查为独立信息作业，与 merge-gate 并行、不互相 needs——
+# 风格判断不得变成红线，也不得拖慢红线层。
 
 on:
   push:
@@ -36,6 +38,21 @@ jobs:
 
       - name: six merge-gates (red line)
         run: python -m pytest -m gate -q --durations=10
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: ruff (F/E/I hygiene, informational)
+        run: ruff check .
 
   full-suite:
     runs-on: ubuntu-latest

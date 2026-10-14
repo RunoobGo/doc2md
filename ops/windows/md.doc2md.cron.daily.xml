@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Doc2md 日任务（方案 §539 / 附录 C-2 / ADR-30 的 Windows 侧对应物，CH-456 / T5）。
+     与 ops/launchd/md.doc2md.cron.plist 同等能力：每日本地时间 00:00 触发
+     `doc2md cron` 的日流程（日报 → 磁盘门禁 → 本地快照 → tmp 清理 → 日志轮转检查）。
+
+     安装：pwsh ops/windows/install-doc2md-tasks.ps1   （见同目录脚本，自动替换占位符）
+     校验：Get-ScheduledTask -TaskName md.doc2md.cron* | Get-ScheduledTaskInfo
+     手工导入：schtasks /Create /TN md.doc2md.cron /XML ops/windows/md.doc2md.cron.daily.xml /F
+
+     口径说明：
+     - launchd 用 EnvironmentVariables 固定 TZ=UTC；Windows 任务计划没有「按 UTC 触发」
+       开关，StartBoundary 一律按**本机本地时间**解释。要复刻 UTC 口径，把本机时区设为
+       UTC，或用安装脚本的 -DailyAt 参数按本地时间等价换算后写入。
+     - 外置副本口令绝不写进本文件（NFR-20 密钥纪律，连变量名也不出现）；由安装脚本
+       -SetPassphrase 交互式写入用户级环境变量，或改用 Credential Manager 包装。
+     - 占位符 __DOC2MD_EXE__ / __DOC2MD_ROOT__ / __DOC2MD_USER__ / __DOC2MD_START__
+       由安装脚本替换；未替换时 Register-ScheduledTask 会因 UserId/Command 无效而失败，
+       不会静默装错。 -->
+<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task" version="1.4">
+  <RegistrationInfo>
+    <Description>Doc2md 日任务：doc2md cron --daily（日报/磁盘门禁/本地快照/tmp 清理/轮转检查）</Description>
+    <URI>\md.doc2md.cron</URI>
+  </RegistrationInfo>
+  <Triggers>
+    <CalendarTrigger>
+      <StartBoundary>__DOC2MD_START__</StartBoundary>
+      <Enabled>true</Enabled>
+      <ScheduleByDay>
+        <DaysInterval>1</DaysInterval>
+      </ScheduleByDay>
+    </CalendarTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>__DOC2MD_USER__</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingBatteries>false</StopIfGoingBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT2H</ExecutionTimeLimit>
+    <Priority>7</Priority>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>__DOC2MD_EXE__</Command>
+      <Arguments>cron --daily</Arguments>
+      <WorkingDirectory>__DOC2MD_ROOT__</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>

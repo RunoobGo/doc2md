@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from doc2md.ir import Block, IR
+from doc2md.ir import IR, Block
 from doc2md.ops.backup import BackupPlan, decrypt_bytes, encrypt_bytes, hdiutil_recipe
 from doc2md.storage import repo
 from doc2md.storage.db import Store

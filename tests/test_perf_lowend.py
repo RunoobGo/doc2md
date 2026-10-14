@@ -82,8 +82,9 @@ def test_hash_of_path_matches_content_hash(cfg, tmp_path):
 
 # --- CH-448 批量进程池 --------------------------------------------------------
 def test_batch_workers_default_is_bounded(cfg):
-    from doc2md.pipeline.batch import default_workers
     import os
+
+    from doc2md.pipeline.batch import default_workers
     c = copy.deepcopy(cfg)
     c["perf"]["workers"] = 0
     assert default_workers(c) == min(4, os.cpu_count() or 1)
@@ -348,8 +349,8 @@ def test_api_jobs_returns_413_when_disk_short(tmp_cfg, tmp_path, api_ready_cfg, 
 def test_cron_records_disk_gate_failure(tmp_cfg, tmp_path, monkeypatch, cfg):
     """NFR-19 的兜底口径（方案 §「轮转异常退化为告警，NFR-6 磁盘门禁兜底」）：
     空间不足时快照步骤失败并可观测，不产生半截 sqlite。"""
-    import doc2md.ops.diskguard as dg
     import doc2md.cron as cron
+    import doc2md.ops.diskguard as dg
     from doc2md.storage.db import Store
     monkeypatch.setattr(dg, "free_mb", lambda p: 1)
     root = tmp_path / "work"
@@ -402,6 +403,7 @@ def test_cli_machine_lines_are_ascii(tmp_path, monkeypatch, capsys):
 def test_console_safe_replaces_unencodable(tmp_path, monkeypatch, capsys):
     """CH-451 复现：GBK 控制台打印 emoji 文件名原会 UnicodeEncodeError 崩栈。"""
     import io
+
     from doc2md import cli
     buf = io.TextIOWrapper(io.BytesIO(), encoding="cp936", errors="strict")
     monkeypatch.setattr(sys, "stdout", buf)

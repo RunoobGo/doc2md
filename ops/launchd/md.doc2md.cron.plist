@@ -1,9 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- Doc2md 日任务（附录 C-2 / ADR-30）：00:00 UTC 触发 doc2md cron --daily。
+<!-- Doc2md 日任务（附录 C-2 / ADR-30）：00:00 UTC 触发 doc2md cron 的日流程。
      安装：cp ops/launchd/md.doc2md.cron.plist ~/Library/LaunchAgents/
      校验：launchctl list | grep doc2md  （应列出 md.doc2md.cron 与 md.doc2md.cron.weekly）
-     注：ProgramArguments 路径按实际部署前缀改写（方案示例为 /Users/you/doc2md）。 -->
+     注：ProgramArguments 路径按实际部署前缀改写（方案示例为 /Users/you/doc2md）。
+     注：XML 注释内不得出现连续两个连字符（XML 1.0 注释非法令牌），
+         故注释里写「日流程」而非命令行开关；ProgramArguments 里的开关不受影响。 -->
 <plist version="1.0"><dict>
   <key>Label</key><string>md.doc2md.cron</string>
   <key>ProgramArguments</key><array>

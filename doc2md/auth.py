@@ -5,12 +5,15 @@
   editor —— 提交作业 + 编辑 / 回滚 + 重跑
   reader —— 只读查询与导出
 吊销即时生效：≤ revoke_window_seconds（默认 5s）内新请求 401。
+
+CH-456（T9）：删除三个零调用符号——`require`（api 统一走 `check`）、
+`timing_safe_equal`（token 比对走参数化 SQL 索引查找，无逐字节比对面）、
+`RevocationCache`（NFR-9 口径为每请求实时查库，缓存没有接入点）。
+`issue` 新增 `allowed`：可签发角色集由 `api.token_roles` 配置供给。
 """
 from __future__ import annotations
 
-import hmac
 import secrets
-import time
 
 from .errors import E4011_Unauthorized, E4031_Forbidden
 from .storage.db import Store, now_iso
@@ -33,9 +36,11 @@ MATRIX = {
 }
 
 
-def issue(store: Store, role: str = "admin", label: str = "") -> str:
-    if role not in ROLES:
-        raise ValueError(f"bad role {role}")
+def issue(store: Store, role: str = "admin", label: str = "",
+          allowed: tuple[str, ...] | list[str] = ROLES) -> str:
+    """签发 token；`allowed` 之外的角色的签发即 ValueError（api.token_roles）。"""
+    if role not in ROLES or role not in tuple(allowed):
+        raise ValueError(f"bad role {role}（可签发：{list(allowed)}）")
     token = "d2m_" + secrets.token_urlsafe(24)
     with store.tx() as tx:
         tx.execute("INSERT INTO tokens(token, role, label, created_at) VALUES (?,?,?,?)",
@@ -65,32 +70,3 @@ def check(store: Store, token: str | None, action: str,
         raise E4031_Forbidden(f"action {action} requires {need}",
                               detail={"role": row["role"], "required": need})
     return row["role"]
-
-
-def require(store: Store, token: str | None, action: str) -> str:
-    return check(store, token, action)
-
-
-def timing_safe_equal(a: str, b: str) -> bool:
-    return hmac.compare_digest(a or "", b or "")
-
-
-class RevocationCache:
-    """短 TTL 校验缓存：吊销即时生效窗口内不得放行旧 token（NFR-9 验收）。"""
-
-    def __init__(self, ttl: float = 1.0):
-        self.ttl = ttl
-        self._ok: dict[str, float] = {}
-
-    def allowed(self, token: str, valid: bool) -> bool:
-        now = time.monotonic()
-        if not valid:
-            self._ok.pop(token, None)
-            return False
-        exp = self._ok.get(token, 0)
-        if exp < now:
-            self._ok[token] = now + self.ttl
-        return True
-
-    def invalidate(self, token: str) -> None:
-        self._ok.pop(token, None)

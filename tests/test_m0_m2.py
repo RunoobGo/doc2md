@@ -4,12 +4,12 @@ from __future__ import annotations
 import json
 
 import pytest
+from gguf_fixture import build_gguf
 
 from doc2md.errors import E4221_GateReject
 from doc2md.ops import gguf
 from doc2md.pipeline import s1_5_gate
 from doc2md.pipeline.s1_parse import Line, RawPage
-from gguf_fixture import build_gguf
 
 pytestmark = pytest.mark.milestone("M0+M2")
 

@@ -1,10 +1,12 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- Doc2md 周任务（附录 C-2 / ADR-30）：周日 00:30 UTC 触发 doc2md cron --weekly。
-     --weekly 是 --daily 的超集（先幂等跑完日报流程，再追加外置加密增量打包）。
+<!-- Doc2md 周任务（附录 C-2 / ADR-30）：周日 00:30 UTC 触发 doc2md cron 的周流程。
+     周流程是日流程的超集（先幂等跑完日报各步骤，再追加外置加密增量打包）。
      口令：DOC2MD_BACKUP_PASSPHRASE 不要写进本 plist（NFR-20 密钥纪律）；
      推荐用 launchctl setenv DOC2MD_BACKUP_PASSPHRASE ... 或 Login Keychain 包装脚本注入。
-     未配置 ops.backup_external_dir 时该步骤记为 skipped，不算失败（CH-433）。 -->
+     未配置 ops.backup_external_dir 时该步骤记为 skipped，不算失败（CH-433）。
+     注：XML 注释内不得出现连续两个连字符（XML 1.0 注释非法令牌），
+         故注释里写「日/周流程」而非命令行开关；ProgramArguments 里的开关不受影响。 -->
 <plist version="1.0"><dict>
   <key>Label</key><string>md.doc2md.cron.weekly</string>
   <key>ProgramArguments</key><array>

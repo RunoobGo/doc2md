@@ -36,7 +36,11 @@ hdiutil create -encryption AES-256 -stdinpass -type SPARSEBUNDLE \
 doc2md cron --daily
 DOC2MD_BACKUP_PASSPHRASE='…' doc2md cron --weekly
 
-# 恢复（演练必做，DoD 第 11 条）
+# 恢复演练（DoD 第 11 条，一条命令跑完闭环）
+DOC2MD_BACKUP_PASSPHRASE='…' doc2md backup drill            # 退出码 0=成功 4=失败
+DOC2MD_BACKUP_PASSPHRASE='…' doc2md backup drill --keep      # 留存沙箱取证
+
+# 真恢复（从外置卷单个容器解密回工作根）
 python3 - <<'PY'
 from pathlib import Path
 from doc2md.ops.backup import BackupPlan
@@ -47,6 +51,12 @@ plan.restore(Path("/Volumes/doc2md-backup/state-XXXX.sqlite.enc"), Path("work/st
 PY
 sqlite3 work/state.sqlite "PRAGMA integrity_check;"   # 期望 ok
 ```
+
+`backup drill`（CH-456 / T7）在 `work/tmp/drill-<ts>/` 隔离沙箱内依次执行：
+**copy_live → snapshot → external_encrypt → simulate_loss → rotate → restore →
+integrity_check → compare**。线上 `state.sqlite` 只被只读拷贝，演练结束即清沙箱；
+任一步失败整体判失败（退出码 4），不落「看起来成功」的报告。报告只含表名、
+行数与 sha256 指纹前缀（NFR-20），口令只走 `DOC2MD_BACKUP_PASSPHRASE`。
 
 ## 密钥纪律（NFR-20）
 

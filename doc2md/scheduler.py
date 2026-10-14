@@ -82,23 +82,3 @@ class Scheduler:
     def get(self, job_id: str) -> dict | None:
         r = self.store.q1("SELECT * FROM tasks WHERE job_id=?", (job_id,))
         return dict(r) if r else None
-
-    def next_queued(self, limit: int = 1) -> list[dict]:
-        """只读窥视队列头部（queued），不改状态——消费方认领走 worker.claim。"""
-        rows = self.store.q(
-            "SELECT job_id, doc_id, source_key, detail_json FROM tasks"
-            " WHERE status='queued' ORDER BY created_at LIMIT ?", (max(1, int(limit)),))
-        out: list[dict] = []
-        for r in rows:
-            d = dict(r)
-            try:
-                d["payload"] = json.loads(d.get("detail_json") or "{}")
-            except (TypeError, ValueError):
-                d["payload"] = {}
-            out.append(d)
-        return out
-
-    def active_for(self, doc_id: str) -> dict | None:
-        r = self.store.q1(
-            f"SELECT * FROM tasks WHERE doc_id=? AND status IN {ACTIVE} LIMIT 1", (doc_id,))
-        return dict(r) if r else None

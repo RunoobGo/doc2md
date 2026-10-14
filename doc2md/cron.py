@@ -92,7 +92,8 @@ def run(cfg: dict | None = None, root: Path | None = None, mode: str = "daily",
                       rotation_days=int(config.get(cfg, "ops.backup_rotation_days", 14)),
                       encrypted_external=bool(
                           config.get(cfg, "ops.backup_external_encrypted", True)),
-                      work_root=root)
+                      work_root=root,
+                      work_dir_mode=str(config.get(cfg, "ops.work_dir_mode", "700")))
     if with_backup:
         # NFR-6（CH-450）：备份同样是写盘。快照大小 = 库大小（外置副本 ≈ ×1.05，
         # AES-GCM + nonce），按同一系数口径预估；空间不足记为失败步骤而不是半截文件。

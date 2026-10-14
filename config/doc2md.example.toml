@@ -1,6 +1,7 @@
 # Doc2md 部署样例配置（上游 C-1 基线 + 本仓库实现增量；逐键语义见方案 附录 A）
 # 复制为项目根 doc2md.toml，或 $DOC2MD_HOME/doc2md.toml。
-# 全部键均有内置默认值（doc2md/config/default_toml.py），本文件只列需要按部署改写的项。
+# 全部键均有内置默认值（doc2md/config/default_toml.py），本文件列全默认键集
+# （CH-456 收敛 D-10：示例与默认值不再有键集差），只改需要按部署改写的项。
 
 [paths]
 root = "work"                          # 相对路径会随 root 一起迁移（CH-432）；--root 可覆盖
@@ -8,7 +9,14 @@ out = "work/out"
 reports = "work/reports"
 logs = "work/logs"
 tmp = "work/tmp"
-vendor_models = "vendor/models/llm"
+vendor_models = "vendor/models/llm"    # 本地模型资产根（T2：llama-server 可执行与 GGUF 查找路径）
+
+[run]
+profile = "standard"                   # lite / standard / strict 三档（方案 1.2 冻结契约 + 第七章）
+                                       # lite：chunk 16 / workers 1 / queue_async true
+                                       # strict：queue_async true / min_free_mb 2048
+                                       # 用户显式配置的键永远赢过 profile（CH-456）
+offline_assert = true                  # NFR-1：转换期出站连接即抛 OfflineViolation（回环除外）
 
 [s1]
 chunk_pages = 32                       # CH-447：分块解析驻留上限（0 = 整本一次读完）
@@ -65,6 +73,23 @@ backup_external_dir = "/Volumes/doc2md-backup"   # 注释掉 = 周报按配置�
 backup_external_encrypted = true       # NFR-18：false 会被拒绝执行（PermissionError）
 backup_rotation_days = 14              # FR-128：已删数据 ≤14 天从全部副本轮出
 work_dir_mode = "700"                  # CH-437：work/ 权限由备份路径实际落实
+
+[llm]
+mode = "offline"                       # CH-456 / T2：offline = 确定性占位（默认，主链路零网络）
+                                       # server = 本地 llama-server（仅 127.0.0.1）
+fallback = true                        # server 不可用时回退 offline，保持主链路；false = 明确 E5041/503
+timeout_ms = 15000                     # 单次请求超时（连接 + 读取合计）
+model = ""                             # 模型名；空 = 取 [paths].vendor_models 下发现的 gguf 文件名
+bind = "127.0.0.1"                     # 修补助手只连回环（NFR-1）；T2 起生效
+port = 8080
+auth = false                           # CH-408：已知接受项——llama-server 本机无鉴权；
+                                       # true 时口令走 DOC2MD_LLM_TOKEN 环境变量（Bearer），不落配置
+op_whitelist = ["split_block", "merge_block", "fix_heading_level",
+                "fix_list_marker", "mark_table_boundary"]
+
+[security]
+max_name_bytes = 128                   # FR-127：消毒后文件名字节预算
+sanitize_fail_action = "reject"        # 冻结键：唯一合法值 reject（消毒失败即拒收，不设降级）
 
 [chunks]
 tokenizer = "gguf-embedded"            # CH-402：vocab 从生产 GGUF 导出

@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Doc2md 周任务（方案 §539 / 附录 C-2 / ADR-30 的 Windows 侧对应物，CH-456 / T5）。
+     与 ops/launchd/md.doc2md.cron.weekly.plist 同等能力：每周日本地时间 00:30 触发
+     `doc2md cron` 的周流程（日流程的超集：先完整执行日报各步骤，再追加外置加密增量）。
+
+     安装：pwsh ops/windows/install-doc2md-tasks.ps1   （见同目录脚本，自动替换占位符）
+     校验：Get-ScheduledTask -TaskName md.doc2md.cron* | Get-ScheduledTaskInfo
+     手工导入：schtasks /Create /TN md.doc2md.cron.weekly /XML ops/windows/md.doc2md.cron.weekly.xml /F
+
+     口径说明（与日任务一致）：
+     - Windows 触发按本机本地时间解释（launchd 侧固定 UTC）；未配置 ops.backup_external_dir
+       时外置加密步骤记 skipped，不算失败（CH-433）——与 plist 注释同口径。
+     - 外置副本口令绝不写进本文件（NFR-20 密钥纪律，连变量名也不出现）；由安装脚本
+       -SetPassphrase 交互式写入用户级环境变量，或改用 Credential Manager 包装。
+     - 占位符 __DOC2MD_EXE__ / __DOC2MD_ROOT__ / __DOC2MD_USER__ / __DOC2MD_START__
+       由安装脚本替换；未替换时注册必然失败，不会静默装错。 -->
+<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task" version="1.4">
+  <RegistrationInfo>
+    <Description>Doc2md 周任务：doc2md cron --weekly（--daily 超集 + 外置加密增量，NFR-18）</Description>
+    <URI>\md.doc2md.cron.weekly</URI>
+  </RegistrationInfo>
+  <Triggers>
+    <CalendarTrigger>
+      <StartBoundary>__DOC2MD_START__</StartBoundary>
+      <Enabled>true</Enabled>
+      <ScheduleByWeek>
+        <WeeksInterval>1</WeeksInterval>
+        <DaysOfWeek>
+          <Sunday />
+        </DaysOfWeek>
+      </ScheduleByWeek>
+    </CalendarTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>__DOC2MD_USER__</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingBatteries>false</StopIfGoingBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT2H</ExecutionTimeLimit>
+    <Priority>7</Priority>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>__DOC2MD_EXE__</Command>
+      <Arguments>cron --weekly</Arguments>
+      <WorkingDirectory>__DOC2MD_ROOT__</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>

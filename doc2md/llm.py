@@ -1,12 +1,21 @@
-"""LLM 层 —— 注入立场与 op 白名单校验（ADR-29 / CH-405，附录 D）。
+"""LLM 层 —— 注入立场与 op 白名单校验（ADR-29 / CH-405，附录 D）+ 本地服务客户端（CH-456 / T2）。
 
 立场纪律：文档内容一律视为不可信数据；白名单与 5 道校验是唯一防线，
 模型「听话」不是防线。拒绝路径必须落归因日志（区分「模型胡话」与「注入成功」）。
+
+基座纪律（方案 3.6）：本模块除标准库外无包内导入。服务客户端用 stdlib
+`urllib` 直连 `llm.bind:llm.port`（默认 127.0.0.1:8080，NFR-1 离线红线——
+出站守护见 `security/netguard.offline_guard`，非回环一律 OfflineViolation）；
+错误码映射（E5041 / 503）由上层 `pipeline/convert.py` 负责，基座不向上引用。
 """
 from __future__ import annotations
 
 import json
+import os
 import re
+import urllib.error
+import urllib.request
+from pathlib import Path
 
 DEFAULT_OP_WHITELIST = ["split_block", "merge_block", "fix_heading_level",
                         "fix_list_marker", "mark_table_boundary"]
@@ -120,11 +129,198 @@ def offline_llm(ir, whitelist: list[str] | None = None, *, injected_probe: list[
     accepted, rejected = v.apply(ops)
     return {"accepted": accepted, "rejected": rejected,
             "applied_ops": [o["op"] for o in accepted],
-            "rejected_ops": [o["op"] for o in rejected]}
+            "rejected_ops": [o["op"] for o in rejected],
+            "source": "offline"}
 
 
 def _leading_num(t: str) -> bool:
     return bool(re.match(r"^\s*\d+(\.\d+)*", t or ""))
+
+
+# --- 本地模型服务客户端（CH-456 / T2） ----------------------------------------
+DEFAULT_LLM_TIMEOUT_MS = 15000
+MAX_OPS_PER_RESPONSE = 64              # 防御性上限：模型失控输出不得放大成批量写
+DEFAULT_MODEL_NAME = "doc2md-repair"
+
+
+class LlmServiceError(RuntimeError):
+    """本地模型服务不可用 / 响应不可用。由上层映射 E5041（HTTP 503）。
+
+    stage: connect（连不上/超时）| http（非 2xx）| parse（响应不是约定 JSON）
+    message 只含服务侧诊断（状态行 / 原因前 200 字符），绝不含文档正文（NFR-20）。
+    """
+
+    def __init__(self, message: str, *, stage: str, status: int | None = None):
+        super().__init__(message)
+        self.stage = stage
+        self.status = status
+
+
+def _cfg_get(cfg, dotted: str, default):
+    """口径与 config.get 一致的本地点读（本模块不 import config，守基座零依赖）。"""
+    cur = cfg
+    for part in dotted.split("."):
+        if not isinstance(cur, dict) or part not in cur:
+            return default
+        cur = cur[part]
+    return cur
+
+
+class LlmClient:
+    """llama-server（OpenAI 兼容 /v1/chat/completions）最小客户端。
+
+    只连 loopback；请求/响应体一律不落日志（NFR-20：只回计数与指纹）。
+    """
+
+    def __init__(self, *, bind: str = "127.0.0.1", port: int = 8080, auth: bool = False,
+                 timeout_ms: int = DEFAULT_LLM_TIMEOUT_MS, model: str = "",
+                 vendor_models: str = ""):
+        self.bind = str(bind)
+        self.port = int(port)
+        self.auth = bool(auth)
+        self.timeout_ms = int(timeout_ms)
+        self.model = str(model or "") or _discover_model(vendor_models)
+
+    @classmethod
+    def from_cfg(cls, cfg) -> "LlmClient":
+        return cls(
+            bind=_cfg_get(cfg, "llm.bind", "127.0.0.1"),
+            port=int(_cfg_get(cfg, "llm.port", 8080)),
+            auth=bool(_cfg_get(cfg, "llm.auth", False)),
+            timeout_ms=int(_cfg_get(cfg, "llm.timeout_ms", DEFAULT_LLM_TIMEOUT_MS)),
+            model=str(_cfg_get(cfg, "llm.model", "") or ""),
+            vendor_models=str(_cfg_get(cfg, "paths.vendor_models", "") or ""))
+
+    @property
+    def base_url(self) -> str:
+        return f"http://{self.bind}:{self.port}"
+
+    # -- 请求构造 -------------------------------------------------------------
+    def _headers(self) -> dict:
+        h = {"Content-Type": "application/json"}
+        if self.auth:
+            tok = os.environ.get("DOC2MD_LLM_TOKEN") or ""
+            if not tok:
+                raise LlmServiceError("llm.auth=true but DOC2MD_LLM_TOKEN not set",
+                                      stage="auth")
+            h["Authorization"] = f"Bearer {tok}"
+        return h
+
+    def repair(self, ir, whitelist: list[str] | None = None, *,
+               injected_probe: list[dict] | None = None) -> dict:
+        """真实服务路径：发提示 → 解析 op → 过同一套 OpValidator。
+
+        返回结构与 offline_llm 一致（外加 source/stage 计数），上层无需分支。
+        """
+        payload = self._build_payload(ir.blocks, whitelist)
+        body = self._post("/v1/chat/completions", payload)
+        ops = _parse_ops(body)
+        v = OpValidator(ir.blocks, whitelist)
+        # 探针（测试/演练用）拼在模型输出之后，与 offline 口径同一趟校验
+        accepted, rejected = v.apply(list(ops) + list(injected_probe or []))
+        return {"accepted": accepted, "rejected": rejected,
+                "applied_ops": [o["op"] for o in accepted],
+                "rejected_ops": [o["op"] for o in rejected],
+                "source": "server",
+                "response_ops": len(ops),
+                "injection_hint": scan_injection(_content_of(body))}
+
+    def probe(self) -> tuple[bool, str]:
+        """doctor 用：GET /health（llama-server 就绪返回 {"status":"ok"}）。"""
+        try:
+            body = self._get("/health")
+            ok = "ok" in body.lower()
+            return ok, ("reachable" if ok else f"unexpected body: {body[:80]}")
+        except LlmServiceError as exc:
+            return False, f"{exc.stage}: {exc}"
+
+    def _build_payload(self, blocks, whitelist) -> dict:
+        digest = [{"id": b.id, "type": b.type, "level": b.level,
+                   "immutable": bool(b.immutable), "page": b.page} for b in blocks]
+        user = ("待修补 IR（只含定位元数据）：\n" + json.dumps(digest, ensure_ascii=False) +
+                f"\n白名单 op：{json.dumps(sorted(set(whitelist or DEFAULT_OP_WHITELIST)), ensure_ascii=False)}"
+                "\n只输出 {\"ops\": [...]} JSON，不得附加任何自然语言。")
+        return {"model": self.model or DEFAULT_MODEL_NAME,
+                "messages": [{"role": "system", "content": SYSTEM_PROMPT_V24},
+                             {"role": "user", "content": user}],
+                "temperature": 0, "max_tokens": 512, "stream": False}
+
+    # -- 传输 -----------------------------------------------------------------
+    def _post(self, path: str, payload: dict) -> dict:
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        req = urllib.request.Request(self.base_url + path, data=data,
+                                     headers=self._headers(), method="POST")
+        return self._send(req)
+
+    def _get(self, path: str) -> str:
+        req = urllib.request.Request(self.base_url + path, headers=self._headers(),
+                                     method="GET")
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout_ms / 1000) as r:
+                return r.read(4096).decode("utf-8", "replace")
+        except urllib.error.HTTPError as exc:
+            raise LlmServiceError(f"http {exc.code}", stage="http", status=exc.code) from exc
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            raise LlmServiceError(f"{type(exc).__name__}: {exc}", stage="connect") from exc
+
+    def _send(self, req: urllib.request.Request) -> dict:
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout_ms / 1000) as r:
+                raw = r.read(1 << 20).decode("utf-8", "replace")
+        except urllib.error.HTTPError as exc:
+            reason = ""
+            try:
+                reason = exc.read(200).decode("utf-8", "replace")
+            except Exception:
+                pass
+            raise LlmServiceError(f"http {exc.code} {reason}".strip(),
+                                  stage="http", status=exc.code) from exc
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            raise LlmServiceError(f"{type(exc).__name__}: {exc}", stage="connect") from exc
+        try:
+            return json.loads(raw)
+        except ValueError as exc:
+            raise LlmServiceError(f"non-JSON response: {exc}", stage="parse") from exc
+
+
+def _content_of(resp: dict) -> str:
+    try:
+        return str(resp["choices"][0]["message"]["content"] or "")
+    except (KeyError, IndexError, TypeError):
+        return ""
+
+
+def _parse_ops(resp: dict) -> list[dict]:
+    """从聊天响应里提取 op 数组：容忍 ```json 围栏与前后杂音，拒绝任何非约定形态。"""
+    content = _content_of(resp)
+    if not content.strip():
+        raise LlmServiceError("empty model output", stage="parse")
+    text = content.strip()
+    fence = re.match(r"^```(?:json)?\s*(.*?)\s*```$", text, flags=re.S)
+    if fence:
+        text = fence.group(1).strip()
+    m = re.search(r"[\[{]", text)
+    if not m:
+        raise LlmServiceError("no JSON value in model output", stage="parse")
+    try:
+        obj, _end = json.JSONDecoder().raw_decode(text, m.start())   # 容忍尾部杂音
+    except ValueError as exc:
+        raise LlmServiceError(f"unparsable JSON: {exc}", stage="parse") from exc
+    ops = obj.get("ops") if isinstance(obj, dict) else obj
+    if not isinstance(ops, list) or not all(isinstance(o, dict) and "op" in o for o in ops):
+        raise LlmServiceError("ops payload shape invalid", stage="parse")
+    return ops[:MAX_OPS_PER_RESPONSE]
+
+
+def _discover_model(vendor_models: str) -> str:
+    """paths.vendor_models 下若恰有一个 gguf，取其文件名作模型名（T2 消费点）。"""
+    if not vendor_models:
+        return ""
+    try:
+        ggufs = sorted(Path(vendor_models).glob("*.gguf"))
+    except OSError:
+        return ""
+    return ggufs[0].stem if len(ggufs) == 1 else ""
 
 
 def apply_ops(ir, accepted: list[dict]) -> int:

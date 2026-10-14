@@ -11,11 +11,17 @@
 - B-14 test_edit_optimistic_lock 的审计断言写的是 `audit[-1]["before"] == "改A"`，
   与自身 fixture 顺序矛盾（第一次 PATCH 后只有一条审计，before 应为原文）；
   本实现按 ADR-28 真实语义断言「每条审计的 before 等于 from_revision 的内容」。
+
+CH-456（T8 门禁时长裁剪）：`test_shard_fallback_is_honest` 与
+`test_shard_stitch_merges_continuation` 原各跑一次 320 页大样本全量转换
+（合计约 44s）。两处的断言集全部与文档大小无关（降级诚实性 / 缝合续接机制），
+改用 4 页专用样本 `_mid_sentence_pdf`（每页正文以逗号收尾，同字体跨页续写），
+把片界 deterministically 落在句中断续处；`test_shard_two_phase` 的大样本
+相似度红线不动。裁剪后红线层单轮约 55s（沙箱实测，见方案 第十二章）。
 """
 from __future__ import annotations
 
 import json
-import zipfile
 from pathlib import Path
 
 import pytest
@@ -37,6 +43,35 @@ MALICIOUS_NAMES = [
     "bad\x00name.pdf", "ctrl\x01\x02chars.pdf",
     "a" * 200 + ".pdf", "\ud800lone.pdf",
 ]
+
+
+def _mid_sentence_pdf(tmp_path, pages: int = 4) -> Path:
+    """跨片续接专用样本（CH-456 / T8）：每页前 9 行是完整句子（句号收尾），
+    第 10 行是 2 字段续接（逗号收尾、同字体同字号）→ 片界必然落在句中断续处，
+    缝合判定确定触发；且每缝被吸收的文本仅 2 字，similarity 红线不受样本规模影响。
+    不设标题行：片首块须与上一片片尾块同字号，16pt 标题会挡掉续接判定。"""
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.units import cm
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+    from reportlab.pdfgen import canvas
+
+    pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
+    p = tmp_path / "mid_sentence.pdf"
+    c = canvas.Canvas(str(p), pagesize=A4)
+    _w, height = A4
+    for page in range(pages):
+        c.setFont("STSong-Light", 10.5)
+        y = height - 4 * cm
+        for i in range(9):
+            # 每句唯一：重复文本会让 difflib 行对齐退化，similarity 红线失真
+            c.drawString(2 * cm, y,
+                         f"第{page + 1}页第{i + 1}个完整句子，句末以句号收尾，内容足够长。")
+            y -= 0.6 * cm
+        c.drawString(2 * cm, y, "续，")
+        c.showPage()
+    c.save()
+    return p
 
 
 # --- 1. shard_two_phase（FR-126 再修订 / M4M6）--------------------------------
@@ -62,12 +97,19 @@ def test_shard_edge_filterable_in_report(large_sharded):
     assert "本文为分片转换" in json.dumps(large_sharded.meta, ensure_ascii=False)
 
 
-def test_shard_stitch_merges_continuation(large_pdf, cfg, large_single):
-    """缝合真发生：挑一个片界落在半句处的片大小，断言 stitched ≥ 1 + absorbed_ids 留痕。"""
+def test_shard_stitch_merges_continuation(tmp_path, cfg):
+    """缝合真发生：挑一个片界落在半句处的片大小，断言 stitched ≥ 1 + absorbed_ids 留痕。
+
+    CH-456（T8）：改测 4 页专用样本（`_mid_sentence_pdf`，片界必然落在句中断续处），
+    不再跑 320 页大样本全量转换；相似度基线用同一样本的 single 模式（断言强度不变）。
+    """
     import copy
+    sample = _mid_sentence_pdf(tmp_path)
     c = copy.deepcopy(cfg)
-    c["s2"]["max_pages_per_shard"] = 160          # 片界落在跨句延续处（实测 stitched=1）
-    r = convert(large_pdf, cfg=c, mode="two_phase")
+    c["s2"]["max_pages_per_shard"] = 1          # 每页一片，片界 = 页界
+    c["s2"]["shard_overlap_pages"] = 0
+    single = convert(sample, cfg=c, mode="single")
+    r = convert(sample, cfg=c, mode="two_phase")
     st = r.meta["shard_stats"]
     assert st["shards"] >= 2
     assert st["stitched"] >= 1, f"未发生缝合续接：{st}"
@@ -75,7 +117,7 @@ def test_shard_stitch_merges_continuation(large_pdf, cfg, large_single):
     assert absorbed, "缝合未记 absorbed_ids"
     assert any("s4:shard_stitch" in (b.provenance or {}).get("modified_by", [])
                for b in absorbed)
-    assert char_similarity(large_single.markdown, r.markdown) >= 0.99
+    assert char_similarity(single.markdown, r.markdown) >= 0.99
 
 
 def test_shard_overlap_dedupe_no_duplicate_ids(large_sharded):
@@ -91,8 +133,12 @@ def test_shard_pages_not_double_counted(large_single, large_sharded):
     assert st["shards"] >= 2 and st["dropped_dupes"] > 0
 
 
-def test_shard_fallback_is_honest(large_pdf, cfg, monkeypatch):
-    """方案 4.3：缝合异常降级单片，且不得把降级产物标成 sharded=True。"""
+def test_shard_fallback_is_honest(tmp_path, cfg, monkeypatch):
+    """方案 4.3：缝合异常降级单片，且不得把降级产物标成 sharded=True。
+
+    CH-456（T8）：改测 4 页专用样本（每页一片强制 ≥2 片后触发缝合），
+    断言集与文档大小无关；不再跑 320 页大样本全量转换。
+    """
     import copy
     import importlib
     cv = importlib.import_module("doc2md.pipeline.convert")   # 包属性 convert 已被函数遮蔽
@@ -102,8 +148,11 @@ def test_shard_fallback_is_honest(large_pdf, cfg, monkeypatch):
 
     # convert.py 以 `from .sharding import stitch_shards` 绑定名字 → 必须打 convert 模块的引用
     monkeypatch.setattr(cv, "stitch_shards", boom)
+    sample = _mid_sentence_pdf(tmp_path)
     c = copy.deepcopy(cfg)
-    r = cv.convert(large_pdf, cfg=c, mode="two_phase")
+    c["s2"]["max_pages_per_shard"] = 1
+    c["s2"]["shard_overlap_pages"] = 0
+    r = cv.convert(sample, cfg=c, mode="two_phase")
     assert r.meta["shard_stats"].get("fallback") is True
     assert r.meta["sharded"] is False and r.meta["shard_count"] == 1
     assert WARN_TABLE_ACROSS_SHARD in r.meta["warnings"]
@@ -137,8 +186,8 @@ def test_product_zip_entries(large_zip_names):
 def test_zip_rejects_unsafe_source_name(tmp_path, small_pdf):
     """打包双闸：越权名不得进 zip 条目。"""
     from doc2md.errors import E4003_FileNameUnsafe
-    from doc2md.pipeline.convert import package
     from doc2md.ir import IR
+    from doc2md.pipeline.convert import package
     ir = IR(doc_id="d1", source_key="s1", source_name="../evil.md", format="pdf", pages=1)
     with pytest.raises(E4003_FileNameUnsafe):
         package(ir, "x", {}, tmp_path, config.load())
@@ -147,6 +196,7 @@ def test_zip_rejects_unsafe_source_name(tmp_path, small_pdf):
 def test_dirguard_symlink_loop_bounded(golden_dir):
     """符号链接循环目录：10s 内扫完且不跟随（验收 M3）。"""
     import time
+
     from doc2md.security.dirguard import WalkLimits, guard_walk
     root = golden_dir / "dirs" / "symlink_loop"
     if not root.is_dir():
@@ -250,7 +300,7 @@ def test_edit_optimistic_lock(saved_doc):
 def test_edit_gray_release_optional(cfg, store):
     """方案 8.5 灰度：require_base_revision=False 时缺省沿用旧行为 + 告警。"""
     from doc2md.edits import patch_block
-    from doc2md.ir import Block, IR
+    from doc2md.ir import IR, Block
     ir = IR(doc_id="gx", source_key="gxk", source_name="a.pdf", format="pdf", pages=1,
             blocks=[Block(id="b1", type="paragraph", text="原文", page=0)])
     from doc2md.storage.repo import save_ir
@@ -365,7 +415,7 @@ def test_service_business_events_land_in_logs(tmp_path, tmp_cfg, small_pdf):
                  json={"text": secret, "base_revision": 1}, headers=h)
     app.config["doc2md"]["writer"].close()
     dumped = (root / "logs" / "app.jsonl").read_text(encoding="utf-8")
-    codes = [json.loads(l)["code"] for l in dumped.splitlines()]
+    codes = [json.loads(ln)["code"] for ln in dumped.splitlines()]
     assert "job_done" in codes and "text_edited" in codes
     assert "本条款" not in dumped, "NFR-20：正文片段进了服务日志"
 

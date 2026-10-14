@@ -11,10 +11,8 @@ schema 覆盖本期全部落点：
 """
 from __future__ import annotations
 
-import json
 import sqlite3
 import threading
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -234,7 +232,3 @@ class _Tx:
     @property
     def rowcount(self):
         return self.conn.execute("SELECT changes()").fetchone()[0]
-
-    @property
-    def lastrowid(self):
-        return self.conn.execute("SELECT last_insert_rowid()").fetchone()[0]

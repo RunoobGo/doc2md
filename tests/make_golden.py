@@ -11,8 +11,6 @@ import os
 import random
 import re
 import shutil
-import string
-import sys
 import unicodedata
 from pathlib import Path
 
@@ -20,12 +18,12 @@ from pathlib import Path
 import pdfplumber
 import pypdf
 import reportlab.rl_config
+from docx import Document
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import cm
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.cidfonts import UnicodeCIDFont
 from reportlab.pdfgen import canvas
-from docx import Document
 
 # CH-442：黄金样本必须**逐字节可复现**（SEED=20241013 的本意），但 reportlab 默认把
 # 生成时刻写进 /CreationDate 与 /ID，同一份脚本重跑得到的是内容相同、哈希不同的 PDF
@@ -232,7 +230,7 @@ def make_large_320p():
         prev_last_line = ""
         for i, page in enumerate(pdf.pages):
             text = page.extract_text() or ""
-            lines = [l.strip() for l in text.split('\n') if l.strip()]
+            lines = [ln.strip() for ln in text.split('\n') if ln.strip()]
             if not lines:
                 continue
 
@@ -459,8 +457,8 @@ def make_injection_samples():
             c.showPage()
         c.save()
 
-        print_product(cln_path, f"干净版本")
-        print_product(inj_path, f"注入版本")
+        print_product(cln_path, "干净版本")
+        print_product(inj_path, "注入版本")
 
 
 # ============================================================================
@@ -775,49 +773,49 @@ def make_dirs():
     if FORCE_REGEN and loop_dir.exists():
         shutil.rmtree(loop_dir, ignore_errors=True)
     if not should_skip(loop_dir / "A"):
-        print(f"  → 生成 symlink_loop/ ...")
+        print("  → 生成 symlink_loop/ ...")
         loop_dir.mkdir(exist_ok=True)
         # CH-442：用相对目标建循环链接。绝对路径写死本机安装位置，
         # 样本集随仓库分发/解包到别处后链接即成断链，M3 循环防护用例被 skip 掉（假通过）。
         (loop_dir / "A").symlink_to("B")
         (loop_dir / "B").symlink_to("A")
-        print(f"  ✓ symlink_loop/ (A↔B 循环)")
+        print("  ✓ symlink_loop/ (A↔B 循环)")
 
     # deep/ - 深层目录
     deep_dir = dirs_root / "deep"
     if FORCE_REGEN and deep_dir.exists():
         shutil.rmtree(deep_dir, ignore_errors=True)
     if not should_skip(deep_dir / "level_01"):
-        print(f"  → 生成 deep/ (25 层) ...")
+        print("  → 生成 deep/ (25 层) ...")
         current = deep_dir
         for i in range(1, 26):
             current = current / f"level_{i:02d}"
             current.mkdir(parents=True, exist_ok=True)
         (current / "leaf.txt").write_text("leaf node")
-        print(f"  ✓ deep/ (25 层深度)")
+        print("  ✓ deep/ (25 层深度)")
 
     # many/ - 大量小文件
     many_dir = dirs_root / "many"
     if FORCE_REGEN and many_dir.exists():
         shutil.rmtree(many_dir, ignore_errors=True)
     if not should_skip(many_dir / "file_0000"):
-        print(f"  → 生成 many/ (5100 个文件) ...")
+        print("  → 生成 many/ (5100 个文件) ...")
         many_dir.mkdir(exist_ok=True)
         for i in range(5100):
             (many_dir / f"file_{i:04d}").write_bytes(b"x")
-        print(f"  ✓ many/ (5100 个 1 字节文件)")
+        print("  ✓ many/ (5100 个 1 字节文件)")
 
     # hidden/ - 隐藏文件
     hidden_dir = dirs_root / "hidden"
     if FORCE_REGEN and hidden_dir.exists():
         shutil.rmtree(hidden_dir, ignore_errors=True)
     if not should_skip(hidden_dir / ".hidden_file"):
-        print(f"  → 生成 hidden/ ...")
+        print("  → 生成 hidden/ ...")
         hidden_dir.mkdir(exist_ok=True)
         (hidden_dir / ".hidden_file").write_text("hidden")
         (hidden_dir / ".hidden_dir").mkdir()
         (hidden_dir / "normal.txt").write_text("normal")
-        print(f"  ✓ hidden/ (含隐藏文件和目录)")
+        print("  ✓ hidden/ (含隐藏文件和目录)")
 
 
 # ============================================================================
@@ -856,7 +854,7 @@ def make_bigfile():
 def make_manifest():
     """生成产物清单"""
     manifest_path = GOLDEN_DIR / "MANIFEST.json"
-    print(f"\n→ 生成 MANIFEST.json ...")
+    print("\n→ 生成 MANIFEST.json ...")
 
     entries = []
 
@@ -967,7 +965,7 @@ def self_check():
             prev_last_line = ""
             for i, page in enumerate(pdf.pages):
                 text = page.extract_text() or ""
-                lines = [l.strip() for l in text.split('\n') if l.strip()]
+                lines = [ln.strip() for ln in text.split('\n') if ln.strip()]
                 if not lines:
                     continue
 
@@ -1079,7 +1077,7 @@ def self_check():
             prev_last_line = ""
             for i, page in enumerate(pdf.pages):
                 text = page.extract_text() or ""
-                lines = [l.strip() for l in text.split('\n') if l.strip()]
+                lines = [ln.strip() for ln in text.split('\n') if ln.strip()]
                 if not lines:
                     continue
 
@@ -1146,7 +1144,7 @@ def main():
     print("=" * 60)
     print(f"输出目录: {GOLDEN_DIR}")
     print(f"强制重生成: {'是' if FORCE_REGEN else '否'}")
-    print(f"字体方案: UnicodeCIDFont('STSong-Light')")
+    print("字体方案: UnicodeCIDFont('STSong-Light')")
     print()
 
     # 创建输出目录

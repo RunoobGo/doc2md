@@ -91,6 +91,13 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--weekly", action="store_true")
     cr.add_argument("--no-backup", action="store_true", help="跳过备份步骤（排障用）")
 
+    bk = sub.add_parser("backup", help="备份恢复演练（DoD 第 11 条，CH-456 / T7）")
+    _add_common(bk)
+    bksub = bk.add_subparsers(dest="bk_cmd", required=True)
+    dl = bksub.add_parser("drill", help="隔离沙箱内跑完整恢复闭环（快照→加密→丢失→轮出→恢复→校验→比对）")
+    _add_common(dl)
+    dl.add_argument("--keep", action="store_true", help="保留演练沙箱目录（取证用）")
+
     cv = sub.add_parser("convert", help="转换文件 / 目录")
     _add_common(cv)
     cv.add_argument("path")
@@ -100,6 +107,11 @@ def build_parser() -> argparse.ArgumentParser:
     cv.add_argument("--follow-symlinks", action="store_true")
     cv.add_argument("--workers", type=int,
                     help="批量进程数（CH-448）；缺省 = [perf].workers（0 自动 min(4, CPU)），1 = 串行")
+    cv.add_argument("--llm-mode", choices=("offline", "server"),
+                    help="LLM 补助实现（CH-456 / T2）：offline = 确定性占位（默认，零网络）；"
+                         "server = 本地 llama-server（llm.bind:llm.port）")
+    cv.add_argument("--llm-no-fallback", action="store_true",
+                    help="server 模式服务不可用时明确失败（E5041 / 退出码 4），不回退 offline")
 
     wk = sub.add_parser("work", help="消费 tasks 队列（CH-449，低配机异步转换）")
     _add_common(wk)
@@ -193,7 +205,8 @@ def _cmd_token(args: argparse.Namespace, cfg: dict) -> int:
         print(json.dumps({"revoked": True, "effective_within_s": int(config.get(
             cfg, "api.revoke_effective_seconds", 5))}, ensure_ascii=False))
         return EXIT_OK
-    print(auth.issue(store, args.role, args.label))
+    print(auth.issue(store, args.role, args.label,
+                     allowed=config.get(cfg, "api.token_roles", auth.ROLES)))
     return EXIT_OK
 
 
@@ -208,6 +221,21 @@ def cmd_cron(args: argparse.Namespace) -> int:
     return EXIT_OK if rep.ok else EXIT_SYS
 
 
+# --- backup drill ---------------------------------------------------------------
+def cmd_backup_drill(args: argparse.Namespace) -> int:
+    """备份恢复演练（DoD 第 11 条）：一条命令跑完恢复闭环，沙箱隔离、不碰线上库。"""
+    from .ops.drill import DrillFailure, run_drill
+    cfg = _cfg(args)
+    root = _root(cfg)
+    try:
+        rep = run_drill(cfg, root, keep=args.keep)
+    except DrillFailure as exc:
+        print(_jline({"ok": False, "error": str(exc)}), file=sys.stderr)
+        return EXIT_BIZ
+    print(_jline(rep.to_dict()))
+    return EXIT_OK if rep.ok else EXIT_BIZ
+
+
 # --- convert ------------------------------------------------------------------
 def _gate_summary(detail: dict) -> dict:
     """CLI 只回摘要（页级明细留在报告 / --json）；避免 stderr 被 20×N 字段刷满。"""
@@ -218,6 +246,11 @@ def _gate_summary(detail: dict) -> dict:
 def cmd_convert(args: argparse.Namespace) -> int:
     from .pipeline.batch import default_workers, run_batch
     cfg = _cfg(args)
+    # CH-456 / T2：--llm-mode / --llm-no-fallback 覆盖声明性配置（口径与配置键一致）
+    if getattr(args, "llm_mode", None):
+        cfg.setdefault("llm", {})["mode"] = args.llm_mode
+    if getattr(args, "llm_no_fallback", False):
+        cfg.setdefault("llm", {})["fallback"] = False
     src = Path(args.path).expanduser()
     if src.is_dir():
         files = _dir_files(src, cfg, bool(args.follow_symlinks))
@@ -240,8 +273,8 @@ def cmd_convert(args: argparse.Namespace) -> int:
             rc = max(rc, _report(res, as_json=args.json))
         return rc
 
-    from .pipeline.convert import convert
     from .errors import Doc2mdError, E4221_GateReject
+    from .pipeline.convert import convert
     for f in files:
         try:
             res = convert(f, cfg=cfg, mode=args.mode, out_dir=out)
@@ -295,9 +328,9 @@ def _report(res: dict, *, as_json: bool) -> int:
 # --- work ---------------------------------------------------------------------
 def cmd_work(args: argparse.Namespace) -> int:
     """队列消费（CH-449）。`serve` 不起线程（ADR-30），异步转换由本进程承担。"""
+    from . import worker
     from .scheduler import Scheduler
     from .storage.db import Store
-    from . import worker
     cfg = _cfg(args)
     root = _root(cfg)
     root.mkdir(parents=True, exist_ok=True)
@@ -349,12 +382,12 @@ def _dir_files(src: Path, cfg: dict, follow: bool) -> list[Path]:
 
 def cmd_watch(args: argparse.Namespace) -> int:
     from . import worker
+    from .pipeline.convert import convert
     from .scheduler import Scheduler
     from .security.dirguard import WalkLimits
     from .security.watcher import StabilityTracker
     from .storage.db import Store
     from .storage.repo import save_ir
-    from .pipeline.convert import convert
     cfg = _cfg(args)
     root = _root(cfg)
     store = Store(root / "state.sqlite")
@@ -436,9 +469,18 @@ def cmd_tokenizer(args: argparse.Namespace) -> int:
 def cmd_doctor(args: argparse.Namespace) -> int:
     cfg = _cfg(args)
     root = _root(cfg)
+    # CH-456（T9）：冻结键校验进自检面——配置错误在 doctor 就暴露，不进运行期静默失效
+    try:
+        config.validate(cfg)
+        frozen_ok = True
+    except ValueError as exc:
+        frozen_ok = False
+        print(f"config invalid: {exc}", file=sys.stderr)
     checks = {
         "python": sys.version.split()[0],
         "pipeline": PIPELINE_VERSION,
+        "config_frozen_keys": "ok" if frozen_ok else "invalid",
+        "run_profile": config.get(cfg, "run.profile"),
         "root": str(root),
         "root_exists": root.exists(),
         "root_mode": oct(root.stat().st_mode & 0o777) if root.exists() else None,
@@ -447,6 +489,10 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         "shard_mode": config.get(cfg, "s2.mode", "auto"),
         "max_pages_per_shard": config.get(cfg, "s2.max_pages_per_shard"),
         "op_whitelist": config.get(cfg, "llm.op_whitelist"),
+        "llm_mode": config.get(cfg, "llm.mode", "offline"),
+        "llm_fallback": config.get(cfg, "llm.fallback", True),
+        "llm_endpoint": f"{config.get(cfg, 'llm.bind')}:{config.get(cfg, 'llm.port')}",
+        "llm_vendor_models": _vendor_models(cfg),
         "base_revision_required": config.get(cfg, "api.base_revision_required"),
         "logs_rotate_mb": config.get(cfg, "logs.rotate_mb"),
         "backup_encrypted_external": config.get(cfg, "ops.backup_external_encrypted"),
@@ -466,13 +512,28 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             checks[f"dep_{mod}"] = "ok"
         except Exception as exc:             # noqa: BLE001 — 自检用途
             checks[f"dep_{mod}"] = f"MISSING ({type(exc).__name__})"
+    # CH-456 / T2：server 模式下探测 llama-server /health（offline 模式不探测，零网络）
+    if str(config.get(cfg, "llm.mode", "offline")) == "server":
+        from .llm import LlmClient
+        ok, why = LlmClient.from_cfg(cfg).probe()
+        checks["llm_server"] = "reachable" if ok else f"unreachable ({why})"
     print(json.dumps(checks, ensure_ascii=False, indent=2))
     return EXIT_OK if not any(str(v).startswith("MISSING") for v in checks.values()) else EXIT_SYS
 
 
+def _vendor_models(cfg) -> list[str]:
+    """paths.vendor_models 下的 gguf 资产清单（T2 消费点：定位本地模型文件）。"""
+    import glob
+    base = str(config.get(cfg, "paths.vendor_models", "") or "")
+    if not base:
+        return []
+    return sorted(Path(p).name for p in glob.glob(str(Path(base) / "*.gguf")))
+
+
 COMMANDS = {"serve": cmd_serve, "cron": cmd_cron, "convert": cmd_convert,
             "watch": cmd_watch, "work": cmd_work,
-            "tokenizer": cmd_tokenizer, "doctor": cmd_doctor}
+            "tokenizer": cmd_tokenizer, "doctor": cmd_doctor,
+            "backup": cmd_backup_drill}
 
 
 def main(argv: list[str] | None = None) -> int:

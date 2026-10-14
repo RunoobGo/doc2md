@@ -31,7 +31,7 @@ class RawPage:
 
     @property
     def chars(self) -> int:
-        return sum(len(l.text.strip()) for l in self.lines)
+        return sum(len(ln.text.strip()) for ln in self.lines)
 
 
 def sniff(path: str | Path) -> str:
@@ -62,6 +62,29 @@ def sniff(path: str | Path) -> str:
                                 detail={"file": p.name, "magic": head.hex()})
 
 
+def _open_source(open_fn, path: str | Path, kind: str):
+    """源文档打开边界：打不开 → 415/E4151（方案 附录 D：magic 判定不支持的类型
+    （含不可读）；打开源文件 `OSError` 同归此码）。
+
+    CH-457（T6 大语料实测暴露）：魔术码合法但结构损坏的 PDF（截断 / 无 xref）在
+    pdfplumber open 阶段抛 `PdfminerException`，原实现未映射 → 冒泡成 E5000 内部
+    错误，「输入损坏」被误报成「工具故障」（CLI 退出码 5 而非 4，API 500 而非 415，
+    任务终态 failed 且错误码不可判定）。只映射打开失败：页级抽取异常不在此冒充
+    「不可读」，仍走既有失败路径（那是另一类失败，精度优先）。
+    detail 只含文件名与异常类名（NFR-20：异常消息可能夹带文档内容，不带入）。
+    """
+    from ..errors import Doc2mdError, E4151_UnsupportedType
+    try:
+        return open_fn()
+    except Doc2mdError:
+        raise
+    except Exception as exc:  # noqa: BLE001 — 打开边界统一收敛为「输入不可读」
+        raise E4151_UnsupportedType(
+            f"unreadable {kind}: {Path(path).name}",
+            detail={"file": Path(path).name, "exc": type(exc).__name__},
+        ) from exc
+
+
 def read_pdf(path: str | Path, page_span: tuple[int, int] | None = None,
              chunk_pages: int | None = None) -> list[RawPage]:
     """页级行结构 + 字号 / 粗斜体（pdfplumber chars）。
@@ -82,7 +105,7 @@ def read_pdf(path: str | Path, page_span: tuple[int, int] | None = None,
         hi = min(lo + step, end)
         # 每个分块独立 open/close：pdfminer 的 LRUCachingObjectCache / 页对象
         # 随 PDF 实例一起释放，驻留峰值从「整本文档」降为「一个分块」。
-        with pdfplumber.open(str(path)) as pdf:
+        with _open_source(lambda: pdfplumber.open(str(path)), path, "pdf") as pdf:
             for i in range(lo, hi):
                 page = pdf.pages[i]
                 chars = page.chars or []
@@ -103,7 +126,7 @@ def read_pdf(path: str | Path, page_span: tuple[int, int] | None = None,
 
 def _pdf_page_count(path: str | Path) -> int:
     import pdfplumber
-    with pdfplumber.open(str(path)) as pdf:
+    with _open_source(lambda: pdfplumber.open(str(path)), path, "pdf") as pdf:
         return len(pdf.pages)
 
 
@@ -167,7 +190,7 @@ def read_docx(path: str | Path) -> list[RawPage]:
     import docx
     from docx.enum.text import WD_ALIGN_PARAGRAPH  # noqa: F401  (保留供后续扩展)
 
-    d = docx.Document(str(path))
+    d = _open_source(lambda: docx.Document(str(path)), path, "docx")
     lines: list[Line] = []
     for p in d.paragraphs:
         text = (p.text or "").strip()

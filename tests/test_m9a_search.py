@@ -15,10 +15,10 @@ import time
 
 import pytest
 
+from doc2md.ir import IR, Block
 from doc2md.storage import repo
 from doc2md.storage.db import DB_VERSION, Store
 from doc2md.storage.fts import build_match, cjk_aux, like_escape, query_terms
-from doc2md.ir import Block, IR
 
 pytestmark = [pytest.mark.milestone("M9a")]
 

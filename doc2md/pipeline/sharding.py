@@ -17,8 +17,8 @@ from __future__ import annotations
 import hashlib
 import re
 
-from ..ir import Block, IR
 from ..errors import WARN_TABLE_ACROSS_SHARD
+from ..ir import IR, Block
 
 _NUM_HEAD = re.compile(r"^\s*(\d+(?:\.\d+)*)[\.、\s]")
 _NUM_TAIL = re.compile(r"(\d+(?:\.\d+)*)\s*[。.!！?？]?\s*$")

@@ -80,12 +80,12 @@ class GateResult:
 
 
 def _page_metrics(page: RawPage) -> tuple[int, float, int, float]:
-    text = "\n".join(l.text for l in page.lines)
+    text = "\n".join(ln.text for ln in page.lines)
     chars = len(re.sub(r"\s", "", text))
     letters = len(_CJK.findall(text)) + len(_LATIN.findall(text))
     cjk_ratio = (len(_CJK.findall(text)) / letters) if letters else 0.0
-    lines = [l.text.strip() for l in page.lines if l.text.strip()]
-    noise = sum(1 for l in lines if _NOISE.match(l))
+    lines = [ln.text.strip() for ln in page.lines if ln.text.strip()]
+    noise = sum(1 for ln in lines if _NOISE.match(ln))
     noise_ratio = (noise / len(lines)) if lines else 1.0
     return chars, cjk_ratio, len(lines), noise_ratio
 

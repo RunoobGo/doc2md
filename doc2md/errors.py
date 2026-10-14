@@ -82,15 +82,10 @@ class E5041_LlmUnavailable(Doc2mdError):
     code, http = "E5041", 503
 
 
-class E5051_StitchFailure(Doc2mdError):
-    """缝合崩溃 —— 预留码，当前由方案 4.3 的降级单片口径吸收（不抛出）。"""
-    code, http = "E5051", 500
-
 
 # --- 告警码（非 HTTP，写入产物 meta.warnings 与报告）------------------------
 WARN_TABLE_ACROSS_SHARD = "W1043"        # 跨片表格不合并（FR-126 ④）
-WARN_SHARD_NOT_MERGED = "W1044"          # 分片转换说明（报告口径）
-WARN_UNSAFE_FALLBACK = "W1999"
+WARN_SHARD_NOT_MERGED = "W1044"          # 分片转换说明（报告口径；CH-456 起真实写入）
 
 CODE_INDEX = {
     cls.code: cls
@@ -98,6 +93,6 @@ CODE_INDEX = {
         E4001_BadRequest, E4003_FileNameUnsafe, E4011_Unauthorized, E4031_Forbidden,
         E4041_NotFound, E4131_TooLarge, E4133_DirTooWide,
         E4151_UnsupportedType, E4221_GateReject, E4251_RevisionConflict,
-        E5031_StorageError, E5041_LlmUnavailable, E5051_StitchFailure,
+        E5031_StorageError, E5041_LlmUnavailable,
     ]
 }

@@ -18,7 +18,7 @@ import hashlib
 import json
 import struct
 import unicodedata
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 
 GGUF_MAGIC = b"GGUF"

@@ -30,7 +30,7 @@ _LEGIT_LOWER = re.compile(
 
 
 def norm_lines(text: str) -> list[str]:
-    return [_WS.sub("", l) for l in (text or "").splitlines() if _WS.sub("", l)]
+    return [_WS.sub("", ln) for ln in (text or "").splitlines() if _WS.sub("", ln)]
 
 
 def _matched_chars(a: str, b: str) -> int:
@@ -57,28 +57,6 @@ def char_similarity(a: str, b: str) -> float:
         else:
             matched += _matched_chars("".join(la[i1:i2]), "".join(lb[j1:j2]))
     return round(2.0 * matched / (na + nb), 6)
-
-
-def line_similarity(a: str, b: str) -> float:
-    """行级辅助度量：排障定位用，非门禁口径。"""
-    la, lb = norm_lines(a), norm_lines(b)
-    if not la and not lb:
-        return 1.0
-    return round(difflib.SequenceMatcher(None, la, lb, autojunk=False).ratio(), 6)
-
-
-def diff_lines(a: str, b: str, limit: int = 20) -> list[tuple[str, str]]:
-    """(a 独有, b 独有) 行摘要，供报告与排障引用。"""
-    la, lb = norm_lines(a), norm_lines(b)
-    out: list[tuple[str, str]] = []
-    sm = difflib.SequenceMatcher(None, la, lb, autojunk=False)
-    for tag, i1, i2, j1, j2 in sm.get_opcodes():
-        if tag == "equal":
-            continue
-        out.append(("|".join(la[i1:i2])[:120], "|".join(lb[j1:j2])[:120]))
-        if len(out) >= limit:
-            break
-    return out
 
 
 def is_half_head(text: str) -> bool:
