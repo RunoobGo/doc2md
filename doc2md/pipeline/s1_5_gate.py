@@ -90,6 +90,15 @@ def _page_metrics(page: RawPage) -> tuple[int, float, int, float]:
     return chars, cjk_ratio, len(lines), noise_ratio
 
 
+def _page_chars(page: RawPage) -> int:
+    """只要字符数（与 `_page_metrics` 的第 0 项同口径），跳过其余三项正则。
+
+    CH-459（A-5）：门禁统计 `avg_chars` 原本对全文档再跑一遍完整 `_page_metrics`
+    （4 个正则 × 全页数）。非采样页只需要字符数这一项，用本函数付 1 个正则的代价。
+    """
+    return len(re.sub(r"\s", "", "\n".join(ln.text for ln in page.lines)))
+
+
 def _longest_run(flags: list[bool]) -> tuple[int, int]:
     best = cur = 0
     start = best_start = -1
@@ -111,10 +120,120 @@ def _avg_chars(pages: list[RawPage]) -> float:
     return sum(_page_metrics(p)[0] for p in pages) / len(pages)
 
 
+class GateCollector:
+    """流式门禁采集器（CH-459 / A-5 + A-8）。
+
+    原 `check()` 要求一次拿到全文档页对象——与 convert「按片读取、单片驻留」
+    （A-8，千页级 NFR-21）直接冲突：门禁一读全量，分片省下的内存又还回去了。
+
+    本类把**采集**与**判定**拆开：
+      - `feed(pages, offset=)` 逐片喂页，只保留判定必需的标量（每页 4 个数）
+        与页级明细对象；页对象本身喂完即可释放；
+      - `finish()` 是纯函数判定，不再触碰任何页对象——A-5 的「每页指标算两轮」
+        由此消失（`avg_chars` 不再对全文档重跑 `_page_metrics`）。
+
+    总页数必须在构造时给出：`even5` / `legacy3` 的采样点依赖总页数，而流式
+    场景下采样点可能在对应页到达之前就要算出来。PDF 由 `page_count` 轻量取，
+    DOCX 由整读后的页数给出。
+    """
+
+    def __init__(self, total_pages: int, min_chars: int = 120, mode: str = "auto",
+                 bad_run_min: int = 2, bad_ratio_max: float = 0.05, empty_chars: int = 20):
+        self.total = int(total_pages)
+        self.min_chars = min_chars
+        self.mode = mode
+        self.bad_run_min = bad_run_min
+        self.bad_ratio_max = bad_ratio_max
+        self.empty_chars = empty_chars
+        self.report_idx = even5_indices(self.total, 5)
+        if mode == "legacy3":
+            self.decision_idx = legacy3_indices(self.total)
+        elif mode == "even5":
+            self.decision_idx = self.report_idx
+        elif mode == "auto":
+            self.decision_idx = list(range(self.total))
+        else:
+            raise ValueError(f"unknown sample mode: {mode}")
+        self._decision_set = set(self.decision_idx)
+        self._need = self._decision_set | set(self.report_idx)
+        self.metrics: dict[int, tuple] = {}
+        self._chars_sum = 0
+        self._seen = 0
+
+    def feed(self, pages, offset: int = 0) -> None:
+        """喂入一片页；`offset` 为该片首页在文档中的绝对索引。"""
+        for k, page in enumerate(pages):
+            i = offset + k
+            if i in self._need:
+                m = _page_metrics(page)
+                self.metrics[i] = m
+                self._chars_sum += m[0]
+            else:
+                self._chars_sum += _page_chars(page)
+            self._seen += 1
+
+    def _level(self, i: int, strict: bool) -> tuple[list[str], bool]:
+        chars, _cjk, nlines, noise = self.metrics[i]
+        r = []
+        if chars < self.min_chars:
+            r.append(f"chars={chars} < {self.min_chars}")
+        if nlines == 0:
+            r.append("no_text_lines")
+        if noise > 0.9 and nlines > 0:
+            r.append(f"noise_ratio={noise:.2f}")
+        empty = chars < self.empty_chars or nlines == 0
+        return r, (bool(r) if strict else empty)
+
+    def finish(self, reject_on_any: bool = True) -> GateResult:
+        """纯函数判定 + 拒收即抛；与旧 `check()` 逐字段同口径。"""
+        strict = self.mode != "auto"
+        reasons: list[str] = []
+        per_page = [(i,) + self._level(i, strict) for i in self.decision_idx]
+        bad_flags = [hard for _, _, hard in per_page]
+        n_bad = sum(bad_flags)
+
+        if self.mode == "auto":
+            run, run_start = _longest_run(bad_flags)
+            ratio = n_bad / max(1, self.total)
+            if run >= self.bad_run_min:
+                reasons.append(f"consecutive_empty_pages={run} starting at page {run_start + 1}")
+            if self.total >= 20 and ratio > self.bad_ratio_max:
+                reasons.append(f"empty_page_ratio={ratio:.2%} > {self.bad_ratio_max:.0%}")
+            if n_bad == self.total and self.total:
+                reasons.append("all_pages_empty")
+        else:
+            if reject_on_any:
+                for i, r, hard in per_page:
+                    if hard:
+                        reasons.append(f"page {i + 1}: {', '.join(r)}")
+            else:
+                n = len([1 for _, r, h in per_page if h])
+                if n >= len(per_page):
+                    reasons.append(f"all {n} sampled pages bad")
+
+        pages_out: list[PageReport] = []
+        for i in sorted(self._need):
+            chars, cjk, nlines, noise = self.metrics[i]
+            r, hard = self._level(i, strict)
+            in_decision = i in self._decision_set
+            pages_out.append(PageReport(page=i, chars=chars, cjk_ratio=cjk, line_count=nlines,
+                                        noise_ratio=noise, ok=not (hard and in_decision),
+                                        reasons=r))
+
+        stats = {"total_pages": self.total, "decision_pages": len(self.decision_idx),
+                 "empty_pages": n_bad,
+                 "avg_chars": round(self._chars_sum / self._seen, 1) if self._seen else 0.0}
+        res = GateResult(passed=not reasons, mode=self.mode, sampled=self.report_idx,
+                         pages=pages_out, reasons=reasons, stats=stats)
+        if not res.passed:
+            raise E4221_GateReject("S1.5 gate rejected: bad text layer", detail=res.detail())
+        return res
+
+
 def check(pages: list[RawPage], min_chars: int = 120, mode: str = "auto",
           reject_on_any: bool = True, bad_run_min: int = 2,
           bad_ratio_max: float = 0.05, empty_chars: int = 20) -> GateResult:
-    """S1.5 门禁判定。
+    """S1.5 门禁判定（一次性入口，内部走 `GateCollector`）。
 
     坏页两级判据（开发期细化，避免误杀内容稀疏的正常文档）：
       - empty-ish：chars < empty_chars 或无文本行 → 真·坏页（模拟扫描插页）；
@@ -129,71 +248,8 @@ def check(pages: list[RawPage], min_chars: int = 120, mode: str = "auto",
       "even5"   —— 方案 CH-415 原口径（仅判 5 个采样页，任一不达标即拒收）；
       "legacy3" —— 旧三点口径，仅供回归对照。
     """
-    total = len(pages)
-    report_idx = even5_indices(total, 5)
-
-    if mode == "legacy3":
-        decision_idx = legacy3_indices(total)
-    elif mode == "even5":
-        decision_idx = report_idx
-    elif mode == "auto":
-        decision_idx = list(range(total))
-    else:
-        raise ValueError(f"unknown sample mode: {mode}")
-
-    metrics = {i: _page_metrics(pages[i]) for i in (set(decision_idx) | set(report_idx))}
-
-    def level(i: int, strict: bool) -> tuple[list[str], bool]:
-        chars, _cjk, nlines, noise = metrics[i]
-        r = []
-        if chars < min_chars:
-            r.append(f"chars={chars} < {min_chars}")
-        if nlines == 0:
-            r.append("no_text_lines")
-        if noise > 0.9 and nlines > 0:
-            r.append(f"noise_ratio={noise:.2f}")
-        empty = chars < empty_chars or nlines == 0
-        return r, (bool(r) if strict else empty)
-
-    strict = mode != "auto"          # even5/legacy3 保持原口径：任一判据不达标即坏页
-    reasons: list[str] = []
-    per_page = [(i,) + level(i, strict) for i in decision_idx]
-    bad_flags = [hard for _, _, hard in per_page]
-    n_bad = sum(bad_flags)
-
-    if mode == "auto":
-        run, run_start = _longest_run(bad_flags)
-        ratio = n_bad / max(1, total)
-        if run >= bad_run_min:
-            reasons.append(f"consecutive_empty_pages={run} starting at page {run_start + 1}")
-        if total >= 20 and ratio > bad_ratio_max:
-            reasons.append(f"empty_page_ratio={ratio:.2%} > {bad_ratio_max:.0%}")
-        if n_bad == total and total:
-            reasons.append("all_pages_empty")
-    else:
-        if reject_on_any:
-            for i, r, hard in per_page:
-                if hard:
-                    reasons.append(f"page {i + 1}: {', '.join(r)}")
-        else:
-            n = len([1 for _, r, h in per_page if h])
-            if n >= len(per_page):
-                reasons.append(f"all {n} sampled pages bad")
-
-    detail_idx = sorted(set(decision_idx) | set(report_idx))
-    pages_out: list[PageReport] = []
-    for i in detail_idx:
-        chars, cjk, nlines, noise = metrics[i]
-        r, hard = level(i, strict)
-        in_decision = i in decision_idx
-        pages_out.append(PageReport(page=i, chars=chars, cjk_ratio=cjk, line_count=nlines,
-                                    noise_ratio=noise, ok=not (hard and in_decision),
-                                    reasons=r))
-
-    stats = {"total_pages": total, "decision_pages": len(decision_idx),
-             "empty_pages": n_bad, "avg_chars": round(_avg_chars(pages), 1)}
-    res = GateResult(passed=not reasons, mode=mode, sampled=report_idx, pages=pages_out,
-                     reasons=reasons, stats=stats)
-    if not res.passed:
-        raise E4221_GateReject("S1.5 gate rejected: bad text layer", detail=res.detail())
-    return res
+    c = GateCollector(len(pages), min_chars=min_chars, mode=mode,
+                      bad_run_min=bad_run_min, bad_ratio_max=bad_ratio_max,
+                      empty_chars=empty_chars)
+    c.feed(pages)
+    return c.finish(reject_on_any=reject_on_any)

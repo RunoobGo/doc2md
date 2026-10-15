@@ -65,19 +65,31 @@ class Scheduler:
                 return Job(row["job_id"], doc_id, "queued", attached=True)
         return Job(job_id, doc_id, "queued")
 
-    def mark(self, job_id: str, status: str, error_code: str = "", detail: dict | None = None):
+    def mark(self, job_id: str, status: str, error_code: str = "", detail: dict | None = None,
+             tx=None):
+        """状态推进。CH-459（A-4）：`tx` 形参允许并入调用方事务——
+        worker._finish_ok 与同步 /jobs 路径把 mark 与入库/事件合为单次提交
+        （WAL + synchronous=FULL 下每次提交都 fsync，是每任务固定开销主因）。
+        """
         if status not in ACTIVE + TERMINAL:
             raise ValueError(f"bad status {status}")
         col = {"running": "started_at", "done": "finished_at",
                "failed": "finished_at", "rejected": "finished_at"}.get(status)
-        with self.store.tx() as tx:
+
+        def _do(t):
             if col:
-                tx.execute(f"UPDATE tasks SET status=?, error_code=?, detail_json=?,"
-                           f" {col}=? WHERE job_id=?",
-                           (status, error_code, json.dumps(detail or {}, ensure_ascii=False),
-                            now_iso(), job_id))
+                t.execute(f"UPDATE tasks SET status=?, error_code=?, detail_json=?,"
+                          f" {col}=? WHERE job_id=?",
+                          (status, error_code, json.dumps(detail or {}, ensure_ascii=False),
+                           now_iso(), job_id))
             else:
-                tx.execute("UPDATE tasks SET status=? WHERE job_id=?", (status, job_id))
+                t.execute("UPDATE tasks SET status=? WHERE job_id=?", (status, job_id))
+
+        if tx is not None:
+            _do(tx)
+        else:
+            with self.store.tx() as t:
+                _do(t)
 
     def get(self, job_id: str) -> dict | None:
         r = self.store.q1("SELECT * FROM tasks WHERE job_id=?", (job_id,))

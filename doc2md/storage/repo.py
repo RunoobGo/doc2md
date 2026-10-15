@@ -10,41 +10,78 @@ from ..ir import IR
 from .db import Store, now_iso
 
 
-def save_ir(store: Store, ir: IR, profile: str = "standard") -> None:
+def save_ir(store: Store, ir: IR, profile: str = "standard", tx=None) -> None:
+    """整本文档入库（docs + blocks + FTS）。
+
+    CH-459（A-4/A-14）：原实现 docs/blocks 与 reindex 各起一次事务、逐块
+    `execute`——N 块 = 2 次写事务 + 2N 条语句，而 WAL + synchronous=FULL 下
+    每次提交都 fsync，这是每任务固定开销的主因（12.3 实测佐证）。现合并为
+    **单事务 + executemany**（两次语句批量）。
+
+    `tx` 形参（CH-459）：调用方可传入已有事务把入库并入其中——
+    `worker._finish_ok` 用它把 detail/mark/event/入库四写合成一次提交。
+    """
+    from .fts import cjk_aux
     ts = now_iso()
-    with store.tx() as tx:
-        tx.execute(
+
+    def _do(t):
+        t.execute(
             "INSERT OR REPLACE INTO docs(doc_id, source_key, source_name, source_name_raw,"
             " format, pages, sharded, shard_count, status, profile, created_at, updated_at,"
             " meta_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (ir.doc_id, ir.source_key, ir.source_name, ir.source_name_raw, ir.format,
              ir.pages, int(ir.sharded), ir.shard_count, "done", profile, ts, ts,
              json.dumps(ir.meta(), ensure_ascii=False)))
-        tx.execute("DELETE FROM blocks WHERE doc_id=?", (ir.doc_id,))
-        for b in ir.blocks:
-            tx.execute(
-                "INSERT INTO blocks(doc_id, block_id, type, text, level, page,"
-                " flags_json, marks_json, immutable, revision) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                (ir.doc_id, b.id, b.type, b.text, b.level, b.page,
-                 json.dumps(b.flags, ensure_ascii=False), json.dumps(b.marks, ensure_ascii=False),
-                 int(b.immutable), b.revision))
-    reindex(store, ir.doc_id, ir.blocks)
+        t.execute("DELETE FROM blocks WHERE doc_id=?", (ir.doc_id,))
+        t.executemany(
+            "INSERT INTO blocks(doc_id, block_id, type, text, level, page,"
+            " flags_json, marks_json, immutable, revision) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            [(ir.doc_id, b.id, b.type, b.text, b.level, b.page,
+              json.dumps(b.flags, ensure_ascii=False), json.dumps(b.marks, ensure_ascii=False),
+              int(b.immutable), b.revision) for b in ir.blocks])
+        t.execute("DELETE FROM search_blocks WHERE doc_id=?", (ir.doc_id,))
+        t.executemany(
+            "INSERT INTO search_blocks(doc_id, block_id, text, aux) VALUES (?,?,?,?)",
+            [(ir.doc_id, b.id, b.text[:8000], cjk_aux(b.text[:8000]))
+             for b in ir.blocks if b.text])
+
+    if tx is not None:
+        _do(tx)
+    else:
+        with store.tx() as t:
+            _do(t)
 
 
 def reindex(store: Store, doc_id: str, blocks) -> int:
     """搜索索引刷新（CH-418：编辑提交后 ≤5s 可检索到新内容）。
 
     CH-435：同时写入 aux 列（CJK unigram+bigram），否则中文子串查询命中 0。
+    CH-459（A-14）：executemany 批量插入（原逐块 execute）。
     """
     from .fts import cjk_aux
     with store.tx() as tx:
         tx.execute("DELETE FROM search_blocks WHERE doc_id=?", (doc_id,))
-        for b in blocks:
-            if b.text:
-                tx.execute(
-                    "INSERT INTO search_blocks(doc_id, block_id, text, aux) VALUES (?,?,?,?)",
-                    (doc_id, b.id, b.text[:8000], cjk_aux(b.text[:8000])))
+        tx.executemany(
+            "INSERT INTO search_blocks(doc_id, block_id, text, aux) VALUES (?,?,?,?)",
+            [(doc_id, b.id, b.text[:8000], cjk_aux(b.text[:8000]))
+             for b in blocks if b.text])
     return len(blocks)
+
+
+def reindex_block(store: Store, doc_id: str, block) -> None:
+    """单块索引刷新（CH-459 / A-6，FR-208「该块索引」）。
+
+    原实现任何单块编辑都 `reindex` 整文档——N 块文档改一个块要重写全部
+    FTS 行。本函数只删插该块一行；块被删空文本时只删不插。
+    """
+    from .fts import cjk_aux
+    with store.tx() as tx:
+        tx.execute("DELETE FROM search_blocks WHERE doc_id=? AND block_id=?",
+                   (doc_id, block.id))
+        if block.text:
+            tx.execute(
+                "INSERT INTO search_blocks(doc_id, block_id, text, aux) VALUES (?,?,?,?)",
+                (doc_id, block.id, block.text[:8000], cjk_aux(block.text[:8000])))
 
 
 def get_doc(store: Store, doc_id: str) -> dict:
@@ -115,7 +152,12 @@ def delete_doc(store: Store, doc_id: str, actor: str, root: Path | None = None) 
     CH-440：先删产物文件再删库行。反序时若文件删除失败，库行已提交消失，
     该文档的 zip 副本就成了不可寻址的残留正文（GET 已 404，API 层无法再触发重试）。
     产物未删净即 fail-closed：抛 E5031 并保留库行，删除可安全重试。
+
+    CH-459（A-15）：删前存在性检查——原实现对不存在的 doc_id 也留痕并返回
+    200，「删了个不存在的东西」与「删成功了」在响应上不可区分。
     """
+    if store.q1("SELECT 1 FROM docs WHERE doc_id=?", (doc_id,)) is None:
+        raise E4041_NotFound(f"doc {doc_id} not found")
     removed, failed = purge_files(doc_id, root)
     if failed:
         raise E5031_StorageError(
@@ -148,9 +190,16 @@ def delete_doc(store: Store, doc_id: str, actor: str, root: Path | None = None) 
 
 
 def delete_source(store: Store, source_key: str, actor: str, root: Path | None = None) -> dict:
+    """整源删除（FR-128：同一来源所有版本）。
+
+    CH-459（A-15）：无匹配文档时 404/E4041——原实现写一条空 source 留痕并
+    返回 200，与 delete_doc 的「不存在也成功」同病。
+    """
     with store.tx() as tx:
         ids = [r["doc_id"] for r in
                tx.execute("SELECT doc_id FROM docs WHERE source_key=?", (source_key,))]
+    if not ids:
+        raise E4041_NotFound(f"source {source_key} not found")
     for d in ids:
         delete_doc(store, d, actor, root)
     with store.tx() as tx:

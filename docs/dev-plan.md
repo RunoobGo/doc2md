@@ -4,7 +4,7 @@
 | --- | --- |
 | 项目名称 | **Doc2md** |
 | 管线版本 | **v2.4.0**（`doc2md.PIPELINE_VERSION`） |
-| 方案文档版本 | **v2.4**（本版；文件名固定为 `docs/dev-plan.md`，版本只写在这里，不写进路径） |
+| 方案文档版本 | **v2.5**（本版；文件名固定为 `docs/dev-plan.md`，版本只写在这里，不写进路径） |
 | 文档性质 | 开发主文档：主题篇为**当前有效规格**（as-built + 待办），登记篇记录阶段性变更与优化项 |
 | 编制依据 | 仓库 `RunoobGo/doc2md` 实际代码与实测结果；管线 v2.4 Delta 记录；方案 v1.0 计划书 |
 | 结构约定 | 主题篇（第一–九章）+ 附录 A–G（规格表）保持独立可读，**不含变更编号**；所有阶段性变更与优化项集中在登记篇（第十–十二章） |
@@ -778,7 +778,7 @@ T2–T11 已在 CH-456 / CH-457 轮次全部收口（逐项判据与实测证据
 
 **实施顺序与出口条件**：五个批次——① 功能全面性（A-1/A-2/A-7）；② 性能与存储（A-3…A-6、A-8…A-15）；③ 备份加固（A-11）；④ 测试体系（A-16）；⑤ 文档口径（A-17）。每批次出口：红线 gate 67 项全绿 + 全量套件 + `ruff check .` 全绿 + 等价性三态复核 0 不匹配（改产物路径的批次）+ 第十一章登记 CH-459 起逐批落条 + 第十二章证据行。B/C 类在每次完成任务后提醒。
 
-**进度**：批次①已完成并登记为 CH-459（A-1/A-2/A-7 三项 + 收尾自查修掉三个真缺陷，gate 67 项全绿、全量 276 收集、等价性三态复核符合设计）。批次②–⑤按上表顺序推进，A-13 已随批次①提前落地（`read_any` 增 `fmt` 直传）。
+**进度**：批次①已完成并登记为 CH-459（A-1/A-2/A-7 三项 + 收尾自查修掉三个真缺陷，gate 67 项全绿、全量 276 收集、等价性三态复核符合设计），A-13 随批次①提前落地。批次②已完成并登记为 CH-460（A-3/A-4/A-5/A-6/A-9/A-10/A-12/A-14/A-15 九项 + 顺带修 `detail_json` 被覆盖的静默丢失；gate 67 全绿、全量 302 收集、六个黄金样本 gate 明细与产物 sha256 逐字段一致）。**A-8 经实测回退**：按片读取在 large_320p 上峰值内存不降反升（132.9MB → 134.9/137.9MB，见 CH-460 与 12.3），改动已撤销、纪律改由 `s1.chunk_pages` 承担——这是「性能优先」原则的应有结果：实测无收益的改动不进主干。批次③–⑤按上表顺序推进。
 
 ---
 
@@ -954,7 +954,7 @@ T2–T11 已在 CH-456 / CH-457 轮次全部收口（逐项判据与实测证据
 
 ## 附录 F 门禁断言清单
 
-红线层 = `pytest -m gate`，当前 **67 项**（第一层 40 + 第二层 27；墙钟耗时历史轮次 72–110s，T8 优化后 CH-456/457 轮起稳定 **53.0s**，<60s 达标——逐轮实测见第十二章 12.1）。这里的「项」是 pytest 收集数，含参数化展开（如恶意名单 12 例各算一项）。全量套件 **276 收集 = 275 passed + 1 skipped**（CH-459 轮口径；CH-458 轮为 242 收集，新增 34 项全部落在里程碑层，未进红线）。
+红线层 = `pytest -m gate`，当前 **67 项**（第一层 40 + 第二层 27；墙钟耗时历史轮次 72–110s，T8 优化后 CH-456/457 轮起稳定 **53.0s**，<60s 达标——逐轮实测见第十二章 12.1）。这里的「项」是 pytest 收集数，含参数化展开（如恶意名单 12 例各算一项）。全量套件 **302 收集 = 301 passed + 1 skipped**（CH-460 轮口径；CH-459 轮为 276 收集，新增 26 项全部落在里程碑层，未进红线）。
 
 第一层：六条契约红线（`tests/test_v24_gates.py`，收集 40 项）
 
@@ -980,27 +980,27 @@ T2–T11 已在 CH-456 / CH-457 轮次全部收口（逐项判据与实测证据
 
 as-built 清单，逐模块给出行数、依赖方向（3.6 的 DAG 层次）、公开符号与被谁引用。「引用方」只列包内真实导入点（函数体内的延迟导入同样计入），不含 `__init__.py` 的 re-export。行数为 `wc -l` 口径，随提交浮动，不作为断言对象；采集方法见本节末。
 
-### G.1 包根与入口 / 编排层（8 个模块，1667 行）
+### G.1 包根与入口 / 编排层（8 个模块，1711 行）
 
 | 模块 | 行 | 层 | 职责 | 公开符号 | 引用方 |
 | --- | --- | --- | --- | --- | --- |
 | `doc2md/__init__.py` | 17 | 基座 | 三个版本常量的唯一来源 + 命名 / 版本治理说明 | `PIPELINE_VERSION` `SCHEMA_VERSION` `PLAN_VERSION` | `cli`（版本）、`ir/model`（schema） |
 | `doc2md/cli.py` | 559 | 入口 | argparse 子命令、退出码聚合、控制台加固、`doctor` 自检（llm server 探测 + 冻结键校验） | `build_parser` `COMMANDS` `main` `DEPENDENCY_MODULES` + 8 个 `cmd_*` | 无（终端入口，`[project.scripts]` 指向 `cli:main`） |
-| `doc2md/api.py` | 387 | 入口 | `create_app()` 工厂 + 20 个端点 + 鉴权挂钩 + 脱敏 | `create_app` `SCRIPT_UA_HINTS`（+ 内部 `_emit` `_scrub` `_deep`） | `cli`（serve）、`worker`（仅 `_emit`，向上延迟引用） |
-| `doc2md/worker.py` | 266 | 编排 | `tasks` 队列消费者：原子领取、遗骸回收、`work.jsonl` 属主 | `enqueue` `claim` `reclaim_stale` `drain_once` `run_work` `queue_stats` `WorkReport` | `api`（异步分支 `enqueue`）、`cli`（work） |
-| `doc2md/scheduler.py` | 84 | 编排 | 作业投递 / 状态标记 / 事件写入 | `Scheduler` `Job` `ACTIVE` `TERMINAL`（D-9 的零调用方法 `next_queued`/`active_for` 已在 CH-456 删除） | `api` `cli` `worker` |
-| `doc2md/edits.py` | 82 | 编排 | 乐观锁校验 + 审计行 + 索引刷新 | `patch_block` `rollback` | `api` |
+| `doc2md/api.py` | 406 | 入口 | `create_app()` 工厂 + 20 个端点 + 鉴权挂钩 + 脱敏 | `create_app` `SCRIPT_UA_HINTS`（+ 内部 `_emit` `_deep`；脱敏已统一到 `ops.logging.scrub_record`，CH-460 / A-12） | `cli`（serve）、`worker`（仅 `_emit`，向上延迟引用） |
+| `doc2md/worker.py` | 276 | 编排 | `tasks` 队列消费者：原子领取、遗骸回收、`work.jsonl` 属主 | `enqueue` `claim` `reclaim_stale` `drain_once` `run_work` `queue_stats` `WorkReport` | `api`（异步分支 `enqueue`）、`cli`（work） |
+| `doc2md/scheduler.py` | 96 | 编排 | 作业投递 / 状态标记 / 事件写入；`mark(tx=)` 可并入调用方事务（CH-460 / A-4） | `Scheduler` `Job` `ACTIVE` `TERMINAL`（D-9 的零调用方法 `next_queued`/`active_for` 已在 CH-456 删除） | `api` `cli` `worker` |
+| `doc2md/edits.py` | 85 | 编排 | 乐观锁校验 + 审计行 + **该块**索引刷新（`reindex_block`，CH-460 / A-6） | `patch_block` `rollback` | `api` |
 | `doc2md/auth.py` | 72 | 编排 | 令牌签发 / 吊销 / 角色 rank 矩阵；`issue(allowed=…)` 按 `api.token_roles` 限制可签发角色 | `issue` `revoke` `check` `ROLES` `RANK` `MATRIX`（D-9 的零调用项 `require`/`timing_safe_equal`/`RevocationCache` 已在 CH-456 删除） | `api` `cli` |
 | `doc2md/cron.py` | 200 | 编排 | 日 / 周步骤编排、`sweep_tmp`、周报落盘 | `run` `sweep_tmp` `CronReport` `Daily` | `api`（`sweep_tmp`）、`cli` |
 
-### G.2 领域层：管线（8 个模块，1813 行）
+### G.2 领域层：管线（8 个模块，1875 行）
 
 | 模块 | 行 | 引用方 | 内容 |
 | --- | --- | --- | --- |
-| `pipeline/convert.py` | 278 | `api` `cli` `pipeline.batch` | S1 → S1.5 → 分片 → S3 → S4 编排、`repair_ops`（LLM 双模式调度，CH-456/T2）、`Result`、`package()` 打包、`render_report()` |
+| `pipeline/convert.py` | 284 | `api` `cli` `pipeline.batch` | S1 → S1.5 → 分片 → S3 → S4 编排、`repair_ops`（LLM 双模式调度，CH-456/T2）、`Result`、`package()` 打包、`render_report()`；CH-459 起 `sniff` 一次直传 `read_any`（A-13） |
 | `pipeline/batch.py` | 134 | `cli` `worker` | `run_batch()` 进程池、`default_workers()`、`Summary`；顶层可 pickle 的 `_convert_one`（spawn 约束，3.6 第 8 条） |
 | `pipeline/s1_parse.py` | 411 | `convert` `s1_5_gate` `s3_structure` `api` `worker` | 魔术码判定 `sniff`、`read_pdf` / `read_docx` / `read_any`、`Line` / `RawPage`；`_open_source` 打开边界统一映射 E4151（CH-457）；等宽 / 表格行 / 链接 / 标题提示四组行级信号（CH-459） |
-| `pipeline/s1_5_gate.py` | 199 | `convert` | 文本层体检 `check()`、`even5_indices` / `legacy3_indices`、`PageReport` / `GateResult` |
+| `pipeline/s1_5_gate.py` | 255 | `convert` | 文本层体检 `check()`（内部走 `GateCollector`）、`GateCollector`（CH-460 / A-5：采集与判定分离，逐片喂页、纯函数判定）、`even5_indices` / `legacy3_indices`、`PageReport` / `GateResult` |
 | `pipeline/sharding.py` | 199 | `convert` | `shard_plan` / `stitch_shards` / `overlap_dedupe` / `fingerprint` / `mark_shard_edges` |
 | `pipeline/s3_structure.py` | 434 | `convert` | `analyze()`：七类块全量判定——标题 / 列表 / 段落 / 表格 / 代码 / 引用 / 分页（纯规则，无模型；CH-459 补齐后四类，`BLOCK_TYPES` 声明与产出一致） |
 | `pipeline/s4_render.py` | 83 | `convert` | `render()`、`assert_render_contract()`、`is_external()` |
@@ -1008,15 +1008,15 @@ as-built 清单，逐模块给出行数、依赖方向（3.6 的 DAG 层次）�
 
 `pipeline/__init__.py`（9 行）re-export 10 个符号。`pipeline/metrics.py` 只被测试引用（门禁第 1 组的两个判定函数），生产链路不导入它——「有代码、调用方在领域层之外」与「有代码、无调用方」是两件事，前者是验收工具（合理），后者是死代码（D-9，已在 CH-456 清零）。本节的「引用方」列就是用来区分两者的：它由 `ast` 遍历得出，不区分生产与测试，因此 `tests` 也算引用方，需要额外注明。
 
-### G.3 领域层：存储（3 个模块，510 行）
+### G.3 领域层：存储（3 个模块，621 行）
 
 | 模块 | 行 | 引用方 | 内容 |
 | --- | --- | --- | --- |
-| `storage/db.py` | 234 | `api` `auth` `cli` `cron` `edits` `scheduler` `worker` `storage.repo` | `DDL`（8 表 + FTS5 虚表）、`Store` 连接与 `threading.local`、`DB_VERSION`、探测式迁移、`now_iso`（D-9 的零调用属性 `_Tx.lastrowid` 已在 CH-456 删除） |
-| `storage/repo.py` | 182 | `api` `cli` `edits` `worker` | `save_ir` `reindex` `get_doc` `list_blocks` `search` `delete_doc` `delete_source` `purge_files` |
-| `storage/fts.py` | 94 | `db` `repo`，**仅标准库** | `cjk_aux`（n-gram 辅助列）、`build_match`、`query_terms`、`like_escape` |
+| `storage/db.py` | 275 | `api` `auth` `cli` `cron` `edits` `scheduler` `worker` `storage.repo` | `DDL`（8 表 + FTS5 虚表）、`Store` 连接与 `threading.local`、`DB_VERSION`、探测式迁移、`now_iso`；连接登记表为**弱引用 `WeakSet[_ConnRef]`** + `live_conn_count()`（CH-460 / A-3）、`_Tx.executemany`（A-14）（D-9 的零调用属性 `_Tx.lastrowid` 已在 CH-456 删除） |
+| `storage/repo.py` | 231 | `api` `cli` `edits` `worker` | `save_ir`（`tx=` 可并入调用方事务，A-4；`executemany` 批量，A-14）`reindex` `reindex_block`（A-6）`get_doc` `list_blocks` `search` `delete_doc` `delete_source`（两者均先做存在性检查，A-15）`purge_files` |
+| `storage/fts.py` | 115 | `db` `repo`，**仅标准库** | `cjk_aux`（n-gram 辅助列）、`build_match`、`query_terms`、`like_escape`、`MAX_QUERY_CHARS`（查询串上限）+ covered-span 区间掩码（CH-460 / A-9） |
 
-### G.4 支撑层：安全与运维（9 个模块，1047 行）
+### G.4 支撑层：安全与运维（9 个模块，1061 行）
 
 | 模块 | 行 | 引用方 | 内容 |
 | --- | --- | --- | --- |
@@ -1024,7 +1024,7 @@ as-built 清单，逐模块给出行数、依赖方向（3.6 的 DAG 层次）�
 | `security/dirguard.py` | 99 | `api` `cli` `security.watcher` | `guard_walk` / `scan_or_raise`、`WalkLimits` / `WalkResult`（符号链接环、目录过宽 413/E4133） |
 | `security/netguard.py` | 53 | `cli` | `offline_guard`（`run.offline_assert` 的运行期守护：把 `socket.socket.connect` 限制为回环，非回环抛 `OfflineViolation`；CH-456 / T9） |
 | `security/watcher.py` | 71 | `cli` | `StabilityTracker`（写入静默窗口，注入时钟可测） |
-| `ops/logging.py` | 124 | `api` `cron` `worker` | `RotatingJsonlWriter`（按字节阈值 rename 轮转）、`EventBus`（`/events` 拉取式总线） |
+| `ops/logging.py` | 138 | `api` `cron` `worker` | `RotatingJsonlWriter`（按字节阈值 rename 轮转）、`EventBus`（`/events` 拉取式总线）、`scrub_record`（NFR-20 脱敏唯一实现，`api` 侧事件入库同用此函数，CH-460 / A-12） |
 | `ops/backup.py` | 131 | `cron` | `derive_key`（Scrypt）/ `encrypt_bytes` / `decrypt_bytes`（AESGCM）、`BackupPlan`（`work_dir_mode` 可配，CH-456/T9）、`hdiutil_recipe` |
 | `ops/drill.py` | 198 | `cli`（`backup drill`） | 备份恢复演练闭环：`run_drill`（沙箱 8 步：copy_live→snapshot→external_encrypt→simulate_loss→rotate→restore→integrity_check→compare）、`DrillReport` / `DrillFailure` / `integrity_check`（CH-456 / T7） |
 | `ops/diskguard.py` | 54 | `cli` `cron` `pipeline.convert` | `free_mb` / `need_bytes` / `assert_free_space`（NFR-6，E4131） |
@@ -1044,7 +1044,7 @@ as-built 清单，逐模块给出行数、依赖方向（3.6 的 DAG 层次）�
 
 测试资产的**规格口径**（为何入库、可复现性为何是验收对象、120MB 大文件为何不内置）在 8.4；本节只登记文件与数字清单。
 
-`tests/` 共 18 个 `.py`、5556 行，收集 **276 项**（275 passed + 1 skipped；`gate` 67 项 = `test_v24_gates.py` 40 + `test_perf_lowend.py` 27；其余 209 项为里程碑与信息面）。
+`tests/` 共 19 个 `.py`、5922 行，收集 **302 项**（301 passed + 1 skipped；`gate` 67 项 = `test_v24_gates.py` 40 + `test_perf_lowend.py` 27；其余 235 项为里程碑与信息面）。
 
 | 文件 | 行 | 收集 | 定位 |
 | --- | --- | --- | --- |
@@ -1055,6 +1055,7 @@ as-built 清单，逐模块给出行数、依赖方向（3.6 的 DAG 层次）�
 | `test_m8_ops.py` | 479 | 22 | 备份加密 / 轮转 / 磁盘门禁 / launchd 编排 / 事件保留期边界（CH-455） |
 | `test_t2_llm_server.py` | 346 | 22 | 假 llama-server 契约：请求体 / 围栏容错 / 注入归因 / 故障分级 / Bearer / offline 零 HTTP（CH-456 / T2） |
 | `test_s3_blocks.py` | 431 | 34 | CH-459 批次①：七类块可达性与四类块保守检测口径、链接抽取（PDF annot 几何 / DOCX 超链接整段覆盖）、`apply_ops` 五 op 语义、黄金样本 e2e |
+| `test_batch2_storage.py` | 366 | 26 | CH-460 批次②：连接登记表弱引用有界（A-3）、`save_ir(tx=)` 并入外部事务（A-4）、`GateCollector` 与 `check` 同口径（A-5）、`reindex_block` 单块刷新（A-6）、FTS 查询上限与掩码（A-9）、多文件投递按文件派生幂等键（A-10）、脱敏不看键名只看长度（A-12）、删除/回滚参数校验（A-15） |
 | `test_m9a_search.py` | 219 | 12 | FTS5 检索与 CJK n-gram、鉴权 |
 | `test_t7_drill.py` | 219 | 13 | 演练 8 步闭环、沙箱隔离、篡改必须失败、NFR-20 无正文（CH-456 / T7） |
 | `test_m5_m6c.py` | 181 | 21 | S4 渲染契约、编辑与回滚、调度器 |
@@ -1085,7 +1086,7 @@ as-built 清单，逐模块给出行数、依赖方向（3.6 的 DAG 层次）�
 
 | 要素 | 规则 |
 | --- | --- |
-| 编号 | `CH-xxx` 单调递增，不复用、不回收。`CH-401…CH-421` 为 v2.4 需求/ADR 阶段占用；开发期从 `CH-422` 起续号，当前至 `CH-459`。下一条目自 `CH-460` 起 |
+| 编号 | `CH-xxx` 单调递增，不复用、不回收。`CH-401…CH-421` 为 v2.4 需求/ADR 阶段占用；开发期从 `CH-422` 起续号，当前至 `CH-460`。下一条目自 `CH-461` 起 |
 | 触发 | ① 实测发现缺陷；② 采用更优方案改变了原设计；③ 契约面（错误码 / 退出码 / HTTP / 产物结构）发生变化；④ 验收口径本身被证明不可判定 |
 | 必填四要素 | 动因（含可复现证据）、落点（文件:函数）、实测数字、契约影响（无 / 内部 / 对外） |
 | 禁止 | 以「优化」名义改动产物字节而不做等价复核；新增错误码段位；把未测项写成已实现 |
@@ -1151,6 +1152,7 @@ as-built 清单，逐模块给出行数、依赖方向（3.6 的 DAG 层次）�
 | CH-456 | 缺陷+更优方案（T2/T4/T5/T7/T8/T9/T10/T11 合轮收口） | 待办清单一轮清空七项（T1/T3 留待）。① **T9 配置收敛**：D-8 的 11 个声明性键全部落地消费——`run.profile` 在 loader 落为三档键集覆盖（用户显式配置永远优先）、`run.offline_assert` 成为可开关运行期守护（netguard 把 socket 出站限制为回环）、`s1_5.reject_on_any_bad_page`/`page_detail_in_report` 接线 convert、`api.token_roles` 供 `auth.issue(allowed=…)`、`ops.work_dir_mode` 供 `BackupPlan`、`security.sanitize_fail_action` 成为冻结键（唯一合法值，配错即启动期 `ValueError`）、`llm.*` 随 T2 消费；D-8 / D-10 随之关闭（默认 49→53 键、示例 42→54 键 = 53 + 故意多给的 `ops.backup_external_dir`，键集差清零）。D-9 的 8 处死代码全部删除（`Scheduler.next_queued`/`active_for`、`auth.timing_safe_equal`/`require`/`RevocationCache`、`db._Tx.lastrowid`、`metrics.line_similarity`/`diff_lines`，删除前逐一确认无分发面隐式契约）；`E5051` 删除（缝合失败由 4.3 降级口径吸收，抛码反而违背降级语义）、`W1044` 接入降级留痕路径、`W1999` 删除、`E5041` 留待 T2 启用。② **T10 静态检查**：ruff（`F`/`E`/`I`）以独立信息作业进 CI（与 merge-gate 并行、无 `needs`，风格判断不入红线——避免与 T8 的门禁耗时目标冲突）；7 处未使用导入清零；`pytest.ini` marker 对齐实际用法（删零使用的 `slow`、`milestone(name)` 改实际取值）并开 `--strict-markers`；D-12 关闭。③ **T11 许可声明**：根目录 `LICENSE`（MIT）+ `pyproject.toml` 补 `license` 与 `classifiers`；D-11 关闭。④ **T8 门禁提速**：红线 72.5s→**53.0s**（<60s 达标，第十二章 12.1）——大样本转换改 session 级共享夹具（原 42s 重复 setup），shard fallback 两类测试改中专句 PDF（每页 9 个唯一完整句 + 末行 2 字段接「续，」，同字体无标题行）替代 320 页样本，判定强度不降。⑤ **T7 演练自动化**：`doc2md/ops/drill.py` + CLI `doc2md backup drill [--keep]`——沙箱内 8 步闭环（copy_live→snapshot→external_encrypt→simulate_loss→rotate→restore→integrity_check→compare）；异常统一收敛 `DrillFailure`（GCM `InvalidTag` 原先击穿 CLI 的捕获面），`integrity_check` 对重度损坏返回 `error:` 行而非抛 `DatabaseError`；13 项测试含「篡改 enc 容器必须恢复失败」与 NFR-20 无正文泄露。⑥ **T4 队列可视化**：`static/editor.html` 153→319 行——五态 chips 过滤、任务表（排队等待/耗时/错误码/失败原因）、5s 自刷新、失败主动告警、done 任务链接载入；实测修掉三个真 bug（chip 点击只重渲染计数未重渲染表格、空 token 首屏 401 刷错误、`docCell` 计算后未插入行 HTML）。⑦ **T5 Windows 运维面**：`ops/windows/` schtasks XML（日/周两档，`StartWhenAvailable`、`LeastPrivilege`、电池照跑、`ExecutionTimeLimit`）+ `install-doc2md-tasks.ps1`（占位符替换拒绝残留、StartBoundary 取明天避免安装即补跑、`-SetPassphrase` 走用户级环境变量、校验输出 `OK/FAIL 任务名 下次运行｜上次结果`）；17 项与 launchd 等价静态测试（URI/Label/时刻/动作 parity + XML 合法性 + 口令零泄露）；**顺带修复仓库既有 plist 的非法 XML 缺陷**——注释含 `--daily`/`--weekly`（XML 注释禁含连续连字符），expat 拒解析，两个文件此前根本不是合法 plist。⑧ **T2 本地模型接入**：`llm.py` 新增 `LlmClient`（`from_cfg`/`repair`/`probe`；`raw_decode` 容忍围栏与尾杂音；vendor_models 下唯一 gguf 文件名发现模型名）+ `convert.repair_ops` 调度器（server 模式 / fallback 打标记 / `false` 明确失败 E5041）+ CLI `--llm-mode`/`--llm-no-fallback` + doctor 探测 `/health`；22 项测试用 stdlib `HTTPServer` 假 llama-server 钉请求契约（系统提示词、IR 定位摘要、白名单、`temperature=0`）、注入归因（`injection_candidate` vs `model_hallucination`）、故障分级（parse/http/connect）、Bearer 鉴权、offline 零 HTTP；e2e 实测 server 模式 1 次 HTTP、死端口 `--llm-no-fallback` exit 4/E5041 且不落产物。全量 146 收集→**238 收集（237 passed + 1 skipped）**，gate 67 项不变 | `doc2md/**`（config / llm / convert / cli / auth / scheduler / errors / metrics / db / ops/backup）`doc2md/ops/drill.py` `doc2md/ops/windows/*` `doc2md/ops/launchd/*` `doc2md/static/editor.html` `tests/test_t{2,4,5,7,9}_*.py` `pyproject.toml` `pytest.ini` `.github/workflows/ci.yml` `LICENSE` `README.md` `config/*` `ops/backup.md` | 对外：`[llm]` 新增 4 键（`mode`/`fallback`/`timeout_ms`/`model`）、CLI 新增 `backup drill` 子命令与 `convert` 两个旗标、E5041 启用（HTTP 503）、W1044 开始写入 `ir.warnings`；`DB_VERSION`/`SCHEMA_VERSION`/`PIPELINE_VERSION` 均不变。`PLAN_VERSION` 2.1→2.2：4.6 节从「离线占位 + 待办」改写为双模式实现陈述，附录 A/D/G 覆盖面扩大 |
 | CH-457 | 度量+缺陷 | **T6 大语料实测，及其暴露的 S1 打开边界缺陷**。① 缺陷：截断 PDF（魔术码合法、无 xref/trailer）在 S1 打开时抛 `PdfminerException: Unexpected EOF`，原实现未映射→冒泡成 **E5000 内部错误**，「输入损坏」被误报成「工具故障」（HTTP 500 而非 415，任务终态 failed 且错误码不可判定）——而 4.1 明写「不可读、读取异常一律归入 415 契约」，附录 D 冻结语义亦为「打开源文件不可读同归此码」。修复：`s1_parse._open_source` 在 pdfplumber / python-docx 两个打开边界统一映射 E4151；detail 只含文件名与异常类名（NFR-20：异常消息可能夹带文档内容，不带入）；`Doc2mdError` 原样穿透不重包装；**只映射打开失败**——页级抽取异常不在此冒充「不可读」，仍走既有失败路径（精度优先，另一类失败不合并）。退出码不变（同步 convert 仍 4、异步 work 仍 5），变的是错误码与 HTTP 状态。② 实测：`ops/bench/t6_large_corpus.py`——1080 文件混合语料（1000 PDF + 60 DOCX + 20 坏文件，种子 20261014）；reportlab `invariant=1` + DOCX zip 条目时间戳固定保证**字节级可复现**（否则同种子两次生成不同字节，「固定语料」口径不成立）；坏文件字节唯一（同字节会被 `uq_tasks_doc_active` 附着去重，「文件数↔终态」1:1 口径失真）；父进程 /proc 进程树 RSS 0.1s 采样（规避 12.3 的 `RUSAGE_CHILDREN` 陷阱）+ sqlite 只读连接轮询队列状态；测量一律走真 CLI 子进程（`doc2md work --enqueue DIR --once`），父进程只采样。三张表见 12.3：workers=1/4 排空 **51.4/49.1s**（1261/1320 件每分钟）、进程树峰值 **105.6/191.5MB**（最大单进程 38.6MB）、失败账目**精确闭合**（1060 done + 7 failed(E4151) + 13 入队即拒(E4151) = 1080；非 done 占比 1.85% = 注入坏文件比例，两并发度逐项一致）。附带结论：1080 个**单页小文件**上 4 进程仅比串行快 4.5%——瓶颈不在解析并发度而在每任务固定开销（DB 写、进程调度、enqueue 逐条打印）；与 12.3 既有「8×40 页 PDF 并行约 2 倍增益」不矛盾（语料形态不同，按 12.8 教训 4 不可互相外推）。新增 14 项测试：打开边界回归 6 项（read_pdf/read_docx/convert/worker 落库全链路 + 好文件不误伤 + Doc2mdError 穿透）+ 仪器自检 8 项（语料确定性、坏文件唯一、三张表渲染、/proc 采样原语、真 CLI 端到端小语料） | `doc2md/pipeline/s1_parse.py:_open_source`（+`read_pdf`/`_pdf_page_count`/`read_docx` 三处打开点）`ops/bench/t6_large_corpus.py` `tests/test_t6_corpus_bench.py` | 对外：截断/坏包文件的错误码 E5000→E4151（HTTP 500→415），CLI 退出码不变；门禁与产物语义不变。`PIPELINE_VERSION` 维持 2.4.0（缺陷修复 + 度量，无 schema/字段变更） |
 | CH-459 | 缺陷+更优方案（全面审查优化方案 + 批次①实施） | **三路并行全面审查（45 项）的分诊方案，及第一批实施（A-1 七类块 / A-2 链接抽取 / A-7 LLM op 补齐）**。审查方法：代码与性能 / 测试体系 / 文档一致性三路只读审查（各 15 项），按「功能全面、性能优先」分诊为 A 类 40 项（沙箱内可改可验证，直接实施）、B 类 3 项（需 Windows/macOS 目标机，登记 T12/T13/随 T3）、C 类 2 项（需人工决策，T14 + 12.5 措辞降档）；方案写入 9.4。批次①三项：① **A-1（FR-104 P0）**：`BLOCK_TYPES` 声明七类块而 S3 原只产三类——下游 W1043 跨片表格检测永假、S4 三个渲染分支死代码、`mark_table_boundary` op 无对象。修复：S1 补四组行级结构化信号（`Line.mono` 等宽字体；`Line.row` 表格单元格——PDF 按行内横向间隙聚类（阈值 `max(8pt, 1.6×中位字宽)`），DOCX 取 `w:tbl` 真实单元格并置 `row_explicit`；`Line.link`/`link_internal`/`link_dest`；`Line.level_hint` DOCX Heading 样式显式层级），S3 `analyze` 重写补四类保守检测（table：连续 ≥2 行 + 行首 x0 对齐 3pt + 行尾句末标点守卫仅对 PDF 几何推断行生效；code：围栏配对 / 4 空格缩进（仅空段起算）/ 等宽连续段三模式；quote：`>` 前缀或整行 CJK 引号（仅空段起算）；page_break：form-feed 行）。全部遵循宁漏勿误：漏判只退化为段落（原行为），误判污染正文。② **A-2（FR-107/108）**：`Line.link` 两条读取路径都不赋值、`Block.links` 无生产写入方。修复：PDF Link 标注按纵向几何相交附着到第一根未链接行（只认 URI / GoTo 两类动作，Launch/JavaScript 不抽）；DOCX `w:hyperlink` 仅整段覆盖时才附着（行内局部链接本轮不抽——块级模型无法表达「哪一段文字」是链接，硬附会把整块包成 `[整块](url)` 制造错误数据）；S3 段落冲刷路径跟踪 `para_lines` 取段内首条带链接行附着（每块至多一条）；S4 `_inline` 渲染首条可渲染链接。③ **A-7**：LLM op 白名单 5 个仅 `fix_heading_level` 有实现，其余 4 个过校验、计入 `applied_ops` 但静默无效（「计数成功、产物没变」比拒绝更坏）。修复：`apply_ops` 五 op 全落地——`split_block` 按 `at` 偏移切块、新块 id 加 `s` 后缀且不重排后续 id（外部引用按 id 寻址）；`merge_block` 并入前一块（`absorbed_ids` 留痕，CJK 直连 / 拉丁补空格）；`fix_list_marker` 规范化行首标记；`mark_table_boundary` 只打旗标不改正文。基座纪律：`llm.py` 不 import 包内模块，新块用 `type(b)(...)` 构造。**收尾自查实测修掉三个真缺陷**：`\x0c` 是 Python 空白字符，`rstrip()` 会把它剥掉导致 page_break 分支永假（改为先于 rstrip 判定）；空行不冲刷 quote 缓冲致两段独立引用被并成一块且段间空行丢失；结构行（fence/heading/list/page_break）终止行组时误用 `flush_rows(False)`——表格后紧跟标题/列表/代码就丢表（改为按事实判定 `flush_rows(True)`）；另清 ruff F841 死变量一处。实测：新增 `tests/test_s3_blocks.py` **34 项**（七类块可达性回归 + 四类块口径 + 链接单测/e2e + 五 op 语义 + 自建 DOCX 样本）；gate **67 项全绿**（54.2s）；全量 **276 收集 = 275 passed + 1 skipped**（109.1s）；`ruff check .` 全绿。等价性三态复核（改造前快照 vs 改造后）：`small_3p`（`b1a1312c26d9dc9f`）与 `large_320p`（`6a90e3e368819ed5`）markdown 逐字节一致；`links_pdf` 按设计变化（两条链接落地，`dfd7fa22`→`882a6a41`）；三个 DOCX 样本仅标题检出变化（FR-104 修复的预期效果，已核实源文件 Heading 样式，无误判） | `doc2md/pipeline/s1_parse.py`（+173 行：四组行级信号 + `_attach_links` + DOCX 重写）`doc2md/pipeline/s3_structure.py`（+234 行：`analyze` 重写 + 四类块检测 + 链接附着）`doc2md/pipeline/s4_render.py`（+5 行：page_break 空串分支 + 链接渲染）`doc2md/pipeline/convert.py`（A-13 提前落地：sniff 一次直传 `read_any`）`doc2md/llm.py`（+85 行：`apply_ops` 重写 + `_split_block`/`_merge_block`/`_cjk`）`tests/test_s3_blocks.py`（新增 431 行 34 项）`docs/dev-plan.md`（9.4 审查方案 + 本条 + 附录 G 刷新） | 对外：产物新增 table / code / quote / page_break 四类块与块级链接渲染——这是 FR-104/107/108 的原设计行为落地，不是新契约；`links_pdf.pdf` 与 DOCX 样本产物按设计变化（等价复核与差异清单如上）。`PIPELINE_VERSION` 维持 2.4.0（无 schema / 字段 / 版本常量变更）。`PLAN_VERSION` 2.3→2.4（主题篇新增 9.4 审查优化方案、附录 G 全量刷新、登记篇扩充） |
+| CH-460 | 缺陷+更优方案（全面审查优化轮 · 批次②：性能与存储） | **批次②实施（A-3…A-6、A-9、A-10、A-12、A-14、A-15）+ A-8 实测回退**。① **A-3（`Store._conns` 强引用泄漏）**：thread-local 连接进强引用 list 后永不释放，`serve`（threaded）每请求累积一个连接到 fd 上限即服务面 500。改弱引用登记表——`sqlite3.Connection` 是 C 扩展类型**不支持 `weakref`**（改完首次运行即 `TypeError` 全库崩溃），故登记表改存可弱引用的持有者 `_ConnRef`（由 `Store._local.holder` 线程独占持有，线程消亡即出列），并暴露 `live_conn_count()` 供测试与运维探针。② **A-4 / A-14（每任务约 6 次写事务）**：`save_ir` 改单事务 + `executemany`（docs/blocks/search_blocks 三次批量，原 2 次事务 + 2N 条语句），新增 `tx=` 形参；`Scheduler.mark(tx=)` 与 `api._emit(tx=)` 同增形参；`worker._finish_ok` 的 detail/mark/event/入库由 4 次提交合并为 1 次，同步 `/jobs` 路径由 5 次降为 2 次（WAL + `synchronous=FULL` 下每次提交都 fsync，是 12.3 单文件固定开销的主因）。③ **A-5（S1.5 每页指标算两轮）**：`_avg_chars` 原对全文档重跑一遍完整 `_page_metrics`（4 个正则 × 全页数）。拆出 `GateCollector`——`feed()` 采集（非采样页只付 `_page_chars` 一个正则）、`finish()` 纯函数判定不再触碰页对象，`check()` 改为其内部实现（判定逻辑只有一份）。④ **A-6**：新增 `reindex_block`，PATCH / rollback 只删插该块 FTS 行（原任何单块编辑都整文档重写，FR-208 要的是「该块索引」）。⑤ **A-9**：FTS covered-span 从逐字符 `any()`（O(n×m)）改区间掩码一次遍历；新增 `MAX_QUERY_CHARS=256` 查询串上限（粘贴整段文档不再撑爆 MATCH 表达式，FTS 与 LIKE 两条路径同口径）。⑥ **A-10**：目录投递多文件时按文件派生幂等键 `键#文件名`（原 N 个文件共用一键，N-1 个静默消失）；单文件投递键字符串不变（既有契约不漂移）。⑦ **A-12**：`ops/logging._scrub` 原按**键名提示**（text/before/after/…）决定是否脱敏，提示名单外的键带大段正文原样入日志；与 `api._scrub` 统一为 `scrub_record`——不看键名只看长度（>64 字符 → sha256 指纹），递归 dict/list，`api` 侧事件入库同用此实现。⑧ **A-15**：`delete_doc` / `delete_source` 删前存在性检查（原对不存在的 id 也留痕并返回 200，「删了个不存在的东西」与「删成功」不可区分）；`rollback` 的 `int(to_revision)` 非数字参数由逃逸 500 收敛为 400/E4001（数字字符串仍是合法输入，未过度收紧）。**顺带修一个静默数据丢失**：`worker._finish_ok` 先写 `detail_json`（含 path/zip/blocks/content_drift），随后 `sched.mark(done)` 用 `{}` 把它覆盖——产物路径与漂移留痕从未真正入库（无测试钉住，由代码审读发现）。**A-8 实测回退**：convert「PDF 按片读取、单片驻留」已实施并验证等价（gate 明细与 md_sha 逐字段一致），但峰值内存实测不降反升（large_320p：`py_peak` 132.9MB → 134.9MB（2 片）/ 137.9MB（4 片），`rss` 364MB → 366MB），且每片多一次 PDF open——驻留主体是 IR blocks（5890 块）与 pdfplumber 单页解析缓冲，`pages_all` 只占约十分之一，而分片 IR 必须全部驻留供缝合，省下的被抵消。按「性能优先」原则回退该改动（代码内留回退说明），「不把整本文档读进内存」的纪律继续由 `s1.chunk_pages`（分块 open/close）承担。实测：新增 `tests/test_batch2_storage.py` **26 项**；gate **67 项全绿**（54s）；全量 **302 收集 = 301 passed + 1 skipped**（100s）；`ruff check .` 全绿；S1.5 门禁耗时（large_320p 320 页，7 次取中位）auto **146.1ms → 73.5ms（−49.7%）**、even5 **70.9ms → 7.3ms（−89.7%）**；等价性复核（改造前 `git worktree` vs 改造后，同配置同 cwd）6 个黄金样本的 gate 明细与 markdown sha256 **逐字段一致**（产物面零变化） | `doc2md/storage/db.py`（`_ConnRef` + `WeakSet` + `live_conn_count` + `_Tx.executemany`）`doc2md/storage/repo.py`（`save_ir` 重写 + `reindex_block` + 两个删除的存在性检查）`doc2md/storage/fts.py`（`MAX_QUERY_CHARS` + `_non_cjk_rest` 区间掩码）`doc2md/pipeline/s1_5_gate.py`（`GateCollector` + `_page_chars`）`doc2md/scheduler.py`（`mark(tx=)`）`doc2md/api.py`（`_emit(tx=)`、幂等键派生、脱敏改调 `scrub_record`、rollback 参数校验）`doc2md/worker.py`（`_finish_ok` 四写合一 + detail 覆盖修复）`doc2md/edits.py`（`reindex_block`）`doc2md/ops/logging.py`（`scrub_record`）`tests/test_batch2_storage.py`（新增 366 行 26 项）`docs/dev-plan.md`（9.4 进度、本条、12.1/12.3 证据、附录 F/G 刷新） | 对外契约变化三处（均为「原来错了」的收敛，非新设计）：删除不存在的 doc/source → 404/E4041（原 200 且留痕）；`rollback` 的 `to_revision` 非数字 → 400/E4001（原 500）；目录投递多文件时幂等键按文件派生（单文件不变）。产物面（content.md / ir.json / report.html 字节）零变化。`PIPELINE_VERSION` 维持 2.4.0（`SCHEMA_VERSION` / `DB_VERSION` 均不变）。`PLAN_VERSION` 2.4→2.5 |
 
 以下对影响规格判读最大的条目补一段说明；其余条目的细节以表格落点 + 第十二章证据为准。**CH-424（门禁口径）**：even5 与旧三点都是**抽样**——实测 60 页样本的坏区落在第 51–53 页时两者同时漏过；反过来纯链接页密度的文档被误杀。`auto` 把判定面放到全文档页密度（成段空/占比超阈才拒收），报告面仍给 5 个采样页明细，因此上游 C-1 的验收可读性不受影响。对照基线 `even5`/`legacy3` 保留，可复现「漏检/误杀」两种形态。
 
@@ -1197,8 +1199,8 @@ as-built 清单，逐模块给出行数、依赖方向（3.6 的 DAG 层次）�
 
 | 项 | 数值 | 说明 |
 | --- | --- | --- |
-| `pytest -m gate` | **67 项全绿**；收口轮 110.4s、CH-453 轮 72.5s、CH-454 轮 108.8s、CH-455 轮 109.7s、**CH-456/457 轮 53.0s**（T8 优化后稳定值，<60s 达标）、CH-458 轮复测 67.7s（沙箱负载峰值，项数与结论不变）、CH-459 轮 54.2s（项数与结论不变） | 红线层；历史增长 35 → 40（CH-444 后）→ 65（CH-447…451 后）→ 67（CH-455 后）。CH-456/457 轮项数不变（新增 92 项全部落在里程碑与信息层，未进红线）、耗时降至 53.0s：大样本转换改 session 级共享夹具 + shard fallback 两类测试改中专句 PDF。四轮数字与全量套件同向波动，进一步支持「耗时不入断言」的口径 |
-| 全量 `pytest` | 146 收集 → **242 收集（241 passed + 1 skipped）** → **276 收集（275 passed + 1 skipped）**；CH-459 轮 109.1s、CH-458 轮 130.9s、CH-456/457 轮 107.98s、CH-455 轮 163.3s、CH-454 轮复核 162.4s、CH-453 轮复核 110.8s、低端机收口轮 164.9s | skipped 为可选大资产（CH-443）。CH-458 新增 4 项（T3 采样后端三支 + n/a 表格降级）。CH-459 新增 34 项（`test_s3_blocks.py`：七类块可达性 + 四类块口径 + 链接 + LLM op 语义）。同一份代码在多个时点给出 130.9 / 107.98 / 163.3 / 162.4 / 110.8 / 164.9s——沙箱负载是主导因素，项数才是硬口径 |
+| `pytest -m gate` | **67 项全绿**；收口轮 110.4s、CH-453 轮 72.5s、CH-454 轮 108.8s、CH-455 轮 109.7s、**CH-456/457 轮 53.0s**（T8 优化后稳定值，<60s 达标）、CH-458 轮复测 67.7s（沙箱负载峰值，项数与结论不变）、CH-459 轮 54.2s、CH-460 轮 54s（项数与结论均不变） | 红线层；历史增长 35 → 40（CH-444 后）→ 65（CH-447…451 后）→ 67（CH-455 后）。CH-456/457 轮项数不变（新增 92 项全部落在里程碑与信息层，未进红线）、耗时降至 53.0s：大样本转换改 session 级共享夹具 + shard fallback 两类测试改中专句 PDF。四轮数字与全量套件同向波动，进一步支持「耗时不入断言」的口径 |
+| 全量 `pytest` | 146 收集 → **242 收集（241 passed + 1 skipped）** → **276 收集（275 passed + 1 skipped）** → **302 收集（301 passed + 1 skipped）**；CH-460 轮 100s、CH-459 轮 109.1s、CH-458 轮 130.9s、CH-456/457 轮 107.98s、CH-455 轮 163.3s、CH-454 轮复核 162.4s、CH-453 轮复核 110.8s、低端机收口轮 164.9s | skipped 为可选大资产（CH-443）。CH-458 新增 4 项（T3 采样后端三支 + n/a 表格降级）。CH-459 新增 34 项（`test_s3_blocks.py`：七类块可达性 + 四类块口径 + 链接 + LLM op 语义）。CH-460 新增 26 项（`test_batch2_storage.py`：弱引用连接表 + 事务合并 + 门禁单遍 + 单块索引 + FTS 上限 + 幂等键派生 + 脱敏 + 删除/回滚校验）。同一份代码在多个时点给出 100 / 109.1 / 130.9 / 107.98 / 163.3 / 162.4 / 110.8 / 164.9s——沙箱负载是主导因素，项数才是硬口径 |
 | CI 远端运行 | 首轮 run #1（push 到 `main`，commit `34e2853`）**四个作业全绿**：`merge-gate (3.11/3.12/3.13)` 各 65 项 `[100%]`，`full-suite` 143 项 `[100%]` + 可复现性 + `doctor` | GitHub Actions run #1，2026-10-13。测试步骤自身墙钟：红线层 72s（3.12）/116s（3.11）/122s（3.13），全量 183s（3.12）——runner 上同样比本地慢，项数才是硬口径 |
 | 失败能否阻断合并 | **未生效** | 必需检查能力受平台限制（private + 免费计划 → 分支保护 / 规则集 API 403），见 T1 |
 
@@ -1219,6 +1221,8 @@ as-built 清单，逐模块给出行数、依赖方向（3.6 的 DAG 层次）�
 | 补充断言 | 分块边界参数化（chunk 1/2/3/32 vs 整本）、进程池 vs 串行含 `spawn`、队列产物 vs 串行产物 |
 
 **CH-459 轮（批次①，改产物路径）的等价性复核**：改造前对 6 个黄金样本的 markdown 做快照（sha256 前 16 位），改造后重跑逐字节比对——`small_3p.pdf`（`b1a1312c26d9dc9f`）与 `large_320p.pdf`（`6a90e3e368819ed5`）**逐字节一致**（新增的等宽 / 表格行 / 标题提示信号在既有样本上零触发，检测保守性达成）；`links_pdf.pdf` 按设计变化（`dfd7fa22`→`882a6a41`，两条链接落地为 `[整段](url)` 形态，无误伤其他行）；三个 DOCX 样本仅标题检出变化（Heading 样式行从段落升级为标题块，FR-104 修复的预期效果，源文件样式已逐一核实）。**结论：变化全部来自设计内的功能补齐，无一处非预期漂移。**
+
+**CH-460 轮（批次②，不改产物路径）的等价性复核**：改造前 `git worktree` 检出 HEAD，两版各跑一次 6 黄金样本，比对 `Result.gate` 完整明细（JSON 序列化）与 markdown sha256——**逐字段一致**（`GateCollector` 重构不改变门禁任何判定输出；存储与幂等键改动不触产物）。方法学注记：首次比对曾出现 `avg_chars` 0.6 的假差异，根因是两次运行的工作目录不同导致 `config.load()` 读到不同配置（`sys.path` 隔离了代码、没隔离 cwd）——对比脚本必须用显式 `PYTHONPATH` + 同一 cwd 隔离「代码版本」与「配置环境」两个变量。
 
 ### 12.3 驻留与吞吐（数字口径的历史与现状）
 
@@ -1268,6 +1272,13 @@ as-built 清单，逐模块给出行数、依赖方向（3.6 的 DAG 层次）�
 | 非 done 占比 | **1.85%**（= 注入坏文件比例 20/1080；失败账目精确闭合：1060 + 7 + 13 = 1080） |
 
 两条结论：① **失败账目可精确闭合**——7 个截断 PDF 在消费侧 failed（E4151，CH-457 修复后的正确落点），13 个在入队面即拒（E4151），好文件 1060 个全 done；每个坏文件字节唯一，未被 `uq_tasks_doc_active` 附着去重吞掉。② **单页小文件上并发几乎无增益**（4 进程仅快 4.5%）——瓶颈不在解析并发度（GIL 侧的进程池对此无效），而在每任务固定开销：DB 写入、进程调度、入队逐条打印。这与上表「8×40 页 PDF 并行约 2 倍增益」不矛盾：后者每个文件的解析成本远高于固定开销。按 12.8 教训 4，两组数字按语料形态分别引用，不可互相外推。
+
+**CH-460 轮的两项微观实测**（large_320p.pdf，320 页）：
+
+| 项 | 改造前 | 改造后 | 结论 |
+| --- | --- | --- | --- |
+| A-5 S1.5 门禁耗时（7 次取中位） | auto **146.1ms** / even5 **70.9ms** | auto **73.5ms** / even5 **7.3ms** | auto −49.7%、even5 −89.7%——`avg_chars` 不再对全文档重跑完整 `_page_metrics`，非采样页只付单正则代价 |
+| A-8 按片读取峰值内存（tracemalloc `py_peak`，2/4 片） | 整读 **132.9MB** | 2 片 **134.9MB** / 4 片 **137.9MB** | **不降反升 → 回退**。驻留主体是 IR blocks（5890 块）与 pdfplumber 单页解析缓冲，`pages_all` 只占约十分之一；分片 IR 须全部驻留供缝合，省下的被抵消，还多出每片一次 PDF open。实测无收益的改动不进主干 |
 
 ### 12.4 低配机活测（真进程，非 test client）
 
@@ -1359,5 +1370,6 @@ as-built 清单，逐模块给出行数、依赖方向（3.6 的 DAG 层次）�
 | **v2.2** | 2026-10-14 | **待办收口轮**（登记为 CH-456 + CH-457）：主题篇 4.6 从「离线占位 + 真实服务待办」改写为双模式实现陈述（`llm.mode` offline/server、fallback、E5041、netguard 守护）；9.1/9.2 按实况重写（T2–T11 全部收口，仅剩 T1/T3）；附录 A 补 4 个 `[llm]` 键并清除全部「声明性」标注（49→53 键）、附录 D 的 E5041 启用/E5051 删除/W1044 接入/W1999 删除、附录 G 全量刷新（39 模块 5485 行、17 测试文件 5081 行 238 收集）；第十二章新增 T6 大语料三张表（12.3）、CH-457 打开边界与 T7 演练实证（12.4）、T2 契约实证（12.5），D-8/D-9/D-10/D-11/D-12 全部标注关闭，12.7 三项转「部分验证 / 已验证」。运行时版本常量不变（`PIPELINE_VERSION` 2.4.0 / `SCHEMA_VERSION` 14 / `DB_VERSION` 4），`PLAN_VERSION` 升至 `2.2` |
 | **v2.3** | 2026-10-14 | **T3 测量工具就绪轮**（登记为 CH-458）：`ops/bench/t6_large_corpus.py` 从 Linux-only 改为三平台同口径入口（采样后端 proc / ps / psutil + none 降级，sqlite 只读 URI 跨平台，表格新增「采样后端」行，JSON 记录 platform/sampler）；9.2 的 T3 改「工具就绪、待目标机执行」，12.7 两条真机未验证项补工具口径；附录 G 测试资产刷新（5125 行 / 242 收集 = 241 passed + 1 skipped），8.1 与附录 F 项数口径同步。主题篇规格判读未变，`doc2md` 包零改动（仅 `PLAN_VERSION` 常量），`PIPELINE_VERSION` / `SCHEMA_VERSION` / `DB_VERSION` 均不变 |
 | **v2.4** | 2026-10-15 | **全面审查优化轮启动 + 批次①**（登记为 CH-459）：主题篇新增 9.4「全面审查优化方案」（三路并行 45 项发现 + A/B/C 分诊 + 五批次实施顺序）；批次①实施 A-1（FR-104 七类块补齐：table/code/quote/page_break 从「声明未落地」变为产出现实）、A-2（FR-107/108 链接抽取端到端打通）、A-7（LLM op 五语义全落地）、A-13（sniff 一次直传）；9.2 待办表新增 T12–T14；附录 G 全量刷新（39 模块 5984 行、18 测试文件 5556 行 276 收集），8.1 / 附录 F 项数口径同步；第十二章 12.1 补本轮数字、12.2 补等价性复核证据。运行时行为：产物新增四类块与块级链接（原设计行为落地），`PIPELINE_VERSION` 维持 2.4.0；`PLAN_VERSION` 升至 `2.4` |
+| **v2.5** | 2026-10-15 | **全面审查优化轮 · 批次②：性能与存储**（登记为 CH-460）：实施 A-3（`Store` 连接登记表改弱引用 + `live_conn_count`）、A-4/A-14（`save_ir` 单事务 + `executemany`，`tx=` 形参贯通 `_finish_ok` / 同步 `/jobs`，顺带修掉 `detail_json` 被 `mark(done)` 覆盖的静默丢失）、A-5（S1.5 门禁拆 `GateCollector` 采集/判定，auto 146.1→73.5ms、even5 70.9→7.3ms）、A-6（`reindex_block` 单块索引）、A-9（FTS 查询上限 + 区间掩码）、A-10（多文件投递按文件派生幂等键）、A-12（脱敏统一为「不看键名只看长度」）、A-15（删除 404 + 回滚 400）；**A-8 实测回退**（按片读取峰值内存不降反升，132.9→134.9/137.9MB，改动撤销、证据入 12.3）；对外契约收敛三处（删除不存在 404、回滚非数字 400、多文件幂等键派生），产物面零变化。新增 `tests/test_batch2_storage.py` 26 项，gate 67 全绿、全量 302 收集、六个黄金样本 gate 明细与 md_sha 逐字段一致；附录 F/G 数字刷新（39 模块 6216 行、19 测试文件 5922 行 302 收集）。`PIPELINE_VERSION` 维持 2.4.0；`PLAN_VERSION` 升至 `2.5` |
 
 下一版本递增条件：主题篇任一章的规格陈述发生变化（新增能力、改变默认值、调整契约），**或主题篇 / 附录新增章节扩大了覆盖面**（CH-454 属后者：既有判读不动，但读者能查到的实现面事实变多了）。仅登记新 CH 条目、或只做事实口径更正时不改版本号，只追加第十一 / 十二章内容（CH-453 属此类）。文件名不随版本改变——版本号只出现在本文头部表格与 `PLAN_VERSION` 两处，避免带版本的引用再次悬空。

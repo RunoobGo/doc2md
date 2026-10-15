@@ -12,8 +12,9 @@
 from __future__ import annotations
 
 from .errors import E4001_BadRequest, E4041_NotFound, E4251_RevisionConflict
+from .ir import Block as _Block
 from .storage.db import Store, now_iso
-from .storage.repo import list_blocks, reindex
+from .storage.repo import reindex_block
 
 
 def patch_block(store: Store, doc_id: str, block_id: str, body: dict, actor: str,
@@ -51,8 +52,10 @@ def patch_block(store: Store, doc_id: str, block_id: str, body: dict, actor: str
             (doc_id, block_id, old_text, body.get("text", ""), int(base), int(base) + 1,
              actor, now_iso(), body.get("reason", "")))
 
-    # 索引刷新必须在事务外：reindex 自带 BEGIN IMMEDIATE，嵌套会失败
-    reindex(store, doc_id, list_blocks(store, doc_id))
+    # 索引刷新必须在事务外：reindex_block 自带 BEGIN IMMEDIATE，嵌套会失败。
+    # CH-459（A-6 / FR-208「该块索引」）：只删插该块一行——原实现任何单块编辑
+    # 都整文档重写 FTS（N 块文档改一个块 = 重写全部索引行）。
+    reindex_block(store, doc_id, _Block(id=block_id, text=body.get("text", "")))
     out = {"revision": int(base) + 1, "block_id": block_id}
     if warning:
         out["warning"] = warning

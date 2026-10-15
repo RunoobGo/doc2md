@@ -148,7 +148,15 @@ def drain_once(store: Store, cfg: dict, root, *, workers: int | None = None,
 
 def _finish_ok(store: Store, sched: Scheduler, job: dict, res: dict,
                writer=None) -> bool:
-    """入库 + 状态推进。返回是否发生内容漂移（入队后源文件被改写）。"""
+    """入库 + 状态推进。返回是否发生内容漂移（入队后源文件被改写）。
+
+    CH-459（A-4）：detail 更新 / save_ir / mark(done) / 事件四写原为四次独立
+    提交（WAL + synchronous=FULL 下每次 fsync）——每任务固定开销的主因，
+    现合并为单事务。同笔修掉一个静默缺陷：原实现先写 detail_json 再
+    `sched.mark(done)`，而 mark 用 `{}` 覆盖 detail_json——明细从来没活过
+    （本次把 detail 与终态写进同一笔 UPDATE）。
+    """
+    from .api import _emit
     from .ir import hash_of_path
     try:
         actual, _ = hash_of_path(res["file"])
@@ -159,14 +167,16 @@ def _finish_ok(store: Store, sched: Scheduler, job: dict, res: dict,
     if drift:
         # 产物按消费时内容入库；任务留痕，不偷偷改 task.doc_id 主键语义
         detail["content_drift"] = {"enqueued": job["doc_id"], "consumed": res["doc_id"]}
-    with store.tx() as tx:
-        tx.execute("UPDATE tasks SET detail_json=? WHERE job_id=?",
-                   (json.dumps(detail, ensure_ascii=False), job["job_id"]))
     ir = _read_ir(res["zip"])
-    if ir is not None:
-        save_ir(store, ir)
-    sched.mark(job["job_id"], "done")
-    _event(store, job, res, "job_done", writer, doc_id=res.get("doc_id"))
+    with store.tx() as tx:
+        if ir is not None:
+            save_ir(store, ir, tx=tx)
+        tx.execute("UPDATE tasks SET status='done', error_code='', detail_json=?,"
+                   " finished_at=? WHERE job_id=?",
+                   (json.dumps(detail, ensure_ascii=False), now_iso(), job["job_id"]))
+        _emit(store, "job_done", res.get("doc_id") or job.get("doc_id"), job["job_id"],
+              {"blocks": int(res.get("blocks", 0) or 0), "source": "work",
+               "file": str(job.get("path", ""))[-64:]}, writer, tx=tx)
     return drift
 
 

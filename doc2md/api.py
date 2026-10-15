@@ -21,7 +21,7 @@ from .errors import (
     E4031_Forbidden,
     E4041_NotFound,
 )
-from .ops.logging import RotatingJsonlWriter
+from .ops.logging import RotatingJsonlWriter, scrub_record
 from .pipeline.convert import convert
 from .scheduler import Scheduler
 from .security.dirguard import WalkLimits, guard_walk
@@ -119,6 +119,14 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
         else:
             raise E4041_NotFound(f"path not found: {path}")
 
+        # CH-459（A-10）：目录投递时按文件派生幂等键——原实现 N 个文件共用请求里的
+        # 同一个键，第 2..N 个全部命中第 1 个作业而静默消失（同步/异步两条路径同病）。
+        # 单文件投递维持原样（键字符串不变），多文件才派生 `键#文件名`。
+        multi = len(files) > 1
+
+        def _idem_for(f: Path):
+            return f"{idem}#{f.name}" if (idem and multi) else idem
+
         # CH-449：[perf].queue_async = true → 只入队、立即 202 返回，由 `doc2md work` 消费。
         # 低配机上「一次丢一个目录」不应把 HTTP 线程占住（也不应同时起步 N 个解析进程）。
         # 默认 false = 同步转换，既有红线契约（方案 5.4：jobs[].doc_id 立即可用）不变。
@@ -133,7 +141,7 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
                 if f.is_file():
                     sniff(f)
             mode = b.get("mode")
-            out = [enqueue(sched, f, mode=mode, idem_key=idem)
+            out = [enqueue(sched, f, mode=mode, idem_key=_idem_for(f))
                    for f in files if f.is_file()]
             for it in out:
                 if not it["attached"]:
@@ -148,16 +156,20 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
                 res = convert(f, cfg=cur(), out_dir=root / "out")
             except Doc2mdError as e:
                 if e.code == "E4221":
-                    j = sched.submit("reject:" + f.name, idem_key=idem)
+                    j = sched.submit("reject:" + f.name, idem_key=_idem_for(f))
                     sched.mark(j.job_id, "rejected", e.code, e.detail)
                     out.append({"file": f.name, "status": "rejected", "code": e.code})
                 else:
                     raise
                 continue
-            save_ir(store, res.ir)
-            j = sched.submit(res.doc_id, res.source_key, idem_key=idem)
-            sched.mark(j.job_id, "done")
-            _emit(store, "job_done", res.doc_id, j.job_id, {"blocks": len(res.ir.blocks)}, logw())
+            j = sched.submit(res.doc_id, res.source_key, idem_key=_idem_for(f))
+            # CH-459（A-4）：save_ir / mark(done) / 事件三写合并为单事务
+            # （原 5 次独立提交，WAL + synchronous=FULL 每次 fsync）。
+            with store.tx() as tx:
+                save_ir(store, res.ir, tx=tx)
+                sched.mark(j.job_id, "done", tx=tx)
+                _emit(store, "job_done", res.doc_id, j.job_id,
+                      {"blocks": len(res.ir.blocks)}, logw(), tx=tx)
             out.append({"file": f.name, "job_id": j.job_id, "doc_id": res.doc_id,
                         "attached": j.attached, "idempotency_hit": j.idem_hit,
                         "sharded": res.ir.sharded, "shard_count": res.ir.shard_count})
@@ -221,8 +233,15 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
     def roll(doc_id, block_id):
         need("rollback")
         b = body()
-        return jsonify(rollback(store, doc_id, block_id, int(b["to_revision"]),
-                                b.get("as", "anon")[:12]))
+        # CH-459（A-15）：to_revision 非数字（或缺字段 / None）时原 int() 直转
+        # 逃逸成 500——参数校验收敛 400/E4001，与其它输入判定同口径。
+        try:
+            to_rev = int(b["to_revision"])
+        except (KeyError, TypeError, ValueError):
+            raise E4001_BadRequest("to_revision must be an integer",
+                                   detail={"field": "to_revision"})
+        actor = b.get("as") or tok() or "anon"
+        return jsonify(rollback(store, doc_id, block_id, to_rev, str(actor)[:12]))
 
     @app.delete("/docs/<doc_id>")
     def del_doc(doc_id):
@@ -361,27 +380,27 @@ def _deep(dst: dict, src: dict) -> dict:
 
 
 def _emit(store: Store, code: str, doc_id: str | None, job_id: str | None,
-          payload: dict, writer: RotatingJsonlWriter | None = None) -> None:
+          payload: dict, writer: RotatingJsonlWriter | None = None,
+          tx=None) -> None:
     """事件入库 + 同记录落内置日志（NFR-19：轮转由服务自身执行，不靠 newsyslog/cron）。
 
-    payload 不得含正文片段（NFR-20）：入库走 `_scrub`，写日志走写入器自身的 scrub。
+    CH-459（A-4）：`tx` 形参允许把事件插入并入调用方事务（worker._finish_ok 与
+    同步 /jobs 路径的 detail/mark/event/入库四写合并为单次提交）。传入 tx 时
+    日志行仍由本函数落盘、先于调用方提交——jsonl 是运维面 at-least-once 语义，
+    DB 才是状态真源；不传 tx 时行为与从前完全一致（自有事务）。
+
+    payload 不得含正文片段（NFR-20）：入库走 `scrub_record`，写日志走写入器自身的
+    scrub——CH-459（A-12）两处已统一为同一实现（不看键名、只看长度）。
     """
-    with store.tx() as tx:
-        tx.execute("INSERT INTO events(ts, code, doc_id, job_id, payload_json)"
-                   " VALUES (?,?,?,?,?)",
-                   (now_iso(), code, doc_id, job_id,
-                    json.dumps(_scrub(payload), ensure_ascii=False)))
+    sql = ("INSERT INTO events(ts, code, doc_id, job_id, payload_json)"
+           " VALUES (?,?,?,?,?)")
+    args = (now_iso(), code, doc_id, job_id,
+            json.dumps(scrub_record(payload), ensure_ascii=False))
+    if tx is not None:
+        tx.execute(sql, args)
+    else:
+        with store.tx() as t:
+            t.execute(sql, args)
     if writer is not None:
         writer.write({"code": code, "doc_id": doc_id, "job_id": job_id, **payload})
         writer.flush()
-
-
-def _scrub(d: dict) -> dict:
-    out = {}
-    for k, v in d.items():
-        if isinstance(v, str) and len(v) > 64:
-            import hashlib
-            out[k] = f"<sha256:{hashlib.sha256(v.encode('utf-8', 'replace')).hexdigest()[:12]}>"
-        else:
-            out[k] = v
-    return out

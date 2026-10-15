@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+import weakref
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -115,6 +116,19 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 
 
+class _ConnRef:
+    """连接持有者（`sqlite3.Connection` 不支持弱引用，需要一层可弱引用的壳）。
+
+    CH-459（A-3）：唯一持有者是 `Store._local.holder`（线程独占）。线程消亡即
+    壳失引用 → 弱引用登记表自动出列 → Connection 析构关 fd。登记因此只留痕不保命。
+    """
+
+    __slots__ = ("conn", "__weakref__")
+
+    def __init__(self, conn: sqlite3.Connection):
+        self.conn = conn
+
+
 class Store:
     """状态库句柄。
 
@@ -122,13 +136,21 @@ class Store:
     原因：`doc2md serve` 用 Flask `threaded=True`，cron 与 API 分进程共用同一库文件；
     sqlite3 的连接不允许跨线程使用，单连接实现在并发请求下必然 `ProgrammingError` → 500。
     WAL + busy_timeout 保证多连接并发读写安全（写锁串行化）。
+
+    CH-459（A-3）：连接登记表改**弱引用**。原实现用强引用 list 跟踪连接——
+    `serve` 每来一个新线程就建一个连接进表，线程结束后连接对象仍被 list 持有，
+    永不 GC、fd 永不释放，请求累积到 fd 上限即服务面 500。弱引用下死线程的
+    连接可被正常回收（sqlite3.Connection 析构即关 fd），登记表只留痕不保命。
+
+    注：`sqlite3.Connection` 是 C 扩展类型、不支持弱引用，因此登记表存的是
+    可弱引用的持有者 `_ConnRef`（由线程 local 独占持有，随线程消亡而回收）。
     """
 
     def __init__(self, path: str | Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._local = threading.local()
-        self._conns: list[sqlite3.Connection] = []
+        self._conns: weakref.WeakSet[_ConnRef] = weakref.WeakSet()
         self._lock = threading.Lock()
         self._migrate()
 
@@ -138,8 +160,10 @@ class Store:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA busy_timeout=30000")
         conn.execute("PRAGMA foreign_keys=ON")
+        holder = _ConnRef(conn)
+        self._local.holder = holder          # 线程独占持有：线程死 → holder 死 → 出表
         with self._lock:
-            self._conns.append(conn)
+            self._conns.add(holder)
         return conn
 
     @property
@@ -198,17 +222,30 @@ class Store:
         return self._conn.execute(sql, params).fetchone()
 
     def close(self):
-        """关闭本线程连接；其他线程的连接随线程结束由 GC 释放（sqlite3 连接析构即关闭）。"""
+        """关闭本线程连接；其他线程的连接随线程结束由 GC 释放（sqlite3 连接析构即关闭）。
+
+        CH-459：登记表同场清理——死线程的弱引用与显式关闭的连接一并出列。
+        """
         conn = getattr(self._local, "conn", None)
         if conn is not None:
             try:
                 conn.close()
             except sqlite3.Error:
                 pass
+            holder = getattr(self._local, "holder", None)
+            if holder is not None:
+                with self._lock:
+                    self._conns.discard(holder)
             self._local = threading.local()
+
+    def live_conn_count(self) -> int:
+        """存活连接数（弱引用口径：已被 GC 收走的死线程连接不计入）。
+
+        CH-459（A-3）：`serve` threaded 模式下请求线程来了又走，该值应保持有界；
+        强引用实现下它只会单调增长直到 fd 上限。测试与运维探针共用此口径。
+        """
         with self._lock:
-            if conn is not None and any(c is conn for c in self._conns):
-                self._conns.remove(conn)
+            return len(self._conns)
 
 
 class _Tx:
@@ -228,6 +265,10 @@ class _Tx:
 
     def execute(self, sql, params=()):
         return self.conn.execute(sql, params)
+
+    def executemany(self, sql, seq_of_params):
+        """CH-459（A-14）：批量语句入口——save_ir / reindex 的 N 次 execute 合一次调用。"""
+        return self.conn.executemany(sql, seq_of_params)
 
     @property
     def rowcount(self):

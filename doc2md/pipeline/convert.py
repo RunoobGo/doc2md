@@ -66,6 +66,12 @@ def _convert(path: str | Path, *, cfg: dict, mode: str | None,
     # CH-459（A-13）：sniff 一次直传 read_any——原实现 read_any 内嗅探后
     # 分片前又 sniff(p) 一次，同一文件多开一遍（magic + zip 目录）。
     fmt = sniff(p)
+    # A-8 回退说明（CH-460）：本处曾改为「PDF 按片读取、单片驻留」，实测
+    # large_320p 峰值内存 132.9MB → 134.9/137.9MB（反而更差，见 12.3 证据行）——
+    # 驻留主体是 IR blocks（5890 块）与 pdfplumber 单页解析缓冲，`pages_all` 只占
+    # 约十分之一；而分片 IR 必须全部驻留供缝合，省下的部分被抵消，还多出每片一次
+    # open 的开销。故维持整读，把「不把整本文档读进内存」的纪律继续交给
+    # `s1.chunk_pages`（分块 open/close）承担。
     pages_all = read_any(p, chunk_pages=chunk_pages, fmt=fmt)
     total = len(pages_all)
     gate = s1_5_gate.check(pages_all,

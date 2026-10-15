@@ -90,20 +90,34 @@ class RotatingJsonlWriter:
         return False
 
 
-_LONG_KEYS_HINT = ("text", "before", "after", "body", "snippet", "content")
+SCRUB_MAX_LEN = 64
 
 
-def _scrub(rec: dict) -> dict:
-    out = {}
-    for k, v in rec.items():
-        if isinstance(v, str) and any(h in k for h in _LONG_KEYS_HINT) and len(v) > 64:
-            import hashlib
-            out[k] = f"<sha256:{hashlib.sha256(v.encode('utf-8', 'replace')).hexdigest()[:12]}>"
-        elif isinstance(v, dict):
-            out[k] = _scrub(v)
-        else:
-            out[k] = v
-    return out
+def _fingerprint(s: str) -> str:
+    import hashlib
+    return f"<sha256:{hashlib.sha256(s.encode('utf-8', 'replace')).hexdigest()[:12]}>"
+
+
+def scrub_record(rec):
+    """NFR-20 脱敏：**任意**字符串超过 `SCRUB_MAX_LEN` 即换指纹（dict / list 递归）。
+
+    CH-459（A-12）：原实现按**键名提示**（text/before/after/body/snippet/content）
+    决定是否脱敏——提示名单外的键即使带上大段正文也原样入日志，而事件 payload
+    的键名由调用方自由给出，这个名单必然漏。与 `api` 侧口径统一为「不看键名、
+    只看长度」后，两条写入路径（库内 events.payload_json 与 JSONL 日志）一致。
+
+    指纹保留可关联性（同内容同指纹）但不保留内容（NFR-20）。
+    """
+    if isinstance(rec, dict):
+        return {k: scrub_record(v) for k, v in rec.items()}
+    if isinstance(rec, (list, tuple)):
+        return [scrub_record(v) for v in rec]
+    if isinstance(rec, str) and len(rec) > SCRUB_MAX_LEN:
+        return _fingerprint(rec)
+    return rec
+
+
+_scrub = scrub_record          # 旧私有名（模块内部沿用）
 
 
 class EventBus:
