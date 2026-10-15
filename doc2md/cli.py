@@ -196,17 +196,36 @@ def _cmd_token(args: argparse.Namespace, cfg: dict) -> int:
     from . import auth
     from .storage.db import Store
     store = Store(_root(cfg) / "state.sqlite")
+    try:
+        return _token_body(args, cfg, store, auth)
+    finally:
+        store.close()                    # CH-469（V-12）：命令面也要收尾连接
+
+
+def _token_body(args, cfg, store, auth) -> int:
     if args.list_tokens:
         rows = store.q("SELECT token, role, label, created_at, revoked_at FROM tokens")
         print(json.dumps([dict(r) for r in rows], ensure_ascii=False, indent=2))
         return EXIT_OK
     if args.revoke:
-        auth.revoke(store, args.revoke)
+        # CH-469（V-13）：`auth.revoke` 现在回报是否命中。原实现在这里同样
+        # 无条件打印 revoked=true——吊销一个不存在的 token 也被报成成功。
+        if not auth.revoke(store, args.revoke):
+            print(_jline({"revoked": False, "code": "E4041",
+                          "message": "unknown token"}), file=sys.stderr)
+            return EXIT_BIZ
         print(json.dumps({"revoked": True, "effective_within_s": int(config.get(
             cfg, "api.revoke_effective_seconds", 5))}, ensure_ascii=False))
         return EXIT_OK
-    print(auth.issue(store, args.role, args.label,
-                     allowed=config.get(cfg, "api.token_roles", auth.ROLES)))
+    allowed = config.get(cfg, "api.token_roles", auth.ROLES)
+    if args.role not in tuple(allowed):
+        # CH-469（V-7）：argparse 的 choices 挡不住「配置里收窄了可签发角色」这一路，
+        # 直送 auth.issue 会抛 ValueError 崩栈。同 API 面收敛为参数错（退出码 2）。
+        print(_jline({"code": "E4001",
+                      "message": f"role {args.role} not in api.token_roles"}),
+              file=sys.stderr)
+        return EXIT_USAGE
+    print(auth.issue(store, args.role, args.label, allowed=allowed))
     return EXIT_OK
 
 
@@ -370,13 +389,19 @@ def cmd_work(args: argparse.Namespace) -> int:
 
 # --- watch --------------------------------------------------------------------
 def _dir_files(src: Path, cfg: dict, follow: bool) -> list[Path]:
-    from .security.dirguard import WalkLimits, guard_walk
+    """一次性目录枚举：截断即 E4133（CH-469 / O-10）。
+
+    半截清单在这里比在服务面更危险——`batch` 会把「没扫到」理解成「没有更多文件」，
+    退出码 0、报告齐全，剩下的文件永远没人转。常驻 watch 不受此约束：它的下一轮
+    本来就是补齐语义（见 security/watcher.poll_all）。
+    """
+    from .security.dirguard import WalkLimits, scan_or_raise
     lim = WalkLimits(follow_symlinks=follow or bool(
         config.get(cfg, "watch.follow_symlinks", False)),
         max_depth=int(config.get(cfg, "watch.max_depth", 20)),
         skip_hidden=bool(config.get(cfg, "watch.skip_hidden", True)),
         max_files_per_dir=int(config.get(cfg, "watch.max_files_per_dir", 5000)))
-    return [Path(f) for f in guard_walk(src, lim).files
+    return [Path(f) for f in scan_or_raise(src, lim)
             if Path(f).suffix.lower() in (".pdf", ".docx")]
 
 
@@ -391,58 +416,74 @@ def cmd_watch(args: argparse.Namespace) -> int:
     cfg = _cfg(args)
     root = _root(cfg)
     store = Store(root / "state.sqlite")
-    sched = Scheduler(store)
-    lim = WalkLimits(
-        follow_symlinks=bool(config.get(cfg, "watch.follow_symlinks", False)),
-        max_depth=int(config.get(cfg, "watch.max_depth", 20)),
-        skip_hidden=bool(config.get(cfg, "watch.skip_hidden", True)),
-        max_files_per_dir=int(config.get(cfg, "watch.max_files_per_dir", 5000)))
-    tracker = StabilityTracker(stable_seconds=float(config.get(cfg, "watch.stable_seconds", 5)))
-    interval = args.interval or tracker.stable_seconds
-    async_queue = bool(config.get(cfg, "perf.queue_async", False))
-    import time
-    rc = EXIT_OK
-    while True:
-        try:
-            ready = tracker.poll_all(args.dir, lim)
-        except Doc2mdError as exc:
-            print(_jline({"status": "error", "code": exc.code,
-                          "message": str(exc)}), file=sys.stderr)
-            ready = []
-        for f in ready:
-            p = Path(f)
-            if p.suffix.lower() not in (".pdf", ".docx"):
-                continue
-            if async_queue:
-                # CH-449：低配机上 watch 目录批量落文件时，稳定即入队、由 `doc2md work`
-                # 并发消费；不在轮询线程里做 CPU 重活（否则稳定窗口被计算拖长）。
+
+    def loop() -> int:
+        sched = Scheduler(store)
+        lim = WalkLimits(
+            follow_symlinks=bool(config.get(cfg, "watch.follow_symlinks", False)),
+            max_depth=int(config.get(cfg, "watch.max_depth", 20)),
+            skip_hidden=bool(config.get(cfg, "watch.skip_hidden", True)),
+            max_files_per_dir=int(config.get(cfg, "watch.max_files_per_dir", 5000)))
+        tracker = StabilityTracker(
+            stable_seconds=float(config.get(cfg, "watch.stable_seconds", 5)))
+        interval = args.interval or tracker.stable_seconds
+        async_queue = bool(config.get(cfg, "perf.queue_async", False))
+        import time
+        rc = EXIT_OK
+        while True:
+            try:
+                ready = tracker.poll_all(args.dir, lim)
+            except Doc2mdError as exc:
+                print(_jline({"status": "error", "code": exc.code,
+                              "message": str(exc)}), file=sys.stderr)
+                ready = []
+            for f in ready:
+                p = Path(f)
+                if p.suffix.lower() not in (".pdf", ".docx"):
+                    continue
+                if async_queue:
+                    # CH-449：低配机上 watch 目录批量落文件时，稳定即入队、由
+                    # `doc2md work` 并发消费；不在轮询线程里做 CPU 重活
+                    # （否则稳定窗口被计算拖长）。
+                    try:
+                        it = worker.enqueue(sched, p)
+                        print(_jline(it))
+                    except Doc2mdError as exc:
+                        print(_jline({"watched": p.name, "status": "error",
+                                      "code": exc.code, "message": exc.message}),
+                              file=sys.stderr)
+                        rc = max(rc, EXIT_BIZ)
+                    continue
                 try:
-                    it = worker.enqueue(sched, p)
-                    print(_jline(it))
+                    res = convert(p, cfg=cfg, out_dir=root / "out")
+                    save_ir(store, res.ir)
+                    j = sched.submit(res.doc_id, res.source_key)
+                    sched.mark(j.job_id, "done")
+                    print(_jline({"watched": p.name, "doc_id": res.doc_id,
+                                  "job_id": j.job_id}))
+                except E4221_GateReject as exc:
+                    j = sched.submit("reject:" + p.name)
+                    sched.mark(j.job_id, "rejected", exc.code, exc.detail)
+                    print(_jline({"watched": p.name, "status": "rejected",
+                                  "code": exc.code}), file=sys.stderr)
+                    # CH-469（V-12）：原为 `rc = EXIT_GATE`（赋值）。EXIT_GATE=3 小于
+                    # EXIT_BIZ=4，于是一个后续拒收会把已判定的「业务失败」降级成 3，
+                    # 脚本侧按退出码分流时会走错分支——与其它路径同口径取 max。
+                    rc = max(rc, EXIT_GATE)
                 except Doc2mdError as exc:
                     print(_jline({"watched": p.name, "status": "error", "code": exc.code,
                                   "message": exc.message}), file=sys.stderr)
                     rc = max(rc, EXIT_BIZ)
-                continue
-            try:
-                res = convert(p, cfg=cfg, out_dir=root / "out")
-                save_ir(store, res.ir)
-                j = sched.submit(res.doc_id, res.source_key)
-                sched.mark(j.job_id, "done")
-                print(_jline({"watched": p.name, "doc_id": res.doc_id, "job_id": j.job_id}))
-            except E4221_GateReject as exc:
-                j = sched.submit("reject:" + p.name)
-                sched.mark(j.job_id, "rejected", exc.code, exc.detail)
-                print(_jline({"watched": p.name, "status": "rejected",
-                              "code": exc.code}), file=sys.stderr)
-                rc = EXIT_GATE
-            except Doc2mdError as exc:
-                print(_jline({"watched": p.name, "status": "error", "code": exc.code,
-                              "message": exc.message}), file=sys.stderr)
-                rc = max(rc, EXIT_BIZ)
-        if args.once:
-            return rc
-        time.sleep(interval)
+            if args.once:
+                return rc
+            time.sleep(interval)
+
+    # CH-469（V-12）：watch 常驻循环独占一条 thread-local 写连接，异常退出（Ctrl-C、
+    # poll_all 抛出非 Doc2mdError）必须显式 close——原实现只在正常返回时靠进程结束兜底。
+    try:
+        return loop()
+    finally:
+        store.close()
 
 
 # --- tokenizer ------------------------------------------------------------------
@@ -552,10 +593,23 @@ def main(argv: list[str] | None = None) -> int:
     except Doc2mdError as exc:
         print(_jline(exc.to_body()), file=sys.stderr)
         return EXIT_GATE if exc.code == "E4221" else EXIT_BIZ
+    except config.ConfigError as exc:   # CH-469（O-15）：配置错 = 用法错误，不是系统故障
+        # 原实现落进兜底 `except Exception` → E5000 / EXIT_SYS，脚本按码分流时
+        # 「doc2md.toml 写错了」和「解析栈炸了」混在同一个退出码里。
+        print(_jline({"code": "E4001", "message": f"config error: {exc}"}), file=sys.stderr)
+        return EXIT_USAGE
     except KeyboardInterrupt:
         return EXIT_SYS
     except OSError as exc:             # ENOSPC / EACCES / ELOOP：低配机常见，栈回溯不是契约输出
         print(_jline({"code": "E5031", "message": f"{type(exc).__name__}: {exc}"}),
+              file=sys.stderr)
+        return EXIT_SYS
+    except Exception as exc:           # noqa: BLE001 — CH-469（V-12）：兜底收口
+        # 未归类的第三方异常（pdfplumber/pdfminer 解析栈、docx 结构错误）原样冒泡时
+        # Python 回显栈回溯并退出码 1——1 不在本 CLI 的退出码契约里，脚本按码分流会
+        # 落进「未知」分支。这里统一收口为 EXIT_SYS；消息只带异常类名，
+        # 不带 str(exc)（解析类异常的消息常夹带页正文，NFR-20）。
+        print(_jline({"code": "E5000", "message": f"unexpected: {type(exc).__name__}"}),
               file=sys.stderr)
         return EXIT_SYS
 

@@ -6,6 +6,7 @@ v2.4 全文只引用、从未落地（CH-450 登记）。低配机（Win11 系�
 """
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
 
@@ -13,15 +14,36 @@ from ..errors import E4131_TooLarge
 
 
 def free_mb(path: str | Path) -> int:
-    """目标路径所在卷的可用容量（MB）。卷不存在时按 0 处理，交由调用方判定。"""
+    """目标路径所在卷的可用容量（MB）。卷不存在时按 0 处理，交由调用方判定。
+
+    CH-469（O-6）：口径是 **available**（非特权进程真能写进去的量）而不是 free。
+    ext4/APFS 都给 root 预留了一块（默认 5%），`shutil.disk_usage().free` 把预留
+    算进来 → 普通进程实际可用的量被高估；低配机「系统盘常年 <5GB」正是这条门禁的
+    设计场景，高估即放行、写完即 ENOSPC，门禁形同虚设。
+    `os.statvfs` 只在 POSIX 上有；Windows 回退 free（该平台上二者同值）。
+    """
     p = Path(path)
     probe = p
     while not probe.exists() and probe != probe.parent:
         probe = probe.parent
     try:
-        return int(shutil.disk_usage(str(probe)).free / (1024 * 1024))
+        return int(available_bytes(probe) / (1024 * 1024))
     except OSError:
         return 0
+
+
+def available_bytes(path: str | Path) -> int:
+    """卷上「本进程可写」的字节数：两个来源取更小者（宁可早拒收，不可写完失败）。"""
+    target = str(path)
+    free = int(shutil.disk_usage(target).free)
+    statvfs = getattr(os, "statvfs", None)
+    if statvfs is not None:
+        try:
+            vfs = statvfs(target)
+            free = min(free, int(vfs.f_bavail) * int(vfs.f_frsize))
+        except OSError:
+            pass
+    return free
 
 
 def need_bytes(src_bytes: int, factor: float) -> int:

@@ -2,11 +2,14 @@
 
 读取顺序：DEFAULT_TOML → 显式 path → ./doc2md.toml → $DOC2MD_HOME/doc2md.toml。
 CH-456（T9）：`run.profile` 三档在此落地为键集覆盖；用户显式配置优先于 profile。
+CH-469（O-15）：`SPEC` 表驱动的类型 / 区间 / 枚举校验 + 未知键警告。
 """
 from __future__ import annotations
 
 import os
+import re
 import tomllib
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +31,112 @@ FROZEN_KEYS: dict[str, tuple[Any, ...]] = {
 }
 
 
+class ConfigError(ValueError):
+    """配置校验失败（CH-469 O-15）。
+
+    刻意继承 `ValueError`：不改既有调用方的捕获语义；CLI 侧单独映射为
+    `EXIT_USAGE`（用法错误），与运行期故障（`EXIT_SYS`）分流。
+    """
+
+
+def _int(lo: int, hi: int) -> tuple[str, Any]:
+    return ("int", (lo, hi))
+
+
+def _num(lo: float, hi: float) -> tuple[str, Any]:
+    return ("num", (lo, hi))
+
+
+def _enum(*values: str) -> tuple[str, Any]:
+    return ("enum", values)
+
+
+BOOL: tuple[str, Any] = ("bool", None)
+STR: tuple[str, Any] = ("str", None)
+STRLIST: tuple[str, Any] = ("strlist", None)
+OCTAL: tuple[str, Any] = ("octal", None)
+
+# 键集契约（CH-469 O-15）：SPEC 是唯一权威清单——DEFAULT_TOML 里出现、SPEC 里没有的键
+# 视为缺陷（单测校验两侧键集相等），SPEC 里的键则允许缺省（validate 只校验出现的值）。
+# 区间刻意给得宽：本表拦的是「明显配错」（workers=-1、rotate_mb=0、port=0、
+# chunk_pages 是字符串），不是替用户做性能决策；调优请改默认值而不是绕开校验。
+SPEC: dict[str, tuple[str, Any]] = {
+    # [paths] —— 全部字符串；相对路径按 path_setting 口径挂到 root 下（CH-432）
+    "paths.root": STR,
+    "paths.out": STR,
+    "paths.reports": STR,
+    "paths.logs": STR,
+    "paths.tmp": STR,
+    "paths.vendor_models": STR,
+    # [run]
+    "run.profile": _enum(*sorted(PROFILES)),
+    "run.offline_assert": BOOL,
+    # [s1] —— chunk_pages = 0 是合法口径（整本一次读完）
+    "s1.chunk_pages": _int(0, 100_000),
+    # [s1_5]
+    "s1_5.sample_pages": _enum("auto", "even5", "legacy3"),
+    "s1_5.min_chars_per_page": _int(0, 1_000_000),
+    "s1_5.reject_on_any_bad_page": BOOL,
+    "s1_5.page_detail_in_report": BOOL,
+    # [s2]
+    "s2.mode": _enum("auto", "single", "two_phase"),
+    "s2.max_pages_per_shard": _int(1, 100_000),
+    "s2.shard_overlap_pages": _int(0, 1_000),
+    "s2.dedupe_overlap": BOOL,
+    # [chunks] —— P-49：vocab 来源固化，不接受独立 vocab 文件名
+    "chunks.tokenizer": _enum("gguf-embedded"),
+    "chunks.manifest": STR,
+    # [s4] —— anchor 是唯一保留的内部链接渲染口径（s4_render）
+    "s4.preserve_marks_strike": BOOL,
+    "s4.link_internal": _enum("plain", "anchor"),
+    # [perf]
+    "perf.workers": _int(0, 64),
+    "perf.queue_async": BOOL,
+    "perf.min_free_mb": _int(0, 10_000_000),
+    "perf.disk_safety_factor": _int(0, 100),
+    "perf.stale_job_minutes": _int(0, 100_000),
+    "perf.stale_check_seconds": _int(0, 100_000),
+    "perf.batch_file_timeout_s": _int(0, 10_000_000),
+    # [watch]
+    "watch.stable_seconds": _num(0, 10_000),
+    "watch.follow_symlinks": BOOL,
+    "watch.max_depth": _int(1, 1_000),
+    "watch.skip_hidden": BOOL,
+    "watch.max_files_per_dir": _int(1, 10_000_000),
+    # [api]
+    "api.bind": STR,
+    "api.port": _int(1, 65_535),
+    "api.token_roles": STRLIST,
+    "api.revoke_effective_seconds": _num(0, 10_000),
+    "api.base_revision_required": BOOL,
+    # [llm]
+    "llm.mode": _enum("offline", "server"),
+    "llm.fallback": BOOL,
+    "llm.timeout_ms": _int(1, 10_000_000),
+    "llm.retries": _int(0, 10),
+    "llm.model": STR,
+    "llm.bind": STR,
+    "llm.port": _int(1, 65_535),
+    "llm.auth": BOOL,
+    "llm.op_whitelist": STRLIST,
+    # [logs] —— rotate_mb = 0 会让每次写入都触发轮转（自我 DoS），下限 0.1
+    "logs.rotate_mb": _num(0.1, 1_000_000),
+    "logs.rotate_keep": _int(1, 1_000),
+    # [ops]
+    "ops.events_retention_days": _int(1, 100_000),
+    "ops.backup_local_dir": STR,
+    "ops.backup_external_dir": STR,      # 空串 = 未配置（cron 记 skipped，不算失败）
+    "ops.backup_external_encrypted": BOOL,
+    "ops.backup_rotation_days": _int(1, 100_000),
+    "ops.work_dir_mode": OCTAL,
+    # [security]
+    "security.max_name_bytes": _int(16, 4096),
+    "security.sanitize_fail_action": _enum(*FROZEN_KEYS["security.sanitize_fail_action"]),
+}
+
+_OCTAL_RE = re.compile(r"[0-7]{3}")
+
+
 def _base() -> dict[str, Any]:
     return tomllib.loads(DEFAULT_TOML)
 
@@ -42,13 +151,31 @@ def load(path: str | os.PathLike | None = None) -> dict:
             if p.is_file():
                 cand = p
                 break
-    if cand is not None and Path(cand).is_file():
-        user = tomllib.loads(Path(cand).read_text(encoding="utf-8"))
+    if cand is not None and not Path(cand).is_file():
+        raise ConfigError(f"--config 指向的文件不存在：{cand}")
+    if cand is not None:
+        user = _read(Path(cand))
+        # CH-469（O-15）：未知键 = 静默失效的拼写错误，装载期点名（不改值、不阻断启动）
+        for dotted in unknown_keys(user):
+            warnings.warn(f"{cand}: 未知配置键 {dotted}（不生效，请核对方案 附录 A）",
+                          UserWarning, stacklevel=2)
         _deep_merge(cfg, user)
         explicit = _dotted_keys(user)
     _apply_profile(cfg, explicit)
     validate(cfg)
     return cfg
+
+
+def _read(p: Path) -> dict:
+    """配置文件解析：语法错与读不到都收敛为 ConfigError。
+
+    原实现让 `tomllib.TOMLDecodeError` 直接冒泡，CLI 只能把它当未知异常收进
+    `EXIT_SYS`；「doc2md.toml 写错了」和「解析栈炸了」混在同一个退出码里。
+    """
+    try:
+        return tomllib.loads(p.read_text(encoding="utf-8"))
+    except (tomllib.TOMLDecodeError, OSError, UnicodeDecodeError) as exc:
+        raise ConfigError(f"{p}: 配置无法解析（{type(exc).__name__}: {str(exc)[:200]}）") from exc
 
 
 def _dotted_keys(d: dict, prefix: str = "") -> set[str]:
@@ -65,7 +192,7 @@ def _apply_profile(cfg: dict, explicit: set[str]) -> None:
     """按 [run].profile 覆盖键集；用户显式设置过的键不覆盖。"""
     name = str(cfg.get("run", {}).get("profile", "standard"))
     if name not in PROFILES:
-        raise ValueError(f"unknown run.profile: {name!r}（可选：{sorted(PROFILES)}）")
+        raise ConfigError(f"unknown run.profile: {name!r}（可选：{sorted(PROFILES)}）")
     for dotted, value in PROFILES[name].items():
         if dotted not in explicit:
             _set(cfg, dotted, value)
@@ -77,16 +204,112 @@ def _set(cfg: dict, dotted: str, value: Any) -> None:
     for part in parts[:-1]:
         cur = cur.setdefault(part, {})
         if not isinstance(cur, dict):
-            raise ValueError(f"profile target conflicts with scalar: {dotted}")
+            raise ConfigError(f"profile target conflicts with scalar: {dotted}")
     cur[parts[-1]] = value
 
 
 def validate(cfg: dict) -> None:
-    """启动期校验：冻结键取值（T9）。用法错误即 ValueError，不进运行期静默失效。"""
+    """启动期校验（CH-469 O-15）：分表形状 + 类型 / 区间 / 枚举 + 冻结键。
+
+    口径：配置错即用法错误 → `ConfigError`，不留到运行期静默失效
+    （原实现只查 `FROZEN_KEYS` 一项，`workers = "8"` 之类要到进程池建不起来才炸）。
+    只校验 SPEC 里出现的键：SPEC 是清单，不是必填表。
+    """
+    if not isinstance(cfg, dict):
+        raise ConfigError(f"配置根必须是表（当前为 {type(cfg).__name__}）")
+    for sec in {k.split(".", 1)[0] for k in SPEC}:
+        v = cfg.get(sec)
+        if v is not None and not isinstance(v, dict):
+            raise ConfigError(f"[{sec}] 必须是表（当前为 {type(v).__name__}）")
+    for dotted, spec in SPEC.items():
+        parts = dotted.split(".")
+        if _leaf(cfg, parts) is _MISSING:
+            continue
+        _check(dotted, spec, get(cfg, dotted))
+    # 冻结键独立成段：报错口径要写明「这是红线，不是行为开关」
     for dotted, allowed in FROZEN_KEYS.items():
         v = get(cfg, dotted)
         if v not in allowed:
-            raise ValueError(f"{dotted} 只支持 {list(allowed)}，当前为 {v!r}")
+            raise ConfigError(f"{dotted} 只支持 {list(allowed)}，当前为 {v!r}")
+
+
+class _Sentinel:
+    __slots__ = ()
+
+
+_MISSING = _Sentinel()
+
+
+def _leaf(cfg: dict, parts: list[str]) -> Any:
+    cur: Any = cfg
+    for part in parts:
+        if not isinstance(cur, dict) or part not in cur:
+            return _MISSING
+        cur = cur[part]
+    return cur
+
+
+def _fmt(v: Any) -> str:
+    return f"{v!r}（{type(v).__name__}）"
+
+
+def _check(dotted: str, spec: tuple[str, Any], val: Any) -> None:
+    kind, arg = spec
+    if kind == "bool":
+        if not isinstance(val, bool):
+            raise ConfigError(f"{dotted} 必须是布尔（true/false），当前为 {_fmt(val)}")
+    elif kind == "int":
+        # bool 是 int 的子类，但 `workers = true` 不是数量 → 显式拒绝
+        if isinstance(val, bool) or not isinstance(val, int):
+            raise ConfigError(f"{dotted} 必须是整数，当前为 {_fmt(val)}")
+        _range(dotted, val, arg)
+    elif kind == "num":
+        if isinstance(val, bool) or not isinstance(val, (int, float)):
+            raise ConfigError(f"{dotted} 必须是数值，当前为 {_fmt(val)}")
+        _range(dotted, val, arg)
+    elif kind == "str":
+        if not isinstance(val, str):
+            raise ConfigError(f"{dotted} 必须是字符串，当前为 {_fmt(val)}")
+    elif kind == "enum":
+        if val not in arg:
+            raise ConfigError(f"{dotted} 只支持 {list(arg)}，当前为 {_fmt(val)}")
+    elif kind == "strlist":
+        if not isinstance(val, list) or not all(isinstance(x, str) for x in val):
+            raise ConfigError(f"{dotted} 必须是字符串数组，当前为 {_fmt(val)}")
+    elif kind == "octal":
+        if not isinstance(val, str) or not _OCTAL_RE.fullmatch(val):
+            raise ConfigError(f"{dotted} 必须是三位八进制权限（如 \"700\"），当前为 {_fmt(val)}")
+    else:                                  # pragma: no cover — SPEC 自身的缺陷
+        raise ConfigError(f"{dotted} 的校验规则未知：{kind!r}")
+
+
+def _range(dotted: str, val: Any, bounds: tuple[Any, Any]) -> None:
+    lo, hi = bounds
+    if not lo <= val <= hi:
+        raise ConfigError(f"{dotted} 必须在 [{lo}, {hi}] 区间内，当前为 {val}")
+
+
+SECTIONS: frozenset[str] = frozenset(k.split(".", 1)[0] for k in SPEC)
+
+
+def _section_known(prefix: str) -> bool:
+    return prefix in SECTIONS or any(k.startswith(f"{prefix}.") for k in SPEC)
+
+
+def unknown_keys(user: dict) -> list[str]:
+    """用户配置里 SPEC 之外的键（拼错的键不会生效，但原实现全程静默）。
+
+    未知分表只报**表名**一条（`[mystery]` 不必把里面每个键都念一遍）。
+    """
+    out: list[str] = []
+    for dotted in sorted(_dotted_keys(user)):
+        if dotted in SPEC or _section_known(dotted):
+            continue                                # 已知键 / 已知分表（含空表）
+        parents = dotted.split(".")[:-1]
+        if any(not _section_known(".".join(parents[:i + 1])) for i in range(len(parents))):
+            continue                                # 所属未知分表已单独报过
+        out.append(dotted)
+    return out
 
 
 def _deep_merge(dst: dict, src: dict) -> dict:

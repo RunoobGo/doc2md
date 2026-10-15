@@ -113,6 +113,10 @@ def run(cfg: dict | None = None, root: Path | None = None, mode: str = "daily",
             rep.ok = False
         if snap is not None:
             rep.add("local_snapshot", path=str(snap), bytes=snap.stat().st_size)
+            if plan.mode_warnings:
+                # O-12：chmod 在无 POSIX 权限的卷上不生效 ≠ 失败，但「work/ 700
+                # 所以快照可明文」这个前提已经不成立了，必须进日报。
+                rep.add("work_dir_mode", warnings=list(plan.mode_warnings))
 
             # 3) 外置加密增量（仅 weekly）
             if mode == "weekly":

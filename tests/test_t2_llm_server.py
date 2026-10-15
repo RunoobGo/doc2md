@@ -29,8 +29,10 @@ MARKER = "T2服务路径唯一正文探针-5b2d"
 class _FakeLlm:
     """行为可切换的假 llama-server；记录最后一次请求供契约断言。"""
 
-    def __init__(self, behavior="ok"):
+    def __init__(self, behavior="ok", drop_first: int = 1):
         self.behavior = behavior
+        self.drop_first = drop_first          # behavior="flaky"：前 N 次 POST 直接断连
+        self.drops = 0
         self.requests: list[dict] = []
         self.health_hits = 0
         self.srv = HTTPServer(("127.0.0.1", 0), self._handler_cls())
@@ -58,6 +60,16 @@ class _FakeLlm:
                 self.wfile.write(body)
 
             def do_POST(self):
+                if outer.behavior == "flaky" and outer.drops < outer.drop_first:
+                    # CH-469：瞬断复现——回一个空响应即断开，客户端必须重试而不是
+                    # 把一次抖动当终态（连接类失败的重试面）。
+                    outer.drops += 1
+                    self.close_connection = True
+                    try:
+                        self.connection.close()
+                    except OSError:
+                        pass
+                    return
                 n = int(self.headers.get("Content-Length", 0))
                 raw = self.rfile.read(n)
                 try:
@@ -66,7 +78,7 @@ class _FakeLlm:
                     req = {}
                 outer.requests.append({"path": self.path, "headers": dict(self.headers),
                                        "body": req})
-                if outer.behavior == "ok":
+                if outer.behavior in ("ok", "flaky"):
                     content = json.dumps({"ops": [
                         {"op": "fix_heading_level", "target": "b1", "level": 2}]},
                         ensure_ascii=False)
@@ -234,6 +246,49 @@ def test_dead_port_is_connect_error():
     with pytest.raises(LlmServiceError) as ei:
         client.repair(_ir(), DEFAULT_OP_WHITELIST)
     assert ei.value.stage == "connect"
+
+
+# --- CH-469：连接类瞬断的重试面 ------------------------------------------------
+
+def _fast_retry_client(fake, retries):
+    c = _client(fake, retries=retries)
+    c.retry_delay_s = 0.01          # 测试不睡真实退避（退避值本身不是断言对象）
+    return c
+
+
+def test_connect_blip_is_retried_and_then_succeeds():
+    """瞬断一次 → 重试后拿到正常响应（原实现在这里直接降级 offline / E5041）。"""
+    with _FakeLlm("flaky", drop_first=1) as fake:
+        rep = _fast_retry_client(fake, 2).repair(_ir(), DEFAULT_OP_WHITELIST)
+    assert fake.drops == 1
+    assert rep["source"] == "server" and rep["applied_ops"] == ["fix_heading_level"]
+
+
+def test_connect_blip_exhausts_retries_then_reports_connect_stage():
+    """抖动次数超过重试预算 → 仍按 connect 阶段失败（不静默成功、也不换口径）。"""
+    with _FakeLlm("flaky", drop_first=3) as fake:
+        with pytest.raises(LlmServiceError) as ei:
+            _fast_retry_client(fake, 2).repair(_ir(), DEFAULT_OP_WHITELIST)
+    assert ei.value.stage == "connect"
+    assert fake.drops == 3                       # 1 + 2 次重试全部用完
+
+
+def test_retries_zero_restores_single_attempt():
+    """llm.retries = 0 → 一次即败（关闭重试的口径可判定）。"""
+    with _FakeLlm("flaky", drop_first=1) as fake:
+        with pytest.raises(LlmServiceError) as ei:
+            _fast_retry_client(fake, 0).repair(_ir(), DEFAULT_OP_WHITELIST)
+    assert ei.value.stage == "connect"
+    assert fake.drops == 1
+
+
+def test_http_status_is_not_retried():
+    """4xx/5xx 是服务给出的确定性答复：重试只会把失败拖成超时，必须一次即败。"""
+    with _FakeLlm("http500") as fake:
+        with pytest.raises(LlmServiceError) as ei:
+            _fast_retry_client(fake, 2).repair(_ir(), DEFAULT_OP_WHITELIST)
+    assert ei.value.stage == "http" and ei.value.status == 500
+    assert len(fake.requests) == 1
 
 
 def test_fallback_keeps_main_chain():

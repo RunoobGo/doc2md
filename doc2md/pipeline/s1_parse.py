@@ -62,7 +62,9 @@ def sniff(path: str | Path) -> str:
     from ..errors import E4151_UnsupportedType
     p = Path(path)
     try:
-        head = p.open("rb").read(8)
+        # CH-469：`with` 关闭句柄（原 `p.open("rb").read(8)` 依赖 GC 回收）
+        with p.open("rb") as fh:
+            head = fh.read(8)
     except OSError as exc:
         raise E4151_UnsupportedType(f"cannot read {p.name}: {exc}", detail={"file": p.name})
     if head.startswith(MAGIC_PDF):
@@ -113,18 +115,28 @@ def read_pdf(path: str | Path, page_span: tuple[int, int] | None = None,
     """
     import pdfplumber
     out: list[RawPage] = []
-    total = _pdf_page_count(path)
-    start, end = page_span if page_span else (0, total)
-    start, end = max(0, start), min(total, end)
-    if end <= start:
+    # CH-469：整读且不分块时不再为「数页数」单独 open 一次——那次 open 与首个
+    # 分块的 open 重复解析 xref/trailer（320 页 / chunk=50 时共 8 次打开）。
+    # 分块模式仍需预先知道页数来算片边界，保持原口径。
+    lazy_total = page_span is None and not (chunk_pages and chunk_pages > 0)
+    total = 0 if lazy_total else _pdf_page_count(path)
+    if page_span:
+        start, end = max(0, page_span[0]), min(total, page_span[1])
+    else:
+        start, end = 0, total
+    if not lazy_total and end <= start:
         return out
-
     step = chunk_pages if chunk_pages and chunk_pages > 0 else (end - start)
-    for lo in range(start, end, step):
+    lo_range = range(start, end, step) if not lazy_total else range(0, 1)
+
+    for lo in lo_range:
         hi = min(lo + step, end)
         # 每个分块独立 open/close：pdfminer 的 LRUCachingObjectCache / 页对象
         # 随 PDF 实例一起释放，驻留峰值从「整本文档」降为「一个分块」。
         with _open_source(lambda: pdfplumber.open(str(path)), path, "pdf") as pdf:
+            if lazy_total:              # 单片路径：页数在同一个 handle 上读出
+                total = len(pdf.pages)
+                lo, hi = 0, total
             for i in range(lo, hi):
                 page = pdf.pages[i]
                 chars = page.chars or []

@@ -432,3 +432,62 @@ def test_unknown_target_is_noop():
     ir = _ir(Block(id="b1", type="paragraph", text="正文"))
     n = apply_ops(ir, [{"op": "fix_heading_level", "target": "bX", "level": 2}])
     assert n == 0
+
+
+# ------------------------------------------------- CH-469：跨行拼接 / 跨页段落 / 渲染保真
+
+def test_hyphen_join_does_not_duplicate_text():
+    """CH-469 回归：`_join_line` 返回「待追加片段」，连字符断词由 _append_line
+    剥尾连字符。原实现返回整串 `a[:-1]+b` 而两个调用方都是追加语义 →
+    "under-" + "score" 产出 "under-underscore"。"""
+    from doc2md.pipeline.s3_structure import _append_line
+    assert _append_line("under-", "score") == "underscore"
+    assert _append_line("hello", "world") == "hello world"
+    assert _append_line("本合同", "适用于") == "本合同适用于"
+
+
+def test_s3_hyphenated_word_across_lines():
+    ir = analyze([_page(_line("under-", size=10.5), _line("score covers all", size=10.5))])
+    assert [b.text for b in ir.blocks] == ["underscore covers all"]
+
+
+def test_s3_paragraph_survives_page_break():
+    """CH-469：段缓冲原在页循环内逐页重置——英文跨页句第二段以小写起头，
+    既把一段切成两块，又必然命中 G1 的 half_sentence_heads 红线。"""
+    from doc2md.pipeline.metrics import half_sentence_heads
+    ir = analyze([
+        _page(_line("This report covers", size=10.5, ), index=0),
+        _page(_line("all contracts signed in 2024.", size=10.5), index=1),
+    ])
+    assert [b.type for b in ir.blocks] == ["paragraph"]
+    assert ir.blocks[0].text == "This report covers all contracts signed in 2024."
+    assert half_sentence_heads(ir) == []
+
+
+def test_render_keeps_blank_lines_inside_code_block():
+    """CH-469：全局 `re.sub(r"\\n{3,}", "\\n\\n")` 会把 S3 emit_code 特意保留的
+    代码块内空行压扁（代码内容失真）。压缩只允许作用于围栏之外。"""
+    ir = _ir(Block(id="b1", type="paragraph", text="前文"),
+             Block(id="b2", type="code", text="a\n\n\n\nb"),
+             Block(id="b3", type="paragraph", text="后文\n\n\n多余空行"))
+    md = render(ir)
+    assert "a\n\n\n\nb" in md, "代码块内空行被压缩"
+    assert "后文\n\n多余空行" in md, "围栏外的空行压缩仍需生效"
+
+
+def test_apply_ops_preserves_links_on_split_and_merge():
+    """CH-469：split_block / merge_block 原不搬运 links → 尾块与被吸收块的
+    链接静默丢失。"""
+    ir = _ir(Block(id="b1", type="paragraph", text="前文与前文",
+                   links=[{"url": "https://a.example", "text": "前文"},
+                          {"url": "https://b.example", "text": "后文"}]))
+    assert apply_ops(ir, [{"op": "split_block", "target": "b1", "at": 4}]) == 1
+    assert [b.links for b in ir.blocks] == [
+        [{"url": "https://a.example", "text": "前文"}],
+        [{"url": "https://b.example", "text": "后文"}]]
+
+    ir2 = _ir(Block(id="b1", type="paragraph", text="前文"),
+              Block(id="b2", type="paragraph", text="后文",
+                    links=[{"url": "https://c.example", "text": "后文"}]))
+    assert apply_ops(ir2, [{"op": "merge_block", "target": "b2"}]) == 1
+    assert ir2.blocks[0].links == [{"url": "https://c.example", "text": "后文"}]

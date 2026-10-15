@@ -29,8 +29,22 @@ def render(ir: IR, *, preserve_strike: bool = False, link_internal: str = "plain
         if md:
             parts.append(md)
     text = "\n\n".join(parts)
-    text = re.sub(r"\n{3,}", "\n\n", text).strip() + "\n"
+    # CH-469：空行压缩只作用于围栏之外。原实现对整篇做 `re.sub(r"\n{3,}")`，
+    # 会把 S3 emit_code 特意保留的代码块内空行压扁（代码内容失真）。
+    text = _collapse_outside_fences(text).strip() + "\n"
     return text
+
+
+def _collapse_outside_fences(text: str) -> str:
+    """``` 分段：奇数段是围栏代码（原样保留），偶数段压缩连续空行。"""
+    chunks = re.split(r"(```[^\n]*\n.*?```)", text, flags=re.S)
+    out: list[str] = []
+    for idx, chunk in enumerate(chunks):
+        if idx % 2 == 1:                        # 代码段：一个字节都不动
+            out.append(chunk)
+        else:
+            out.append(re.sub(r"\n{3,}", "\n\n", chunk))
+    return "".join(out)
 
 
 def _render_block(b: Block, **opt) -> str:

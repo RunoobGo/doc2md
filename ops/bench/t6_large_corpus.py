@@ -139,16 +139,9 @@ def generate_corpus(root: Path, *, n_pdf: int = 1000, n_docx: int = 60,
 
 
 # --- 采样器 --------------------------------------------------------------------
-def _tree_backend() -> str:
-    """进程树 / RSS 采样后端：proc（Linux /proc）/ ps（POSIX ps）/ psutil / none。
-
-    环境变量 T6_SAMPLER 可强制覆盖（排障与测试）。判定顺序即优先级：
-    /proc 目录存在 → proc；POSIX 非 /proc（macOS）→ ps；Windows 且有 psutil
-    → psutil；其余 → none（驻留列记 n/a，吞吐与失败账目不受影响）。
-    """
-    override = os.environ.get("T6_SAMPLER", "").strip().lower()
-    if override in ("proc", "ps", "psutil", "none"):
-        return override
+def _probe_backend() -> str:
+    """按宿主探测后端（不含环境变量覆盖）——拆出来便于测试伪造，
+    避免断言依赖真实 /proc 布局（CH-469）。"""
     if os.path.isdir("/proc"):
         return "proc"
     if os.name == "posix":
@@ -160,14 +153,32 @@ def _tree_backend() -> str:
     return "psutil"
 
 
-def _tree_proc(root_pid: int) -> tuple[list[int], dict[int, int]]:
-    """/proc 上 root_pid 的完整后代进程树与各进程 VmRSS（KB）。"""
+def _tree_backend() -> str:
+    """进程树 / RSS 采样后端：proc（Linux /proc）/ ps（POSIX ps）/ psutil / none。
+
+    环境变量 T6_SAMPLER 可强制覆盖（排障与测试）。判定顺序即优先级：
+    /proc 目录存在 → proc；POSIX 非 /proc（macOS）→ ps；Windows 且有 psutil
+    → psutil；其余 → none（驻留列记 n/a，吞吐与失败账目不受影响）。
+    """
+    override = os.environ.get("T6_SAMPLER", "").strip().lower()
+    if override in ("proc", "ps", "psutil", "none"):
+        return override
+    return _probe_backend()
+
+
+def _tree_proc(root_pid: int, proc_root: str = "/proc") -> tuple[list[int], dict[int, int]]:
+    """proc 树上 root_pid 的完整后代进程与各进程 VmRSS（KB）。
+
+    `proc_root` 可注入：/proc 的布局是 Linux 专有的，写死路径等于把该分支变成
+    「只能在 Linux 上测」——CH-469 用假 proc 根做跨平台断言（后代遍历、VmRSS
+    解析、读不到的进程跳过），真实 /proc 由 `sample_tree` 走默认值。
+    """
     ppid_of = {}
-    for entry in os.listdir("/proc"):
+    for entry in os.listdir(proc_root):
         if not entry.isdigit():
             continue
         try:
-            with open(f"/proc/{entry}/status", encoding="ascii") as fh:
+            with open(f"{proc_root}/{entry}/status", encoding="ascii") as fh:
                 for line in fh:
                     if line.startswith("PPid:"):
                         ppid_of[int(entry)] = int(line.split()[1])
@@ -185,7 +196,7 @@ def _tree_proc(root_pid: int) -> tuple[list[int], dict[int, int]]:
     rss = {}
     for pid in out:
         try:
-            with open(f"/proc/{pid}/status", encoding="ascii") as fh:
+            with open(f"{proc_root}/{pid}/status", encoding="ascii") as fh:
                 for line in fh:
                     if line.startswith("VmRSS:"):
                         rss[pid] = int(line.split()[1])

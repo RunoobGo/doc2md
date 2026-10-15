@@ -115,20 +115,59 @@ def run_batch(paths: Sequence[str | Path], *, cfg: dict | None = None,
         return results
 
     import multiprocessing
-    from concurrent.futures import ProcessPoolExecutor, as_completed
+    from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
     ctx = multiprocessing.get_context(start_method) if start_method else None
     kw = {"max_workers": n}
     if ctx is not None:
         kw["mp_context"] = ctx
-    with ProcessPoolExecutor(**kw) as pool:
-        futs = {pool.submit(_convert_one, f, cfg, mode, out): f for f in files}
-        for fut in as_completed(futs):
-            try:
-                r = fut.result()
-            except Exception as exc:        # noqa: BLE001 — 进程崩溃（OOM killer 等）
-                r = Summary(file=str(futs[fut]), status="error", code="E5000",
-                            message=f"worker died: {type(exc).__name__}: {exc}").to_dict()
-            results.append(r)
-            if on_result:
-                on_result(r)
+    # CH-469：单文件墙钟上限。损坏 PDF 能让 pdfplumber 无限挂起，`_convert_one`
+    # 的 except 接不住 hang，整批便永等 → 默认 0 = 不设限（保持既有契约：
+    # 千页级文档合法耗时可能很长）。判定口径是**空窗**：连续 per_file_s 秒内
+    # 没有任何文件完成，就把仍在排队的件全部记超时。
+    # （不能用 `fut.result(timeout=…)`：件是先完成才轮得到读结果，
+    #   那条 timeout 在 as_completed 循环里永不触发，挂死时依旧卡在等下一件完成。）
+    per_file_s = 0
+    if cfg is not None:
+        try:
+            per_file_s = int(config.get(cfg, "perf.batch_file_timeout_s", 0) or 0)
+        except (TypeError, ValueError):
+            per_file_s = 0
+    window = per_file_s if per_file_s > 0 else None
+    pool = ProcessPoolExecutor(**kw)
+    # CH-469：先建好完整映射再进循环——`wait()` 每轮把 pending 收敛成「未完成集」，
+    # 若只留收敛后的集合，异常分支就再也取不到该件对应的文件名（记账会丢件）。
+    futs = {pool.submit(_convert_one, f, cfg, mode, out): f for f in files}
+    pending = set(futs)
+    try:
+        while pending:
+            done, pending_now = wait(pending, timeout=window, return_when=FIRST_COMPLETED)
+            if not done and window is not None:
+                # 空窗：仍在跑的件无法安全中止（强杀 worker 会连带砍掉别的在途件），
+                # 但批次必须给出结论——逐个记超时并取消排队件。
+                for fut in pending:
+                    fut.cancel()
+                    r = Summary(file=str(futs[fut]), status="error", code="E5000",
+                                message=f"batch file timeout after {per_file_s}s").to_dict()
+                    results.append(r)
+                    if on_result:
+                        on_result(r)
+                pending = set()
+                break
+            pending = pending_now
+            for fut in done:
+                try:
+                    r = fut.result()
+                except Exception as exc:        # noqa: BLE001 — 进程崩溃（OOM killer 等）
+                    # CH-469：只带类名，不带 str(exc)（pdfminer 异常消息常夹带页正文，NFR-20）
+                    r = Summary(file=str(futs[fut]), status="error", code="E5000",
+                                message=f"worker died: {type(exc).__name__}").to_dict()
+                results.append(r)
+                if on_result:
+                    on_result(r)
+    finally:
+        # 卡住的件已按超时记账；未完成的排队件直接取消，
+        # 活动 worker 交由 shutdown 收尾（wait=False 不让取消再变成阻塞点）。
+        for fut in pending:
+            fut.cancel()
+        pool.shutdown(wait=False, cancel_futures=True)
     return results

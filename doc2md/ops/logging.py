@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -16,7 +17,13 @@ def _now_iso() -> str:
 
 
 class RotatingJsonlWriter:
-    """单文件 ≥ rotate_mb 或跨 UTC 日即轮转，保留 rotate_keep 份（覆盖最旧）。"""
+    """单文件 ≥ rotate_mb 或跨 UTC 日即轮转，保留 rotate_keep 份（覆盖最旧）。
+
+    CH-469（O-13）：写入加锁。`serve` 是 threaded 模式，事件、审计、作业日志共用
+    同一个实例；原实现「判阈值 → 改名 → 重开句柄 → 写」整段无同步，两个线程同时
+    触发轮转时，一方握着已被 rename 走的旧句柄继续写（那行直接落进 `.jsonl.1`
+    甚至随覆盖消失），另一方把 `_size` 记到别人重开的文件上——日志丢行且无任何痕迹。
+    """
 
     def __init__(self, directory, stem: str = "app", rotate_mb: float = 50,
                  rotate_keep: int = 5):
@@ -30,6 +37,7 @@ class RotatingJsonlWriter:
         self._path = self.dir / f"{stem}.jsonl"
         self._size = self._path.stat().st_size if self._path.exists() else 0
         self._fh = open(self._path, "a", encoding="utf-8", errors="replace")
+        self._lock = threading.Lock()
         self.rotations = 0
 
     @staticmethod
@@ -62,17 +70,20 @@ class RotatingJsonlWriter:
     def write(self, record: dict) -> None:
         # NFR-20：日志不得含正文片段 —— 长文本字段一律截断为指纹
         line = json.dumps(_scrub(record), ensure_ascii=False, default=str) + "\n"
-        if self._should_rotate():
-            self._rotate()
-        self._fh.write(line)
-        self._size += len(line.encode("utf-8"))
+        with self._lock:
+            if self._should_rotate():
+                self._rotate()
+            self._fh.write(line)
+            self._size += len(line.encode("utf-8"))
 
     def flush(self) -> None:
-        self._fh.flush()
+        with self._lock:
+            self._fh.flush()
 
     def close(self) -> None:
         try:
-            self._fh.close()
+            with self._lock:
+                self._fh.close()
         except Exception:
             pass
 
@@ -84,10 +95,11 @@ class RotatingJsonlWriter:
 
     # NFR-19 由服务内置执行：提供显式检查口供 cron --daily 调用
     def check(self) -> bool:
-        if self._should_rotate():
-            self._rotate()
-            return True
-        return False
+        with self._lock:
+            if self._should_rotate():
+                self._rotate()
+                return True
+            return False
 
 
 SCRUB_MAX_LEN = 64
@@ -130,9 +142,13 @@ class EventBus:
     def __init__(self, writer: RotatingJsonlWriter):
         self.writer = writer
         self._seq = 0
+        self._lock = threading.Lock()
 
     def emit(self, code: str, **payload) -> dict:
-        self._seq += 1
-        evt = {"seq": self._seq, "ts": _now_iso(), "code": code, **payload}
-        self.writer.write(evt)
+        # O-13：`_seq += 1` 与写入必须同临界区。分开做会得到「seq 递增、文件里却
+        # 倒序」的日志——按 seq 做增量读取的消费方会永久漏掉那几行。
+        with self._lock:
+            self._seq += 1
+            evt = {"seq": self._seq, "ts": _now_iso(), "code": code, **payload}
+            self.writer.write(evt)
         return evt

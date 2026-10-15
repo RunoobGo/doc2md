@@ -57,6 +57,9 @@ curl -s "localhost:8090/search?q=例外" -H "X-Doc2md-Token: $TOK"
 | `[perf].queue_async` | `false` | `true` → `POST /jobs` 只入队（实测 13 个作业 **13ms** 返回 202），后台 `doc2md work` 消化；`GET /jobs` 看进度 |
 | `[perf].min_free_mb` / `disk_safety_factor` | `512` / `3` | NFR-6 磁盘门禁：写产物/备份前校验剩余空间，不足 → **413 / E4131**，不留截断 zip |
 | `[perf].stale_job_minutes` | `30` | 崩溃遗留的 `running` 队列任务超时重回 `queued`（仅限队列来源，不动同步请求行） |
+| `[perf].stale_check_seconds` | `60` | 常驻 `doc2md work` 进程内重跑遗骸回收的节流周期；`0` = 只在启动时回收一次（CH-469：跑几天后不再靠重启清遗骸） |
+| `[perf].batch_file_timeout_s` | `0` | 批量进程池内**单文件**墙钟上限，`0` = 不设限。判定口径是**空窗**：连续这么多秒没有任何文件完成，就把仍在排队的件逐件记 `E5000` 并收池（CH-469：损坏 PDF 能让 pdfplumber 无限挂，此前一件挂死整批陪绑） |
+| `[llm].retries` | `2` | **仅连接类瞬断**（`URLError` / 超时 / `OSError`）重试，覆盖 llama-server 冷启动与重启窗口；HTTP 状态类错误不重试（那是响应不是抖动），`0` = 关闭 |
 | `[llm].mode` / `fallback` | `offline` / `true` | 修补助手实现：`offline` = 确定性占位（默认，主链路零网络）；`server` = 本地 llama-server（仅 `127.0.0.1:8080`）。服务不可用时回退 offline 保持主链路；`--llm-no-fallback` 则明确失败（E5041 / 503） |
 | `[llm].op_whitelist` | 5 个 op | 白名单是唯一防线（+5 道校验 + 不可信数据立场），模型听话不是防线；server 与 offline 两条路径同一套校验 |
 
@@ -129,7 +132,7 @@ rename 轮转只能有一个属主，三类进程三份文件。
 | `ops/backup.md` | 备份介质与恢复演练细则 |
 | `ops/windows/install-doc2md-tasks.ps1` | Windows 任务计划安装 / 校验 / 卸载（与 launchd 同等能力） |
 
-跟踪约定：契约变更、缺陷、更优做法一律按登记流写入方案 第十一章（当前编号至 `CH-468`，下一条 `CH-469`），实测数字进第十二章并标注语料与测量方法；规格发生变化时同步主题篇章节与本文相应小节，并递增 `doc2md.PLAN_VERSION`（管线契约变化另递增 `PIPELINE_VERSION`）。
+跟踪约定：契约变更、缺陷、更优做法一律按登记流写入方案 第十一章（当前编号至 `CH-469`，下一条 `CH-470`），实测数字进第十二章并标注语料与测量方法；规格发生变化时同步主题篇章节与本文相应小节，并递增 `doc2md.PLAN_VERSION`（管线契约变化另递增 `PIPELINE_VERSION`；状态库结构变化另递增 `DB_VERSION`，CH-469 起为 `5`）。
 
 ## 验收与测试
 
@@ -142,7 +145,9 @@ rename 轮转只能有一个属主，三类进程三份文件。
 > `mergeStateStatus=BLOCKED` 拦下。另有本地 pre-push 钩子双保险（见「本地红线兜底」）。
 
 ```bash
-pytest -m gate            # 红线层：六条 merge-gate + 低配机专项（全绿方可合并；共 67 项，T8 优化后稳定 53s，历史轮次 72–110s 视机器负载）
+pytest -m gate            # 红线层：六条 merge-gate + 低配机专项 + CH-469 两批安全/契约专项（全绿方可合并）
+                          # 当前 132 项 = 40（契约红线）+ 29（低配机）+ 10（服务/存储）+ 53（安全/配置/运维）
+                          # 耗时历史记录：Linux 沙箱轮次 72–110s、T8 优化后 53.0s、CH-469 本机（macOS arm64 / Py 3.15）28.7s——项数是硬口径，耗时只作历史
 pytest tests/             # 全量（marker 实际取值：M0+M2 / M3 / M5 / M6c / M8 / M9a / DoD / PERF，见 pytest.ini）
 python3 tests/make_golden.py            # 重建黄金样本（输出目录随脚本位置，--golden 可覆盖）
 python3 tests/make_golden.py --force    # 强制重生成
@@ -163,9 +168,10 @@ python3 tests/make_golden.py --force    # 强制重生成
 正文里出现的 `CH-xxx` 只是索引，条目原文与实测证据统一收录在
 `docs/dev-plan.md` 第十一、十二章。
 
-## 本地红线兜底（T1）
+## 本地红线兜底（T1 的双保险）
 
-平台级必需检查受阻于 GitHub 计划限制（private + 免费计划，分支保护 API 403——CH-458 复测为
-计划级限制而非令牌权限）。客户端兜底：`git config core.hooksPath ops/hooks` 后，每次
-`git push` 前自动跑 `pytest -m gate`，红则拒绝推送（日志在 `/tmp/doc2md-gate.log`）。
-日常不要用 `--no-verify` 绕过。平台侧解锁（升级 Pro/Team 或转 public）后此钩子可保留为双保险。
+平台级必需检查**已生效**（CH-468，T1 关闭）：仓库为 public，`main` 上 `merge-gate (3.11 / 3.12 / 3.13)`
+为必需检查，红线失败即阻断合并（用故意的红断言 PR 验收过，`mergeStateStatus=BLOCKED`）。
+客户端兜底保留为双保险：`git config core.hooksPath ops/hooks` 后，每次 `git push` 前自动跑
+`pytest -m gate`，红则拒绝推送（日志在 `/tmp/doc2md-gate.log`），把红线判定从一次 runner 排队
+换成本地几十秒。日常不要用 `--no-verify` 绕过。

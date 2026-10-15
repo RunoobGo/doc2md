@@ -52,6 +52,12 @@ min_free_mb = 512                      # NFR-6：写产物 / 备份前的剩余�
 disk_safety_factor = 3                 # 需求 = 待写字节 × 该系数（zip + 临时 + 解压余量）
 stale_job_minutes = 30                 # CH-448：work 进程被 OOM 杀掉后，running 超过此分钟数
                                        # 视为遗骸 → 重新入队（低配机上这是常态而非常态外）
+stale_check_seconds = 60               # CH-469：常驻 work 进程重跑遗骸回收的节流周期。
+                                       # 原实现只在进程启动时回收一次，之后同行进程被 OOM 干掉
+                                       # 留下的 running 永不回收；0 = 回到「只启动时一次」。
+batch_file_timeout_s = 0               # CH-469：批量进程池内单文件墙钟上限，0 = 不设限。
+                                       # 损坏 PDF 可让 pdfplumber 无限挂起（except 接不住 hang），
+                                       # 整批卡死；设 >0 后超时记 E5000 并取消该件，其余继续。
 
 [watch]
 stable_seconds = 5                     # P-58 / CH-411
@@ -73,6 +79,8 @@ mode = "offline"                       # CH-456 / T2：offline = 确定性占位
 fallback = true                        # server 不可用时回退 offline 占位实现，保持主链路不中断；
                                        # false = 明确失败（E5041 / HTTP 503）
 timeout_ms = 15000                     # 单次请求超时（连接 + 读取合计）
+retries = 2                            # CH-469：仅连接类瞬断（URLError/超时/OSError）重试次数，
+                                       # 0 = 不重试；HTTP 状态类错误不重试，用完即降级/报错
 model = ""                             # 请求里的模型名；空 = 取 paths.vendor_models 下发现的 gguf 文件名
 bind = "127.0.0.1"
 port = 8080
@@ -88,6 +96,8 @@ rotate_keep = 5
 [ops]
 events_retention_days = 30
 backup_local_dir = "work/reports/backups"
+backup_external_dir = ""                      # CH-469（O-15）：外置卷路径；空 = 未配置，
+                                              # 周报把该步记为 skipped 且不算失败（CH-433）
 backup_external_encrypted = true       # NFR-18
 backup_rotation_days = 14              # 已删数据 ≤14 天从全部副本轮出
 work_dir_mode = "700"

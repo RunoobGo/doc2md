@@ -183,6 +183,28 @@ def test_gate_collector_rejects_bad_tail():
     assert "consecutive_empty_pages" in reasons or "empty_page_ratio" in reasons
 
 
+def test_gate_collector_reports_unfed_pages():
+    """CH-469：声明 total 却少喂页 → 可判定的缺页错误，不是 `metrics[i]` 裸 KeyError。
+
+    少喂是调用方契约违反（按片喂页时漏喂一段），原实现在判定面或报告面
+    任一处 `self.metrics[i]` 直接 KeyError——栈里既没有页号也没有口径。
+    """
+    from doc2md.errors import Doc2mdError
+    pages = _pages([900] * 8)
+    c = GateCollector(8, mode="even5")
+    c.feed(pages[:3])                       # 只喂前 3 页，采样点 4/6/8 从未到达
+    with pytest.raises(Doc2mdError) as ei:
+        c.finish()
+    assert ei.value.detail["missing_pages"] == [5, 6, 8]
+    assert "never fed" in ei.value.message
+
+    c2 = GateCollector(5, mode="auto")      # auto 判定面 = 全页，缺页必逐项点名
+    c2.feed(_pages([900] * 2))
+    with pytest.raises(Doc2mdError) as ei2:
+        c2.finish()
+    assert ei2.value.detail["missing_pages"] == [3, 4, 5]
+
+
 # --- A-6：单块重索引 --------------------------------------------------------
 
 

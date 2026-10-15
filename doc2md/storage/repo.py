@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import sqlite3
 from pathlib import Path
 
 from ..errors import E4041_NotFound, E5031_StorageError
@@ -103,9 +104,21 @@ def get_doc(store: Store, doc_id: str) -> dict:
     return d
 
 
-def list_blocks(store: Store, doc_id: str):
+def list_blocks(store: Store, doc_id: str, *, offset: int = 0,
+                limit: int | None = None):
+    """块读取（CH-469：加窗口参数）。分片文档可达数千块，
+    原实现无界返回 → `GET /docs/<id>` 与编辑器一次拉全量。
+    `limit=None` 保持既有「取全部」契约。"""
     from ..ir import Block
-    rows = store.q("SELECT * FROM blocks WHERE doc_id=? ORDER BY rowid", (doc_id,))
+    sql = "SELECT * FROM blocks WHERE doc_id=? ORDER BY rowid"
+    args: tuple = (doc_id,)
+    if limit is not None:
+        sql += " LIMIT ? OFFSET ?"
+        args += (int(limit), int(offset))
+    elif offset:
+        sql += " LIMIT -1 OFFSET ?"
+        args += (int(offset),)
+    rows = store.q(sql, args)
     out = []
     for r in rows:
         out.append(Block(id=r["block_id"], type=r["type"], text=r["text"], level=r["level"],
@@ -113,6 +126,12 @@ def list_blocks(store: Store, doc_id: str):
                          marks=json.loads(r["marks_json"] or "{}"),
                          immutable=bool(r["immutable"]), revision=r["revision"]))
     return out
+
+
+def count_blocks(store: Store, doc_id: str) -> int:
+    """块总数（CH-469：分页窗口需要 total 才能判断是否还有下一页）。"""
+    row = store.q("SELECT COUNT(*) AS n FROM blocks WHERE doc_id=?", (doc_id,))
+    return int(row[0]["n"]) if row else 0
 
 
 def search(store: Store, query: str, limit: int = 20) -> dict:
@@ -130,6 +149,7 @@ def search(store: Store, query: str, limit: int = 20) -> dict:
     like_sql = " AND ".join(["text LIKE ? ESCAPE '\\'"] * len(terms))
     like_args = tuple(f"%{like_escape(t)}%" for t in terms)
     expr = build_match(query)
+    fts_error = ""
 
     if expr:
         try:
@@ -143,19 +163,31 @@ def search(store: Store, query: str, limit: int = 20) -> dict:
             if total:
                 return {"total": total, "hits": [dict(r) for r in rows],
                         "match": expr, "mode": "fts"}
-        except Exception:                            # noqa: BLE001 — FTS 语法兜底
-            pass
+        except sqlite3.OperationalError as exc:
+            # CH-469（V-9）：MATCH 表达式不被接受 → 可以降级 LIKE，但**原因必须留痕**
+            # （响应带 fts_error），否则「索引面坏了」与「n-gram 没命中」不可区分。
+            fts_error = type(exc).__name__
+        except sqlite3.Error as exc:
+            # 库面故障（磁盘满 / 索引损坏 / busy 超时）：原实现 `except Exception: pass`
+            # 把它一并吞成 LIKE 兜底，最坏处置——调用方看到的只是「没搜到几条」，
+            # 而真因是搜索面已经不可用。明确报错（detail 只带异常类名，NFR-20）。
+            raise E5031_StorageError("search index query failed",
+                                     detail={"reason": type(exc).__name__}) from exc
     # 兜底：纯 LIKE 子串（FTS 表达式非法 / n-gram 未命中，如旧库尚未回填 aux）
     rows = store.q(
         f"SELECT doc_id, block_id, substr(text, 1, 48) AS snip FROM search_blocks"
         f" WHERE {like_sql} LIMIT ?", (*like_args, limit))
     total = store.q1(
         f"SELECT COUNT(*) c FROM search_blocks WHERE {like_sql}", like_args)["c"]
-    return {"total": total, "hits": [dict(r) for r in rows],
-            "match": expr or like_args[0], "mode": "like"}
+    out = {"total": total, "hits": [dict(r) for r in rows],
+           "match": expr or like_args[0], "mode": "like"}
+    if fts_error:
+        out["fts_error"] = fts_error
+    return out
 
 
-def delete_doc(store: Store, doc_id: str, actor: str, root: Path | None = None) -> dict:
+def delete_doc(store: Store, doc_id: str, actor: str, root: Path | None = None, *,
+               files_removed: tuple[list[str], list[str]] | None = None) -> dict:
     """FR-128 级联删除：out 产物、IR/中间产物、事件、revision、编辑审计；
     删除留痕本身保留（who/when/doc_id，不含正文，NFR-20）。
 
@@ -165,10 +197,13 @@ def delete_doc(store: Store, doc_id: str, actor: str, root: Path | None = None) 
 
     CH-459（A-15）：删前存在性检查——原实现对不存在的 doc_id 也留痕并返回
     200，「删了个不存在的东西」与「删成功了」在响应上不可区分。
+
+    `files_removed`（CH-469，V-6）：整源删除已在上层一次遍历清完产物时传入，
+    本层跳过逐文档 rglob（见 `delete_source`）。
     """
     if store.q1("SELECT 1 FROM docs WHERE doc_id=?", (doc_id,)) is None:
         raise E4041_NotFound(f"doc {doc_id} not found")
-    removed, failed = purge_files(doc_id, root)
+    removed, failed = files_removed if files_removed is not None else purge_files(doc_id, root)
     if failed:
         raise E5031_StorageError(
             "artifact removal incomplete; rows kept for retry",
@@ -204,32 +239,57 @@ def delete_source(store: Store, source_key: str, actor: str, root: Path | None =
 
     CH-459（A-15）：无匹配文档时 404/E4041——原实现写一条空 source 留痕并
     返回 200，与 delete_doc 的「不存在也成功」同病。
+
+    CH-469（V-6）：产物清理改为**整源一次遍历**。原实现逐文档调 `purge_files`，
+    每个文档都把 out/ir/tmp 三棵树各 rglob 一遍——N 个版本 = 3N 次全树扫描，
+    目录里文档越多越慢（同一批文件被反复匹配）。
     """
     with store.tx() as tx:
         ids = [r["doc_id"] for r in
                tx.execute("SELECT doc_id FROM docs WHERE source_key=?", (source_key,))]
     if not ids:
         raise E4041_NotFound(f"source {source_key} not found")
+    removed, failed = purge_many(ids, root)
+    if failed:
+        # 与 delete_doc 同口径 fail-closed：产物没删净就保留全部库行，整源删除可重试
+        raise E5031_StorageError(
+            "artifact removal incomplete; rows kept for retry",
+            detail={"source_key": source_key, "failed": len(failed),
+                    "removed": len(removed)})
+    by_doc = {d: [p for p in removed if d in Path(p).name] for d in ids}
     for d in ids:
-        delete_doc(store, d, actor, root)
+        delete_doc(store, d, actor, None, files_removed=(by_doc.get(d, []), []))
     with store.tx() as tx:
         tx.execute("INSERT INTO deletions(doc_id, source_key, actor, ts, kind, cascade_json)"
                    " VALUES (?,?,?,?,?,?)",
                    (f"source:{source_key}", source_key, actor, now_iso(), "source",
-                    json.dumps({"docs": len(ids)}, ensure_ascii=False)))
-    return {"source_key": source_key, "docs": ids}
+                    json.dumps({"docs": len(ids), "files": len(removed)},
+                               ensure_ascii=False)))
+    return {"source_key": source_key, "docs": ids, "files": removed}
 
 
 def purge_files(doc_id: str, root: Path | None) -> tuple[list[str], list[str]]:
-    """删除 out/ 与 work/ 下的产物与中间产物，返回 (已删, 失败)。"""
+    """删除 out/ 与 work/ 下该文档的产物与中间产物，返回 (已删, 失败)。"""
+    return _purge([doc_id], root)
+
+
+def purge_many(doc_ids, root: Path | None) -> tuple[list[str], list[str]]:
+    """多文档共一次目录遍历（CH-469，V-6）。"""
+    return _purge([d for d in doc_ids if d], root)
+
+
+def _purge(ids: list[str], root: Path | None) -> tuple[list[str], list[str]]:
+    """out/ir/tmp 三棵树各一次遍历，命中任一 doc_id 即删（一次遍历服务整批）。"""
     removed: list[str] = []
     failed: list[str] = []
-    if not root:
+    if not root or not ids:
         return removed, failed
     for base in (Path(root) / "out", Path(root) / "ir", Path(root) / "tmp"):
         if not base.exists():
             continue
-        for p in base.rglob(f"*{doc_id}*"):
+        for p in base.rglob("*"):
+            if not any(d in p.name for d in ids):
+                continue
             try:
                 if p.is_dir():
                     shutil.rmtree(p)

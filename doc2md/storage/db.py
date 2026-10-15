@@ -17,7 +17,7 @@ import weakref
 from datetime import datetime, timezone
 from pathlib import Path
 
-DB_VERSION = 4   # state.sqlite 结构版本（user_version）；与 IR 的 SCHEMA_VERSION=14 是两套口径
+DB_VERSION = 5   # state.sqlite 结构版本（user_version）；与 IR 的 SCHEMA_VERSION=14 是两套口径
 
 DDL = f"""
 PRAGMA journal_mode=WAL;
@@ -97,12 +97,21 @@ CREATE INDEX IF NOT EXISTS ix_tasks_idem ON tasks(idem_key);
 CREATE INDEX IF NOT EXISTS ix_tasks_queued ON tasks(status, created_at);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_tasks_doc_active
   ON tasks(doc_id) WHERE status IN ('queued','running');
+-- CH-469：按 doc_id 的**非活动态**查找没有可用索引——uq_tasks_doc_active 是部分索引，
+-- 只覆盖 status IN ('queued','running')，而 `DELETE FROM tasks WHERE doc_id=?`
+-- （FR-128 级联删除）与历史作业回溯要扫全表。
+CREATE INDEX IF NOT EXISTS ix_tasks_doc ON tasks(doc_id);
 
 CREATE TABLE IF NOT EXISTS events (
   seq INTEGER PRIMARY KEY AUTOINCREMENT,
   ts TEXT NOT NULL, code TEXT NOT NULL,
   doc_id TEXT, job_id TEXT, payload_json TEXT DEFAULT '{{}}'
 );
+-- CH-469：events 只有 seq 主键可用。`GET /jobs/<id>/events`（FR-125 per-job 通道）
+-- 与删除级联的 `COUNT/DELETE ... WHERE doc_id=?` 都是全表扫描；
+-- 事件按 cron 保留期清理前会持续增长，这两个查询在常驻实例上是热点。
+CREATE INDEX IF NOT EXISTS ix_events_job ON events(job_id);
+CREATE INDEX IF NOT EXISTS ix_events_doc ON events(doc_id);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS search_blocks USING fts5(
   doc_id UNINDEXED, block_id UNINDEXED, text, aux, tokenize='unicode61'

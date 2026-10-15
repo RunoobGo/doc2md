@@ -22,6 +22,16 @@ def patch_block(store: Store, doc_id: str, block_id: str, body: dict, actor: str
     base = body.get("base_revision")
     if base is None and require_base_revision:
         raise E4001_BadRequest("base_revision is required")
+    if base is not None:
+        # CH-469（V-8）：`base_revision` 非数字（JSON 字符串 "abc" / 对象 / 数组）
+        # 原实现在下面的 int() 直转 → ValueError 不在 Doc2mdError 谱系里，
+        # 逃逸成 500 + HTML，客户端既拿不到 {code,message} 也学不到正确写法。
+        # 数字字符串仍是合法输入（不收紧契约）。
+        try:
+            base = int(base)
+        except (TypeError, ValueError):
+            raise E4001_BadRequest("base_revision must be an integer",
+                                   detail={"field": "base_revision"}) from None
 
     with store.tx() as tx:
         row = tx.execute(

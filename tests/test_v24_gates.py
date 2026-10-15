@@ -85,6 +85,11 @@ def test_shard_two_phase(large_single, large_sharded):
     # 分片确实发生（非降级伪通过，方案 4.3）
     assert not st.get("fallback"), f"降级单片，非真分片：{st}"
     assert st["shards"] >= 2 and st["blocks_raw"] > st["blocks_after_dedupe"]
+    # CH-469：重叠区不得在产物里留下多余块——分片路径去重后的块数必须与单片路径
+    # 相等。char_similarity ≥ 0.99 允许约 210 字的误差，一份重复段落（实测 101 字）
+    # 能在红线下静默通过，块数相等才是可判定的硬口径。
+    assert st["blocks_after_dedupe"] == len(large_single.ir.blocks), \
+        f"重叠区残留多余块：分片 {st['blocks_after_dedupe']} vs 单片 {len(large_single.ir.blocks)}"
     # shard_edge 可筛选：报告有边界行 + data 属性
     # CH-464：拆掉 or 逃逸——缝合发生时 shard_edge 必须可筛选
     if st["seams"] > 0:

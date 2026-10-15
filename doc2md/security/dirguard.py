@@ -95,5 +95,17 @@ def guard_walk(root: str | os.PathLike, limits: WalkLimits | None = None) -> Wal
 
 
 def scan_or_raise(root: str | os.PathLike, limits: WalkLimits | None = None) -> list[str]:
-    """便捷入口：超限直接抛 E4133（API 目录上传路径用）。"""
-    return guard_walk(root, limits).files
+    """便捷入口：超限直接抛 E4133（API 目录上传路径用）。
+
+    CH-469（O-10）：`truncated` 同样是「超限」，但原实现只看文件数上限、把截断
+    结果当完整清单返回——投递目录没扫完却报告「这就是全部文件」，调用方据此
+    入队，未扫到的文件静默丢失（用户视角是「目录里明明有，队列里没有」）。
+    """
+    res = guard_walk(root, limits)
+    if res.truncated:
+        raise E4133_DirTooWide(
+            f"directory scan truncated after {res.elapsed:.1f}s at {root}",
+            detail={"reason": "walk_truncated", "dirs_visited": res.dirs_visited,
+                    "collected": len(res.files),
+                    "deadline_seconds": limits.deadline_seconds if limits else WalkLimits().deadline_seconds})
+    return res.files

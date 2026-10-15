@@ -66,14 +66,32 @@ def _tables(con: sqlite3.Connection) -> list[str]:
 
 
 def fingerprint(db_path: Path) -> dict:
-    """逻辑内容指纹：逐表行数 + 排序行内容的 sha256 前缀（NFR-20：只指纹不落正文）。"""
+    """逻辑内容指纹：逐表行数 + 行内容的顺序无关摘要（NFR-20：只指纹不落正文）。
+
+    CH-469（O-7）：原实现 `fetchall()` 把整表读进内存，再 `repr(sorted(rows))`
+    造一个同样量级的字符串——`blocks.text` 是全文，几百 MB 的库做一次演练就是一次
+    峰值翻倍（低配机上直接 OOM，而演练正是要在低配机上跑）。改成服务端游标
+    `fetchmany` 逐行喂哈希：每行 sha256 视作大整数、按模 2^256 累加。
+    加法可交换 ⇒ 与原来的「排序后整体哈希」一样与行序无关；重复行按重数计入
+    （两行相同即加两次）；要伪造同指纹得先找到 sha256 原像。
+    """
     con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     try:
         out: dict[str, dict] = {}
         for name in _tables(con):
-            rows = con.execute(f'SELECT * FROM "{name}"').fetchall()
-            digest = hashlib.sha256(repr(sorted(rows, key=repr)).encode("utf-8")).hexdigest()
-            out[name] = {"rows": len(rows), "sha256": digest[:16]}
+            rows, acc = 0, 0
+            cur = con.execute(f'SELECT * FROM "{name}"')
+            while True:
+                batch = cur.fetchmany(512)
+                if not batch:
+                    break
+                for row in batch:
+                    rows += 1
+                    payload = repr(tuple(row)).encode("utf-8", "surrogatepass")
+                    acc = (acc + int.from_bytes(hashlib.sha256(payload).digest(), "big"))
+                    acc &= (1 << 256) - 1
+            out[name] = {"rows": rows,
+                         "sha256": acc.to_bytes(32, "big").hex()[:16]}
         return out
     finally:
         con.close()
@@ -120,6 +138,11 @@ def run_drill(cfg: dict, root: Path, *, keep: bool = False) -> DrillReport:
             work_dir_mode=str(_cfg_get(cfg, "ops.work_dir_mode", "700")))
         snap = plan.snapshot(live_copy)
         rep.steps.append(DrillStep("snapshot", True, {"file": snap.name}))
+        # O-12：权限位没真正落下（SMB/NFS/exFAT 等无 POSIX 权限的卷）不是失败，
+        # 但必须出现在报告里——「work/ 700」是快照可以明文存放的唯一前提。
+        if plan.mode_warnings:
+            rep.steps.append(DrillStep("work_dir_mode", True,
+                                       {"warnings": list(plan.mode_warnings)}))
 
         # 3) 外置加密副本（NFR-18：强制 AES-256-GCM 容器 + 600）
         enc = plan.to_external(snap, passphrase)

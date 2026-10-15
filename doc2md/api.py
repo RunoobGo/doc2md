@@ -8,7 +8,9 @@
 """
 from __future__ import annotations
 
+import copy
 import json
+import threading
 from pathlib import Path
 
 from . import auth, config
@@ -24,9 +26,10 @@ from .errors import (
 from .ops.logging import RotatingJsonlWriter, scrub_record
 from .pipeline.convert import convert
 from .scheduler import Scheduler
-from .security.dirguard import WalkLimits, guard_walk
+from .security.dirguard import WalkLimits, scan_or_raise
 from .storage.db import Store, now_iso
 from .storage.repo import (
+    count_blocks,
     delete_doc,
     delete_source,
     get_doc,
@@ -45,6 +48,10 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
     root = Path(root) if root else config.path_setting(cfg, "paths.root", ".")
     root.mkdir(parents=True, exist_ok=True)
     override = root / "settings_override.json"
+    # CH-469：baseline 必须在叠加 override **之前**取快照。否则「文件里已有的键」
+    # 会同时出现在 baseline 与 merged 里，写回时的稀疏差量把它们当成未改动丢掉，
+    # 多次 PUT 的净效果仍会回退（本项要修的就是这类丢失）。
+    cfg_baseline = copy.deepcopy(cfg)
     if override.is_file():
         _deep(cfg, json.loads(override.read_text(encoding="utf-8")))
     store = Store(root / "state.sqlite")
@@ -61,8 +68,13 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
                   "rotate_mb": writer.rotate_mb, "keep": writer.rotate_keep})
     writer.flush()
     app = Flask("doc2md")
+    # CH-469：配置热更改为「copy-on-write + 锁」。原实现 `merged = dict(cfg)` 是浅拷贝，
+    # `_deep` 就地改写共享的嵌套 dict，而并发请求线程正在读 cur() → 读到半改状态。
+    # baseline 保存未叠加 override 的配置，用于把 override 文件算成「稀疏差量」
+    # （只记真正被改过的键，不让全量默认值冻结进去、挡住日后升级）。
     app.config["doc2md"] = {"cfg": cfg, "store": store, "root": root, "sched": sched,
-                            "writer": writer}
+                            "writer": writer, "cfg_lock": threading.Lock(),
+                            "cfg_baseline": cfg_baseline}
 
     def cur() -> dict:
         return app.config["doc2md"]["cfg"]
@@ -82,6 +94,29 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
 
     def err(exc: Doc2mdError):
         return jsonify(exc.to_body()), exc.http
+
+    def _window() -> tuple[int, int | None]:
+        """分页窗口解析（CH-469，V-5）。
+
+        口径：**不给 `limit`（或 `limit=0`）= 取全部**，保持既有「一次拉全量」契约
+        不漂移；给了 `limit` 才走 SQL 窗口。非数字 → 400/E4001（与 `_int_arg` 同口径，
+        不让参数错误逃逸成 500）。
+        """
+        offset = _int_arg("offset", 0)
+        limit = _int_arg("limit", 0)
+        if offset < 0 or limit < 0:
+            raise E4001_BadRequest("offset/limit must be >= 0")
+        return offset, (limit or None)
+
+    def _int_arg(name: str, default: int) -> int:
+        """查询参数整数解析：非数字走 400/E4001（CH-464，原裸 int() 逃逸 500 HTML）。"""
+        raw = request.args.get(name)
+        if raw is None:
+            return default
+        try:
+            return int(raw)
+        except ValueError:
+            raise E4001_BadRequest(f"{name} must be an integer") from None
 
     @app.errorhandler(ApiError)
     def _api_err(e):
@@ -113,7 +148,9 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
                 max_depth=int(config.get(cur(), "watch.max_depth", 20)),
                 skip_hidden=bool(config.get(cur(), "watch.skip_hidden", True)),
                 max_files_per_dir=int(config.get(cur(), "watch.max_files_per_dir", 5000)))
-            files = [Path(f) for f in guard_walk(p, lim).files]
+            # CH-469（O-10）：走 scan_or_raise——目录没扫完（超时）必须 413/E4133，
+            # 不能把半截清单当完整结果入队（用户视角是「目录里明明有，队列里没有」）。
+            files = [Path(f) for f in scan_or_raise(p, lim)]
         elif p.is_file():
             files = [p]
         else:
@@ -216,7 +253,13 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
     def get_document(doc_id):
         need("read")
         d = get_doc(store, doc_id)
-        d["blocks"] = [b.to_dict() for b in list_blocks(store, doc_id)]
+        # CH-469（V-5）：分片文档可达数千块，原实现无条件全量物化 + 序列化，
+        # 首个响应就能到 MB 级。`?offset=&limit=` 走 SQL 窗口；不带参数仍取全部。
+        offset, limit = _window()
+        blocks = list_blocks(store, doc_id, offset=offset, limit=limit)
+        d["blocks"] = [b.to_dict() for b in blocks]
+        d["blocks_total"] = count_blocks(store, doc_id)
+        d["blocks_offset"] = offset
         return jsonify(d)
 
     @app.get("/docs/<doc_id>/markdown")
@@ -274,43 +317,57 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
 
     @app.get("/docs/<doc_id>/audit")
     def doc_audit(doc_id):
-        """编辑审计流水（含 before/after 正文）→ 需 editor 及以上，不进 reader。"""
+        """编辑审计流水（含 before/after 正文）→ 需 editor 及以上，不进 reader。
+
+        CH-469（V-5）：审计每块每次编辑一行，长期跑的库能积累到数万行且**每行带
+        前后两份正文**——全量返回是这套 API 里最重的一次序列化。`?offset=&limit=`
+        走 SQL 窗口并回 `total`（不带 limit 仍取全部，契约不漂移）。
+        """
         need("edit")
         get_doc(store, doc_id)
-        block_id = request.args.get("block_id")
-        sql = ("SELECT block_id, before, after, from_revision, to_revision, actor, ts, reason"
-               " FROM edit_audit WHERE doc_id=?")
+        offset, limit = _window()
+        cond = "doc_id=?"
         args: tuple = (doc_id,)
+        block_id = request.args.get("block_id")
         if block_id:
-            sql += " AND block_id=?"
+            cond += " AND block_id=?"
             args += (block_id,)
-        rows = store.q(sql + " ORDER BY rowid", args)
-        return jsonify({"doc_id": doc_id, "audit": [dict(r) for r in rows]})
+        total = store.q1(f"SELECT COUNT(*) c FROM edit_audit WHERE {cond}", args)["c"]
+        sql = ("SELECT block_id, before, after, from_revision, to_revision, actor, ts, reason"
+               f" FROM edit_audit WHERE {cond} ORDER BY rowid")
+        if limit is not None:
+            sql += " LIMIT ? OFFSET ?"
+            args += (limit, offset)
+        elif offset:
+            sql += " LIMIT -1 OFFSET ?"
+            args += (offset,)
+        rows = store.q(sql, args)
+        return jsonify({"doc_id": doc_id, "audit": [dict(r) for r in rows],
+                        "total": total, "offset": offset})
 
     @app.get("/audit/deletions")
     def deletion_audit():
         """删除留痕（FR-128）：只有 who/when/doc_id + 计数，绝不含正文（NFR-20）。"""
         need("delete")
-        rows = store.q("SELECT doc_id, source_key, actor, ts, kind, cascade_json"
-                       " FROM deletions ORDER BY rowid")
+        offset, limit = _window()
+        total = store.q1("SELECT COUNT(*) c FROM deletions")["c"]
+        sql = ("SELECT doc_id, source_key, actor, ts, kind, cascade_json"
+               " FROM deletions ORDER BY rowid")
+        args: list = []
+        if limit is not None:
+            sql += " LIMIT ? OFFSET ?"
+            args = [limit, offset]
+        elif offset:
+            sql += " LIMIT -1 OFFSET ?"
+            args = [offset]
         out = []
-        for r in rows:
+        for r in store.q(sql, tuple(args)):
             d = dict(r)
             d["cascade"] = json.loads(d.pop("cascade_json") or "{}")
             out.append(d)
-        return jsonify({"deletions": out})
+        return jsonify({"deletions": out, "total": total, "offset": offset})
 
     # --- 搜索 / 事件 --------------------------------------------------------
-    def _int_arg(name: str, default: int) -> int:
-        """查询参数整数解析：非数字走 400/E4001（CH-464，原裸 int() 逃逸 500 HTML）。"""
-        raw = request.args.get(name)
-        if raw is None:
-            return default
-        try:
-            return int(raw)
-        except ValueError:
-            raise E4001_BadRequest(f"{name} must be an integer") from None
-
     @app.get("/search")
     def _search():
         need("read")
@@ -349,12 +406,25 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
         b = body()
         if not isinstance(b, dict):
             raise E4001_BadRequest("settings body must be an object")
-        merged = dict(app.config["doc2md"]["cfg"])
-        _deep(merged, b)
-        app.config["doc2md"]["cfg"] = merged
-        override = root / "settings_override.json"
-        override.write_text(json.dumps(b, ensure_ascii=False, indent=2), encoding="utf-8")
-        override.chmod(0o600)
+        unknown = config.unknown_keys(b)
+        if unknown:
+            raise E4001_BadRequest(
+                f"unknown configuration key(s): {', '.join(unknown)}（见方案 附录 A）")
+        # CH-469：copy-on-write（见 create_app）+ override 落盘写稀疏差量而非本次 body。
+        # 原实现整体覆盖文件 → 第二次 PUT 后 reload，第一次 PUT 的键静默回退。
+        # CH-469（O-15）：校验发生在**应用之前**——坏值一旦进内存 cfg，
+        # 后续每个请求都会按它行为（workers="8" 让批量直接崩），而 400 只是当场报错。
+        # 未知键在这里是硬错误（装载期只警告）：PUT 是显式写入，拼错的键进了
+        # override 文件就会在每次重启时静默失效。
+        candidate = copy.deepcopy(app.config["doc2md"]["cfg"])
+        _deep(candidate, b)
+        try:
+            config.validate(candidate)
+        except config.ConfigError as exc:
+            raise E4001_BadRequest(f"invalid configuration: {exc}") from None
+        with app.config["doc2md"]["cfg_lock"]:
+            app.config["doc2md"]["cfg"] = candidate
+            write_override(override, candidate, app.config["doc2md"]["cfg_baseline"])
         _emit(store, "settings_updated", None, None, {"keys": sorted(b.keys())}, logw())
         return jsonify({"updated": sorted(b.keys())})
 
@@ -363,26 +433,47 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
         need("system_reload")
         # CH-462：与 create_app 同口径——重载必须叠加 settings_override.json，
         # 否则 PUT /settings 落盘的修改在 reload 后静默回退（启动合并、重载丢失）。
-        merged = config.load()
-        if override.is_file():
-            _deep(merged, json.loads(override.read_text(encoding="utf-8")))
-        app.config["doc2md"]["cfg"] = merged
+        # CH-469（O-15）：reload 的输入可以是人手改过的 doc2md.toml —— 校验失败保持
+        # 旧配置继续服务并回 400，而不是让半坏配置接管（或逃逸成 500）。
+        try:
+            merged = config.load()
+            if override.is_file():
+                _deep(merged, json.loads(override.read_text(encoding="utf-8")))
+            config.validate(merged)
+        except config.ConfigError as exc:
+            raise E4001_BadRequest(f"invalid configuration: {exc}") from None
+        except (OSError, ValueError) as exc:      # 配置文件缺失 / 非法 TOML / 非法 JSON
+            raise E4001_BadRequest(
+                f"unreadable configuration source: {type(exc).__name__}: {str(exc)[:200]}") from None
+        with app.config["doc2md"]["cfg_lock"]:
+            app.config["doc2md"]["cfg"] = merged
         _emit(store, "system_reload", None, None, {}, logw())
         return jsonify({"reloaded": True, "ts": now_iso()})
 
     @app.post("/tokens")
     def create_token():
         need("token_admin")
-        role = body().get("role", "reader")
-        return jsonify({"token": auth.issue(store, role, body().get("label", ""),
-                                            allowed=config.get(cur(), "api.token_roles",
-                                                               auth.ROLES)),
+        b = body()
+        role = b.get("role", "reader")
+        # CH-469（V-7）：角色白名单在 API 面判掉。原实现把任意字符串直送
+        # `auth.issue`，而它抛的是 ValueError（不是 Doc2mdError）→ 逃逸成 500 + HTML，
+        # 调用方拿不到 {code,message} 契约也看不出正确取值。
+        allowed = config.get(cur(), "api.token_roles", auth.ROLES)
+        if role not in auth.ROLES or role not in tuple(allowed):
+            raise E4001_BadRequest(f"bad role {role!r}",
+                                   detail={"allowed": [r for r in auth.ROLES
+                                                       if r in tuple(allowed)]})
+        return jsonify({"token": auth.issue(store, role, b.get("label", ""),
+                                            allowed=allowed),
                         "role": role})
 
     @app.delete("/tokens/<token>")
     def revoke_token(token):
         need("token_admin")
-        auth.revoke(store, token)
+        # CH-469（V-13）：不存在 / 已删除的 token 原实现回 200 {"revoked": true}
+        # ——「没吊销任何东西」被报成「吊销成功」，与 FR-128 的删除同口径收敛为 404。
+        if not auth.revoke(store, token):
+            raise E4041_NotFound("unknown token", detail={"token": token[:6] + "…"})
         return jsonify({"revoked": True})
 
     @app.get("/")
@@ -405,6 +496,36 @@ def _deep(dst: dict, src: dict) -> dict:
         else:
             dst[k] = v
     return dst
+
+
+def _sparse(base: dict, merged: dict) -> dict:
+    """merged 相对 base 的差量（只含被真正改过的叶子键，CH-469）。"""
+    out: dict = {}
+    for k, v in merged.items():
+        if isinstance(v, dict) and isinstance(base.get(k), dict):
+            sub = _sparse(base[k], v)
+            if sub:
+                out[k] = sub
+        elif k not in base or base[k] != v:
+            out[k] = v
+    return out
+
+
+def write_override(path: Path, merged: dict, baseline: dict) -> dict:
+    """settings_override.json 的原子写入口（差量口径，CH-469）。
+
+    全量落盘会把当时的默认值冻结进 override，升级后新默认值被旧值压住；
+    只落差量则 reload / 重启仍按「默认 → 文件 → override」叠加。
+    """
+    diff = _sparse(baseline, merged)
+    tmp = path.with_suffix(path.suffix + ".part")
+    tmp.write_text(json.dumps(diff, ensure_ascii=False, indent=2), encoding="utf-8")
+    try:
+        tmp.chmod(0o600)
+    except OSError:
+        pass                      # 非 POSIX 平台 chmod 近似 no-op（见 ops/backup 同口径）
+    tmp.replace(path)
+    return diff
 
 
 def _emit(store: Store, code: str, doc_id: str | None, job_id: str | None,

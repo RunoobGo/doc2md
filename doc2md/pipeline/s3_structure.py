@@ -55,7 +55,7 @@ def _join_back(blocks: list[Block], text: str, font: dict) -> Block | None:
     """
     for b in reversed(blocks):
         if b.type in ("paragraph", "list_item"):
-            b.text = (b.text or "") + _join_line(b.text or "", text.strip())
+            b.text = _append_line(b.text or "", text.strip())
             b.flags.setdefault("joined_across_break", True)
             if font and not b.font:
                 b.font = dict(font)
@@ -124,6 +124,12 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
     quote_page = 0
     row_page = 0
     code_page = 0                              # CH-464：代码块首行所在页（收尾落块用）
+    # CH-469：段落缓冲提升为跨页存续状态（原在页循环内逐页重置，
+    # 英文跨页句的第二段以小写起头被 G1 判为半句，段落也被切成两块）
+    para_buf: list[str] = []
+    para_lines: list = []                      # 与 para_buf 同步的 Line 行缓冲
+    para_font: dict = {}
+    para_page = 0
 
     def emit_code(page: int) -> None:
         nonlocal seq, code_buf
@@ -177,10 +183,6 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
         row_buf, row_x0, row_lines = [], [], []
 
     for page in pages:
-        para_buf: list[str] = []
-        para_lines: list = []                   # 与 para_buf 同步的 Line 行缓冲
-        para_font: dict = {}
-        para_page = page.index
         for ln in page.lines:
             # --- page_break（CH-459：form-feed 行，DOCX 分页符的信号形态）---
             # 必须先于 rstrip 判定：\x0c 是 Python 空白字符，rstrip 会把它剥掉，
@@ -314,8 +316,8 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
                 para_lines = [ln]
                 para_font = _font(ln)
                 para_page = page.index
-        flush_para()
     # 收尾：跨页状态落块
+    flush_para()                               # CH-469：段缓冲跨页存续，统一在文末落块
     flush_quote()
     flush_rows(True)
     if code_buf is not None:
@@ -397,17 +399,35 @@ def _flush(buf: list[str], blocks: list[Block], seq: int, font: dict, page: int)
         return
     text = buf[0]
     for nxt in buf[1:]:
-        text = text + _join_line(text, nxt)
+        text = _append_line(text, nxt)
     text = text.strip()
     if text:
         blocks.append(Block(id=f"b{seq + 1}", type="paragraph", text=text,
                             font=font or {}, page=page))
 
 
-def _join_line(a: str, b: str) -> str:
-    """跨行拼接：中文直连，英文补空格，连字符断词合并。"""
+def _append_line(a: str, b: str) -> str:
+    """按跨行口径把 b 接到 a 后面（唯一的拼接入口，CH-469）。
+
+    连字符断词（"under-" + "score" → "underscore"）需要剥掉 a 尾部连字符，
+    这层语义集中在本函数处理；调用方不再自行 `a + _join_line(a, b)`，
+    避免追加/替换两种口径混用产出重复文本。
+    """
+    frag = _join_line(a, b)
     if a.endswith("-") and b[:1].islower():
-        return a[:-1] + b
+        return a[:-1] + frag
+    return a + frag
+
+
+def _join_line(a: str, b: str) -> str:
+    """跨行拼接的**待追加片段**（只经 _append_line 消费，CH-469）。
+
+    连字符断词分支只返回 b：整串 `a[:-1] + b` 是替换语义的写法，
+    而两个调用方都是追加语义，直接返回整串会产出 "under-underscore"
+    这类重复文本（与方案 §merged[-1]=prev[:-1]+ln 的意图不符，且原实现无测试覆盖）。
+    """
+    if a.endswith("-") and b[:1].islower():
+        return b
     last = a[-1] if a else ""
     first = b[0] if b else ""
     if _CJK_HEAD.match(b) or ord(last) > 0x2E80 or ord(first) > 0x2E80:

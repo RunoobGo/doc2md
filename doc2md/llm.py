@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -139,6 +140,7 @@ def _leading_num(t: str) -> bool:
 
 # --- 本地模型服务客户端（CH-456 / T2） ----------------------------------------
 DEFAULT_LLM_TIMEOUT_MS = 15000
+DEFAULT_LLM_RETRIES = 2                # CH-469：连接类瞬断重试次数（llm.retries = 0 关闭）
 MAX_OPS_PER_RESPONSE = 64              # 防御性上限：模型失控输出不得放大成批量写
 DEFAULT_MODEL_NAME = "doc2md-repair"
 
@@ -174,12 +176,17 @@ class LlmClient:
 
     def __init__(self, *, bind: str = "127.0.0.1", port: int = 8080, auth: bool = False,
                  timeout_ms: int = DEFAULT_LLM_TIMEOUT_MS, model: str = "",
-                 vendor_models: str = ""):
+                 vendor_models: str = "", retries: int = DEFAULT_LLM_RETRIES):
         self.bind = str(bind)
         self.port = int(port)
         self.auth = bool(auth)
         self.timeout_ms = int(timeout_ms)
         self.model = str(model or "") or _discover_model(vendor_models)
+        # CH-469：连接类瞬断（llama-server 重启中、端口未就绪）原为零重试，
+        # 单次抖动即降级 offline 或直接 E5041。只重试这一类；HTTP 状态与
+        # 解析失败是确定性结果，重试无益且会放大延迟。
+        self.retries = max(0, int(retries))
+        self.retry_delay_s = 0.2
 
     @classmethod
     def from_cfg(cls, cfg) -> "LlmClient":
@@ -188,6 +195,7 @@ class LlmClient:
             port=int(_cfg_get(cfg, "llm.port", 8080)),
             auth=bool(_cfg_get(cfg, "llm.auth", False)),
             timeout_ms=int(_cfg_get(cfg, "llm.timeout_ms", DEFAULT_LLM_TIMEOUT_MS)),
+            retries=int(_cfg_get(cfg, "llm.retries", DEFAULT_LLM_RETRIES)),
             model=str(_cfg_get(cfg, "llm.model", "") or ""),
             vendor_models=str(_cfg_get(cfg, "paths.vendor_models", "") or ""))
 
@@ -255,32 +263,42 @@ class LlmClient:
     def _get(self, path: str) -> str:
         req = urllib.request.Request(self.base_url + path, headers=self._headers(),
                                      method="GET")
-        try:
-            with urllib.request.urlopen(req, timeout=self.timeout_ms / 1000) as r:
-                return r.read(4096).decode("utf-8", "replace")
-        except urllib.error.HTTPError as exc:
-            raise LlmServiceError(f"http {exc.code}", stage="http", status=exc.code) from exc
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            raise LlmServiceError(f"{type(exc).__name__}: {exc}", stage="connect") from exc
+        return self._read(req, 4096)
 
     def _send(self, req: urllib.request.Request) -> dict:
-        try:
-            with urllib.request.urlopen(req, timeout=self.timeout_ms / 1000) as r:
-                raw = r.read(1 << 20).decode("utf-8", "replace")
-        except urllib.error.HTTPError as exc:
-            reason = ""
-            try:
-                reason = exc.read(200).decode("utf-8", "replace")
-            except Exception:
-                pass
-            raise LlmServiceError(f"http {exc.code} {reason}".strip(),
-                                  stage="http", status=exc.code) from exc
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            raise LlmServiceError(f"{type(exc).__name__}: {exc}", stage="connect") from exc
+        raw = self._read(req, 1 << 20, http_reason=True)
         try:
             return json.loads(raw)
         except ValueError as exc:
             raise LlmServiceError(f"non-JSON response: {exc}", stage="parse") from exc
+
+    def _read(self, req: urllib.request.Request, cap: int,
+              *, http_reason: bool = False) -> str:
+        """一次 urlopen + 读上限；连接类瞬断按 llm.retries 重试（CH-469）。
+
+        HTTPError 是服务给出的确定性答复（4xx/5xx 已由 llama-server 侧判定），
+        解析失败同理——两者都不重试，否则只是把失败拖成超时。
+        """
+        attempts = self.retries + 1
+        for i in range(attempts):
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout_ms / 1000) as r:
+                    return r.read(cap).decode("utf-8", "replace")
+            except urllib.error.HTTPError as exc:
+                reason = ""
+                if http_reason:
+                    try:
+                        reason = exc.read(200).decode("utf-8", "replace")
+                    except Exception:  # noqa: BLE001 — 诊断文本取不到不影响判定
+                        pass
+                raise LlmServiceError(f"http {exc.code} {reason}".strip(),
+                                      stage="http", status=exc.code) from exc
+            except (urllib.error.URLError, TimeoutError, OSError) as exc:
+                if i + 1 >= attempts:
+                    raise LlmServiceError(f"{type(exc).__name__}: {exc}",
+                                          stage="connect") from exc
+                time.sleep(self.retry_delay_s)
+        raise LlmServiceError("unreachable: retry loop exited", stage="connect")
 
 
 def _content_of(resp: dict) -> str:
@@ -392,6 +410,13 @@ def _split_block(ir, b, op: dict) -> bool:
                  immutable=b.immutable)
     nb.provenance.setdefault("modified_by", []).append("llm:split_block")
     b.provenance.setdefault("modified_by", []).append("llm:split_block")
+    # CH-469：切块搬运链接（原实现尾块 links 恒空 = 静默丢链接）。
+    # 块级 links 无字符偏移信息，只能按序切：head 留前半，tail 取后半。
+    links = list(b.links or [])
+    if links:
+        half = (len(links) + 1) // 2
+        b.links = links[:half]
+        nb.links = links[half:]
     ir.blocks.insert(ir.blocks.index(b) + 1, nb)
     return True
 
@@ -413,6 +438,12 @@ def _merge_block(ir, b) -> bool:
     if b.id not in prev.flags["absorbed_ids"]:
         prev.flags["absorbed_ids"].append(b.id)
     prev.provenance.setdefault("modified_by", []).append("llm:merge_block")
+    # CH-469：被吸收块的链接不得静默丢失（S4 只渲染首条可渲染链接，
+    # 因此仅在存活块无链接时补一条，避免把已丢失计数伪装成「已保留」）。
+    if not (prev.links or []):
+        for lk in (b.links or []):
+            prev.links = [lk]
+            break
     ir.blocks.remove(b)
     return True
 

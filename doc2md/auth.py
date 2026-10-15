@@ -48,9 +48,15 @@ def issue(store: Store, role: str = "admin", label: str = "",
     return token
 
 
-def revoke(store: Store, token: str) -> None:
+def revoke(store: Store, token: str) -> bool:
+    """吊销 token。返回是否命中（CH-469，V-13）。
+
+    原实现返回 None 且不看影响行数：调用方对「吊销了个不存在的 token」与
+    「吊销成功」给出完全相同的响应，运维面上无法确认操作真的生效。
+    """
     with store.tx() as tx:
         tx.execute("UPDATE tokens SET revoked_at=? WHERE token=?", (now_iso(), token))
+        return tx.rowcount > 0
 
 
 def check(store: Store, token: str | None, action: str,

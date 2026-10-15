@@ -19,6 +19,7 @@ WIN_RESERVED = {"con", "prn", "aux", "nul"} \
     | {f"lpt{i}" for i in range(1, 10)}
 
 SAFE = re.compile(r"[^A-Za-z0-9\u4e00-\u9fff._\- ]")
+_WIN_ABS = re.compile(r"^[A-Za-z]:")            # 盘符绝对路径（zip 条目里的 Windows 绝对形态）
 DEFAULT_MAX_BYTES = 128
 
 
@@ -101,14 +102,26 @@ def assert_name_safe(name: str, maxlen: int = DEFAULT_MAX_BYTES) -> None:
 
 
 def assert_entry_safe(entry: str) -> None:
-    """zip 条目名断言（允许子目录，但禁止越界与绝对路径）。"""
-    norm = entry.replace("\\", "/")
-    if norm.startswith("/") or norm.startswith("~"):
+    """zip 条目名断言（允许子目录，但禁止越界与绝对路径）。
+
+    CH-469（O-5）：原实现第一步就把 `\\` 归一成 `/` 再判前缀，等于把 Windows
+    路径「洗白」——`C:\\Users\\x\\a.md` 归一后是 `C:/Users/x/a.md`（不以 `/` 开头），
+    `\\\\srv\\share\\a.md` 归一后是 `//srv/share/a.md`，再经「丢弃空段」的 split
+    连绝对性都看不见了；解压到目标目录的绝对/UNC 条目正是 zip 逃逸的第二条通道
+    （第一条是 `..`）。zip 规范里条目分隔符只能是 `/`，故反斜杠本身即判不安全。
+    """
+    if "\\" in entry:
+        raise UnsafeNameError(f"backslash in zip entry {entry!r}")
+    if entry.startswith("/") or entry.startswith("~"):
         raise UnsafeNameError(f"absolute zip entry {entry!r}")
-    parts = [p for p in norm.split("/") if p]
+    if _WIN_ABS.match(entry):
+        raise UnsafeNameError(f"drive-qualified zip entry {entry!r}")
+    parts = entry.split("/")                     # 不归一、不丢空段：`//x` 也是绝对形态
     if any(p == ".." for p in parts):
         raise UnsafeNameError(f"traversing zip entry {entry!r}")
     for p in parts:
+        if not p:
+            raise UnsafeNameError(f"empty segment in zip entry {entry!r}")
         stem = p.rsplit(".", 1)[0] if "." in p and not p.startswith(".") else p
         if stem.lower() in WIN_RESERVED:
             raise UnsafeNameError(f"reserved-name zip entry {entry!r}")

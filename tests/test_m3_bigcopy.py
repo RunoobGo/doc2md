@@ -69,12 +69,26 @@ def test_large_copy_via_poll_all(tmp_path):
 
 
 def test_golden_bigfile_is_optional_and_regenerable(golden_dir):
-    """资产纪律：bigfile.bin 不随分发包走时，测试面不得依赖它（缺失即自补）。"""
+    """资产纪律：bigfile.bin 不随分发包走时，测试面不得依赖它（缺失即自补）。
+
+    CH-469：原实现在缺失时 `pytest.skip`——本机套件永远少一项且无人察觉。
+    这里改为**恒真断言**：资产在则校验体积口径，不在则校验「仓库确实把大文件
+    声明为可再生的可选资产」（make_golden 能现补 + 没有用例把它当强制前置）。
+    两种宿主都给出结论，不存在跳过。
+    """
     p = golden_dir / "bigfile.bin"
-    if not p.exists():
-        pytest.skip("bigfile.bin 未随包分发（按纪律省略，可用 make_golden.py 现补）")
-    assert p.stat().st_size >= 100 * 1024 * 1024, "大文件样本体积异常"
-    assert "bigfile.bin" in {f.name for f in golden_dir.iterdir()}
+    if p.exists():
+        assert p.stat().st_size >= 100 * 1024 * 1024, "大文件样本体积异常"
+        assert "bigfile.bin" in {f.name for f in golden_dir.iterdir()}
+        return
+    gen = Path(__file__).resolve().parent / "make_golden.py"
+    assert gen.is_file(), f"{gen} 缺失：bigfile.bin 既不在包内也无法再生"
+    assert "bigfile" in gen.read_text(encoding="utf-8"), "make_golden 不再生产 bigfile.bin"
+    # 复用同一条纪律：点名 bigfile 的用例只允许在白名单内（即都是可选用法）
+    named = {f.name for f in Path(__file__).resolve().parent.glob("test_*.py")
+             if "bigfile" in f.read_text(encoding="utf-8")}
+    assert named <= {Path(__file__).name, "test_golden_repro.py"}, \
+        f"有用例把 bigfile.bin 当成强制前置：{sorted(named)}"
 
 
 def test_bigfile_is_not_a_mandatory_fixture():

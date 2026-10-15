@@ -17,7 +17,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from ..errors import E4221_GateReject
+from ..errors import Doc2mdError, E4221_GateReject
 from .s1_parse import RawPage
 
 _CJK = re.compile(r"[\u4e00-\u9fff]")
@@ -186,6 +186,15 @@ class GateCollector:
 
     def finish(self, reject_on_any: bool = True) -> GateResult:
         """纯函数判定 + 拒收即抛；与旧 `check()` 逐字段同口径。"""
+        # CH-469：构造声明的 total 大于实际喂入的页数时，原实现在
+        # self.metrics[i] 处裸 KeyError（判定面与报告面两处都可能命中）。
+        # 缺页属调用方契约违反，必须在判定前给出可判定的错误。
+        missing = sorted(self._need - set(self.metrics))
+        if missing:
+            raise Doc2mdError(
+                f"gate: {len(missing)} decision/report page(s) never fed "
+                f"(total={self.total}, first missing page {missing[0] + 1})",
+                detail={"missing_pages": [i + 1 for i in missing[:10]]})
         strict = self.mode != "auto"
         reasons: list[str] = []
         per_page = [(i,) + self._level(i, strict) for i in self.decision_idx]

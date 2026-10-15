@@ -47,6 +47,9 @@ queue_async = false                    # CH-449：true → POST /jobs 只入队�
 min_free_mb = 512                      # CH-450（NFR-6）：写产物/备份前的剩余空间下限；本项与 disk_safety_factor 同时为 0 才关闭门禁
 disk_safety_factor = 3                 # 需求 = 源大小 × 该系数
 stale_job_minutes = 30                 # CH-448：`doc2md work` 回收 running 超过该时长且崩溃遗骸（仅限队列来源）
+stale_check_seconds = 60               # CH-469：常驻 work 进程重跑遗骸回收的节流周期；0 = 只启动时回收一次
+batch_file_timeout_s = 0               # CH-469：批量进程池内单文件墙钟上限；0 = 不设限
+                                       # >0 时损坏 PDF 让 pdfplumber 挂死也只拖这一件（超时记 E5000 并取消）
 
 [watch]
 stable_seconds = 5                     # CH-411：大小 + mtime 连续 5s 无变化才入队
@@ -79,6 +82,8 @@ mode = "offline"                       # CH-456 / T2：offline = 确定性占位
                                        # server = 本地 llama-server（仅 127.0.0.1）
 fallback = true                        # server 不可用时回退 offline，保持主链路；false = 明确 E5041/503
 timeout_ms = 15000                     # 单次请求超时（连接 + 读取合计）
+retries = 2                            # CH-469：仅连接类瞬断（URLError/超时/OSError）重试次数，
+                                       # 0 = 不重试；HTTP 状态类错误不重试，用完即降级/报错
 model = ""                             # 模型名；空 = 取 [paths].vendor_models 下发现的 gguf 文件名
 bind = "127.0.0.1"                     # 修补助手只连回环（NFR-1）；T2 起生效
 port = 8080

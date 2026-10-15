@@ -36,6 +36,36 @@ class StabilityTracker:
     enqueued: dict[str, Stamp] = field(default_factory=dict)   # 路径 → 提交时戳（CH-464）
     registered: set[str] = field(default_factory=set)
     first_seen: dict[str, float] = field(default_factory=dict)
+    # CH-469（O-8）：连续 N 轮没在清单里见到 → 判定已消失，出登记簿
+    stale_rounds: int = 3
+    misses: dict[str, int] = field(default_factory=dict)
+    last_truncated: bool = False
+
+    def prune(self, seen: set[str]) -> list[str]:
+        """回收已删除文件的观察状态。
+
+        `observe()` 在 stat 失败时会清账，但**删除的文件根本不会再进本轮清单**
+        （poll_all 只遍历扫描结果），所以那条清理路径对它们永远不会触发：常驻
+        watch 跑几天，登记簿里全是消失文件的路径 + Stamp（内存与 fd 名册都在涨），
+        而且同名文件日后重新落盘会立刻命中 `enqueued` 里的旧 Stamp——尺寸和 mtime
+        恰好相近时被当成「已提交过」而漏转换。
+        """
+        dropped: list[str] = []
+        tracked = set(self.pending) | set(self.enqueued) | self.registered | set(self.first_seen)
+        for key in seen:
+            self.misses.pop(key, None)
+        for key in tracked - seen:
+            n = self.misses.get(key, 0) + 1
+            if n < max(1, self.stale_rounds):
+                self.misses[key] = n
+                continue
+            self.pending.pop(key, None)
+            self.enqueued.pop(key, None)
+            self.first_seen.pop(key, None)
+            self.registered.discard(key)
+            self.misses.pop(key, None)
+            dropped.append(key)
+        return dropped
 
     def observe(self, path: str | os.PathLike, now: float | None = None) -> bool:
         """返回 True 表示本次观察后达到稳定、可入队。
@@ -92,9 +122,17 @@ class StabilityTracker:
                  now: float | None = None) -> list[str]:
         """扫描目录并返回本轮稳定可入队的文件。"""
         lim = limits or WalkLimits()
-        files = guard_walk(root, lim).files
+        res = guard_walk(root, lim)
         ready: list[str] = []
-        for f in files:
-            if self.observe(f, now):
+        seen: set[str] = set()
+        for f in res.files:
+            key = str(Path(f))
+            seen.add(key)
+            if self.observe(key, now):
                 ready.append(f)
+        # 截断对常驻轮询是可容忍的（下一轮补齐），但必须留痕：调用方据此知道
+        # 「这一轮没扫完」，而不是把半结果当完整清单（O-10 的同一条纪律）。
+        self.last_truncated = res.truncated
+        if not res.truncated:
+            self.prune(seen)                    # 截断轮的清单不完整，不做删除判定
         return ready

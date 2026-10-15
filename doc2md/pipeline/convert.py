@@ -21,7 +21,7 @@ from ..security.netguard import offline_guard
 from . import s1_5_gate, s4_render
 from .s1_parse import read_any, sniff
 from .s3_structure import analyze
-from .sharding import mark_shard_edges, shard_plan, stitch_shards
+from .sharding import shard_plan, stitch_shards
 
 
 @dataclass
@@ -80,6 +80,10 @@ def _convert(path: str | Path, *, cfg: dict, mode: str | None,
                            reject_on_any=bool(
                                config.get(cfg, "s1_5.reject_on_any_bad_page", True)))
 
+    # CH-469：page_detail 是全页列表构建（320 页文档开销可观）。原实现在打包与
+    # Result 两处各调一次 gate.detail()（auto 模式 = 全页明细建两遍），此处收敛为一次。
+    gate_detail = gate.detail()
+
     max_pages = int(config.get(cfg, "s2.max_pages_per_shard", 300))
     overlap = int(config.get(cfg, "s2.shard_overlap_pages", 2))
     shard_mode = mode or str(config.get(cfg, "s2.mode", "auto"))
@@ -96,11 +100,9 @@ def _convert(path: str | Path, *, cfg: dict, mode: str | None,
         ir.source_name, ir.source_name_raw = safe, raw
         ir.format, ir.pages = fmt, len(sub)
         ir.extra_meta["shard"] = {"index": si, "start": lo, "end": hi}
-        if len(spans) > 1:
-            mark_shard_edges(ir, [(lo, hi)])
-            for b in ir.blocks:                       # 片首/片尾块为缝合候选
-                if b.page in (lo, hi - 1):
-                    b.flags["shard_edge"] = True
+        # CH-469：删除原 `mark_shard_edges(ir, [(lo, hi)])` 与片首/片尾逐页预打标。
+        # 前者收到单元素 spans 后首行即 return（永不生效）；后者被 stitch_shards
+        # 的「先清标记、再按片界重打」（CH-427）覆盖，两处皆死代码。
         shard_irs.append(ir)
 
     if len(shard_irs) > 1:
@@ -109,8 +111,12 @@ def _convert(path: str | Path, *, cfg: dict, mode: str | None,
                 shard_irs, max_pages,
                 dedupe=bool(config.get(cfg, "s2.dedupe_overlap", True)))
         except Exception as exc:                       # 方案 4.3 降级：异常即单片 + 报告标注
+            # CH-469：reason 只取异常类名，不带 str(exc)。pdfminer 的异常消息常夹带
+            # 页正文片段，而这里落进 IR extra_meta → 产物 front-matter 与报告，
+            # 违反 NFR-20（s1_parse._open_source 同口径）。
             ir, stats = _fallback_single(pages_all, shard_irs[0], doc_id, source_key,
-                                         safe, raw, fmt, total, reason=str(exc))
+                                         safe, raw, fmt, total,
+                                         reason=type(exc).__name__)
     else:
         ir = shard_irs[0]
         stats = {"shards": 1, "stitched": 0, "seams": 0, "edges": 0,
@@ -145,11 +151,11 @@ def _convert(path: str | Path, *, cfg: dict, mode: str | None,
         # NFR-6（CH-450）：写产物**前**按源大小 × 安全系数估体积，剩余空间不足即 413/E4131，
         # 而不是写半截 zip 后再在 ENOSPC 上崩——低配 Win11 系统盘最常见的踩点。
         assert_free_space(out_dir, p.stat().st_size, cfg=cfg, what=f"{doc_id}.zip")
-        gate_detail = (gate.detail()
-                       if bool(config.get(cfg, "s1_5.page_detail_in_report", True)) else None)
-        zip_path = package(ir, md, meta, Path(out_dir), cfg, gate=gate_detail)
+        zip_path = package(ir, md, meta, Path(out_dir), cfg,
+                           gate=gate_detail if bool(
+                               config.get(cfg, "s1_5.page_detail_in_report", True)) else None)
     return Result(doc_id=doc_id, source_key=source_key, source_name=safe, markdown=md,
-                  ir=ir, meta=meta, metrics=metrics, gate=gate.detail(),
+                  ir=ir, meta=meta, metrics=metrics, gate=gate_detail,
                   applied_ops=llm["applied_ops"], rejected_ops=llm["rejected"],
                   zip_path=zip_path)
 

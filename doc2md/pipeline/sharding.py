@@ -52,8 +52,30 @@ def _owner(page: int, spans: list[tuple[int, int]]) -> int:
     return -1
 
 
+def _cjk(ch: str) -> bool:
+    return bool(ch) and ord(ch[0]) > 0x2E80
+
+
+def _merge_text(a: Block, b: Block) -> str:
+    """CH-469：缝合时把被吸收块 a 的正文并入 b（保留换行，供标题续接用）。"""
+    ta, tb = (a.text or "").rstrip(), (b.text or "").lstrip()
+    if not ta:
+        return tb
+    if not tb:
+        return ta
+    if a.type == "heading" or b.type == "heading":
+        return f"{ta}\n{tb}"
+    joiner = "" if (_cjk(ta[-1]) or _cjk(tb[0])) else " "
+    return ta + joiner + tb
+
+
 def _continuation(a: Block, b: Block) -> bool:
-    """判定相邻分片边界块 a→b 是否可续接：R-04 编号续接 或 字体/字号一致且 a 非句末。"""
+    """判定相邻分片边界块 a→b 是否可续接：R-04 编号续接 或 字体/字号一致且 a 非句末。
+
+    CH-469：正文续接分支不得命中标题块——标题是离散结构节点，"3.1 前置条件"
+    无句末标点 + 同字号即被误判成"a 未说完"，导致前一片标题被吸收。
+    编号续接分支（R-04）仍按原口径工作。
+    """
     ta = (a.text or "").rstrip()
     tb = (b.text or "").lstrip()
     if a.type == "table" or b.type == "table":
@@ -64,6 +86,8 @@ def _continuation(a: Block, b: Block) -> bool:
         if ka[:-1] == kb[:-1] and kb[-1] == ka[-1] + 1:
             return True
     if not ta:
+        return False
+    if a.type == "heading" or b.type == "heading":
         return False
     ends = ta.endswith(_SENT_END)
     fa, fb = a.font or {}, b.font or {}
@@ -83,6 +107,13 @@ def overlap_dedupe(blocks: list[Block], spans: list[tuple[int, int]],
     """CH-423：删除片间重叠区造成的重复块。
 
     只在片界前后窗口内比对指纹；重复时保留前一份（文档顺序第一出现的即正确位置）。
+    CH-469 补「缝合尾缀」判定：S3 的段落缓冲跨页存续后，一个段落归属**起始页**，
+    而该片起始页早于重叠窗口——后一片从窗口页开始解析时，只能产出该段落的
+    **后半截**，文本与整块不相等，指纹因而漏掉它，重叠内容在产物里出现两份。
+    故在指纹相等之外再加两条：窗口内某块若与更早一片某块同类型同字号、且正文
+    是后者的**真后缀**（后一片只拿到跨片段落的尾缀），判为伪影丢弃；若某已保留的
+    窗口块正文是它的**真前缀**（前一片在片界处被截断，后一片给出完整版），
+    用完整版替换截断版。两条都只在「最近 64 个已保留块」这一常量比对面内查找。
     """
     if len(spans) < 2:
         return blocks
@@ -94,14 +125,77 @@ def overlap_dedupe(blocks: list[Block], spans: list[tuple[int, int]],
         return blocks
     seen: set[str] = set()
     out: list[Block] = []
+    tail: list[Block] = []                        # 最近保留的若干块（尾缀/前缀比对面）
     for b in blocks:
-        fp = fingerprint(b)
-        if b.page in boundaries and fp in seen:
-            b.flags.setdefault("dropped_dup_of", fp)
-            continue
-        seen.add(fp)
+        # CH-469：指纹只在片界窗口内计算——seen 仅被窗口内的块填充，
+        # 窗口外块不可能命中，原先对全文档每块 sha256 是纯 CPU 浪费
+        # （320 页样本 ≈ 每片一次全量重扫）。指纹含页号，相等必同页，
+        # 同页即同进同出窗口，故收敛比对面不改变判定结果。
+        in_window = b.page in boundaries
+        if in_window:
+            fp = fingerprint(b)
+            if fp in seen:
+                b.flags.setdefault("dropped_dup_of", fp)
+                continue
+            src = _seam_suffix(tail, b)
+            if src is not None:
+                b.flags.setdefault("dropped_dup_of", fingerprint(src))
+                continue
+            cut = _seam_truncated(tail, b, boundaries)
+            if cut is not None and _replace_recent(out, cut):
+                seen.discard(fingerprint(cut))
+                cut.flags.setdefault("dropped_dup_of", fp)
+            seen.add(fp)
         out.append(b)
+        tail.append(b)
+        if len(tail) > 64:
+            del tail[:-64]
     return out
+
+
+def _same_face(a: Block, b: Block) -> bool:
+    """同类型同字号（缝合比对的前提，与 `_continuation` 的字体口径一致）。"""
+    if a.type != b.type:
+        return False
+    fa, fb = a.font or {}, b.font or {}
+    return abs(float(fa.get("size", 0) or 0) - float(fb.get("size", 0) or 0)) < 0.5
+
+
+def _seam_suffix(tail: list[Block], b: Block) -> Block | None:
+    """在 tail 里找「b 是其真后缀」的前一片块，找不到返回 None。"""
+    tb = (b.text or "").strip()
+    if not tb:
+        return None
+    for a in reversed(tail):
+        if a.page >= b.page or not _same_face(a, b):
+            continue
+        ta = (a.text or "").strip()
+        if len(ta) > len(tb) and ta.endswith(tb):
+            return a
+    return None
+
+
+def _seam_truncated(tail: list[Block], b: Block, boundaries: set[int]) -> Block | None:
+    """在 tail 里找「b 的正文以它为真前缀」的同页窗口块（前一片的截断版），找不到返回 None。"""
+    tb = (b.text or "").strip()
+    if not tb or b.page not in boundaries:
+        return None
+    for a in reversed(tail):
+        if a.page != b.page or not _same_face(a, b):
+            continue
+        ta = (a.text or "").strip()
+        if len(tb) > len(ta) and tb.startswith(ta):
+            return a
+    return None
+
+
+def _replace_recent(out: list[Block], old: Block) -> bool:
+    """从 out 末尾 64 项里按身份摘掉 old（比对面对应的常量范围）。"""
+    for i in range(len(out) - 1, max(-1, len(out) - 65), -1):
+        if out[i] is old:
+            del out[i]
+            return True
+    return False
 
 
 def _renumber(blocks: list[Block]) -> None:
@@ -154,6 +248,9 @@ def stitch_shards(shard_irs: list[IR], max_pages: int = 300,
                 ids = nxt.flags.setdefault("absorbed_ids", [])
                 if b.id not in ids:
                     ids.append(b.id)
+                # CH-469：吸收必须搬运正文（原实现只留痕 absorbed_ids，
+                # 被吸收块文本直接消失 = 缝合即丢内容）
+                nxt.text = _merge_text(b, nxt)
                 nxt.provenance.setdefault("modified_by", []).append("s4:shard_stitch")
                 stitched += 1
                 i += 1
@@ -184,16 +281,3 @@ def stitch_shards(shard_irs: list[IR], max_pages: int = 300,
              "blocks_raw": n_before, "blocks_after_dedupe": len(blocks),
              "blocks_after": len(merged)}
     return out, stats
-
-
-def mark_shard_edges(ir: IR, spans: list[tuple[int, int]]) -> None:
-    """S4 收尾：落在片边界页（首块/末块语义）的块打 shard_edge。"""
-    if len(spans) < 2:
-        return
-    boundary_pages: set[int] = set()
-    for j in range(1, len(spans)):
-        lo, hi = spans[j]
-        boundary_pages |= {lo, lo + 1, hi - 1}
-    for b in ir.blocks:
-        if b.page in boundary_pages:
-            b.flags["shard_edge"] = True

@@ -75,7 +75,15 @@ def _rd_value(f, vtype: int):
 
 
 def read_metadata(path: str | Path, max_kv: int = 4096) -> Gguf:
-    """只读 header + KV，不读 tensor info —— 大模型文件也能秒级完成。"""
+    """只读 header + KV，不读 tensor info —— 大模型文件也能秒级完成。
+
+    CH-469（O-9）：`n_kv > max_kv` 必须报错。原实现 `range(min(n_kv, max_kv))`
+    静默截断：KV 是按序存的，截断等于**丢掉后面的键**，而 vocab 相关的键
+    （`tokenizer.ggml.tokens` / `.scores` / `.token_type`）完全可能在被丢弃的那段里
+    → manifest 的 `n_vocab` 与实际 GGUF 不一致、chunk 预算口径整体错位，却全程
+    没有一个字说「没读完」。截断保护本身是有意的（恶意/畸形文件的 KV 数可以极大），
+    所以超限是拒绝，不是继续。
+    """
     p = Path(path)
     with p.open("rb") as f:
         if f.read(4) != GGUF_MAGIC:
@@ -85,8 +93,10 @@ def read_metadata(path: str | Path, max_kv: int = 4096) -> Gguf:
             raise GgufError(f"unsupported GGUF version {version}")
         (n_tensors,) = struct.unpack("<Q", f.read(8))
         (n_kv,) = struct.unpack("<Q", f.read(8))
+        if n_kv > max_kv:
+            raise GgufError(f"{p.name} declares {n_kv} KV pairs, limit is {max_kv}")
         kv: dict = {}
-        for _ in range(min(n_kv, max_kv)):
+        for _ in range(n_kv):
             key = _rd_string(f)
             (vtype,) = struct.unpack("<I", f.read(4))
             kv[key] = _rd_value(f, vtype)
@@ -186,16 +196,28 @@ class Tokenizer:
                               key=len, reverse=True)
         self._maxlen = max((len(t) for t in self._by_len), default=1)
         self._set = set(self._by_len)
+        # CH-469（O-9）：只试「词表里真实存在」的行长。原实现每个位置从 maxlen
+        # 一路下探到 1 —— 词表里有一个 30 字符的 token，就要为每个字符做最多 30 次
+        # 切片 + 30 次哈希查找，而绝大多数位置在 1~4 字符就已命中。chunks 的 token
+        # 预算对全文逐块调用 count()，是转换期纯 Python 热点之一；候选长度集合
+        # （通常十几档）把探测次数从 maxlen 降到 |distinct lengths|，匹配结果不变。
+        self._lens = tuple(sorted({len(t) for t in self._by_len}, reverse=True))
 
     def count(self, text: str) -> int:
         if not text:
             return 0
         s = unicodedata.normalize("NFC", text)
-        n, i = 0, 0
-        while i < len(s):
+        words = self._set
+        lens = self._lens
+        n = i = 0
+        ln = len(s)
+        while i < ln:
             hit = 0
-            for L in range(min(self._maxlen, len(s) - i), 0, -1):
-                if s[i:i + L] in self._set:
+            room = ln - i
+            for L in lens:
+                if L > room:
+                    continue
+                if s[i:i + L] in words:
                     hit = L
                     break
             n += 1

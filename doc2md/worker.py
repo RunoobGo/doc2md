@@ -75,6 +75,9 @@ def reclaim_stale(store: Store, cfg: dict) -> int:
     """遗骸回收（CH-448）：`doc2md work` 被 OOM killer 干掉是低配机常态，
     其认领的 running 作业若超过 [perf].stale_job_minutes 未更新，重新置 queued。
     只动带消费路径的 running 行（同步 serve 路径写的 running 不带 path 语义，不回收）。
+
+    CH-469：常驻 `run_work` 按 [perf].stale_check_seconds 周期性重跑本函数，
+    不再只在进程启动时跑一次。
     """
     minutes = int(config.get(cfg, "perf.stale_job_minutes", 30) or 0)
     if minutes <= 0:
@@ -130,7 +133,20 @@ def drain_once(store: Store, cfg: dict, root, *, workers: int | None = None,
     for res in results:
         for job in by_path.get(res["file"], []):
             if res["status"] == "ok":
-                drift = _finish_ok(store, sched, job, res, writer=writer)
+                ir = _read_ir(res["zip"])
+                if ir is None:
+                    # CH-469：产物 status=ok 但 zip 里读不到 ir.json（损坏 / 缺项 /
+                    # IR 版本不符）时，原实现跳过入库却仍标 done + 发 job_done——
+                    # 队列说「完成」、`GET /docs/<id>` 却 404，正文只剩一个不可寻址的
+                    # zip，既骗过监控又断掉重试线索。改为明确失败（可安全重投）。
+                    sched.mark(job["job_id"], "failed", "E5031",
+                               {"reason": "artifact_ir_unreadable",
+                                "zip": str(res.get("zip", ""))[-64:]})
+                    rep.failed += 1
+                    rep.notes.append(f"{job['job_id']}: ir unreadable")
+                    _event(store, job, res, "job_failed", writer)
+                    continue
+                drift = _finish_ok(store, sched, job, res, ir, writer=writer)
                 rep.done += 1
                 rep.drift += 1 if drift else 0
             elif res["status"] == "rejected":
@@ -146,15 +162,18 @@ def drain_once(store: Store, cfg: dict, root, *, workers: int | None = None,
     return rep
 
 
-def _finish_ok(store: Store, sched: Scheduler, job: dict, res: dict,
+def _finish_ok(store: Store, sched: Scheduler, job: dict, res: dict, ir,
                writer=None) -> bool:
     """入库 + 状态推进。返回是否发生内容漂移（入队后源文件被改写）。
 
-    CH-459（A-4）：detail 更新 / save_ir / mark(done) / 事件四写原为四次独立
+    CH-459（A-4）：detail 更新 / save_ir / mark(done) / 事件原为四次独立
     提交（WAL + synchronous=FULL 下每次 fsync）——每任务固定开销的主因，
     现合并为单事务。同笔修掉一个静默缺陷：原实现先写 detail_json 再
     `sched.mark(done)`，而 mark 用 `{}` 覆盖 detail_json——明细从来没活过
     （本次把 detail 与终态写进同一笔 UPDATE）。
+
+    `ir` 由调用方（drain_once）回读后传入：CH-469 起「读不到 IR」必须在
+    **决定终态之前**判定，否则会把拿不到正文的作业标成 done。
     """
     from .api import _emit
     from .ir import hash_of_path
@@ -167,10 +186,8 @@ def _finish_ok(store: Store, sched: Scheduler, job: dict, res: dict,
     if drift:
         # 产物按消费时内容入库；任务留痕，不偷偷改 task.doc_id 主键语义
         detail["content_drift"] = {"enqueued": job["doc_id"], "consumed": res["doc_id"]}
-    ir = _read_ir(res["zip"])
     with store.tx() as tx:
-        if ir is not None:
-            save_ir(store, ir, tx=tx)
+        save_ir(store, ir, tx=tx)
         tx.execute("UPDATE tasks SET status='done', error_code='', detail_json=?,"
                    " finished_at=? WHERE job_id=?",
                    (json.dumps(detail, ensure_ascii=False), now_iso(), job["job_id"]))
@@ -181,7 +198,12 @@ def _finish_ok(store: Store, sched: Scheduler, job: dict, res: dict,
 
 
 def _read_ir(zip_path: str):
-    """从产物 zip 回读 IR（子进程不回传对象；父进程以产物为准重建入库内容）。"""
+    """从产物 zip 回读 IR（子进程不回传对象；父进程以产物为准重建入库内容）。
+
+    读不到即返回 None——由调用方决定终态（CH-469：不得据此标 done）。
+    `BadZipFile` 不是 `OSError` 子类、`IR.from_dict` 的字段类型问题抛 `TypeError`，
+    两者都要收进来，否则一个坏产物会让整个消费批次崩掉。
+    """
     import zipfile
 
     from .ir import IR
@@ -191,7 +213,7 @@ def _read_ir(zip_path: str):
             if not name:
                 return None
             return IR.from_dict(json.loads(z.read(name).decode("utf-8")))
-    except (OSError, ValueError, KeyError):
+    except (OSError, ValueError, KeyError, TypeError, zipfile.BadZipFile):
         return None
 
 
@@ -237,7 +259,7 @@ def enqueue(sched: Scheduler, path: str | Path, *, mode: str | None = None,
 
 def run_work(cfg: dict, root, *, once: bool = False, max_jobs: int = 0,
              workers: int | None = None, idle_seconds: float = 5.0,
-             on_report=None) -> WorkReport:
+             reclaim_seconds: float | None = None, on_report=None) -> WorkReport:
     """消费循环：once=True 排空当前队列即退出；max_jobs>0 达量退出；否则轮询常驻。"""
     from .ops.logging import RotatingJsonlWriter
     store = Store(root / "state.sqlite")
@@ -245,6 +267,11 @@ def run_work(cfg: dict, root, *, once: bool = False, max_jobs: int = 0,
     reclaimed = reclaim_stale(store, cfg)
     if reclaimed:
         total.notes.append(f"reclaimed_stale={reclaimed}")
+    if reclaim_seconds is None:
+        try:
+            reclaim_seconds = float(config.get(cfg, "perf.stale_check_seconds", 60) or 0)
+        except (TypeError, ValueError):
+            reclaim_seconds = 60.0
     logs = config.path_setting(cfg, "paths.logs", root, str(root / "logs"))
     writer = RotatingJsonlWriter(
         logs, stem="work",
@@ -255,8 +282,21 @@ def run_work(cfg: dict, root, *, once: bool = False, max_jobs: int = 0,
                   "reclaimed_stale": reclaimed,
                   "workers": workers if workers is not None else default_workers(cfg)})
     writer.flush()
+    last_reclaim = time.monotonic()
     try:
         while True:
+            # CH-469：遗骸回收原只在进程启动时跑一次。常驻 work 进程跑几天后，
+            # 期间被 OOM 干掉的**同行**进程留下的 running 行永不回收——那正是
+            # CH-448 要防的场景（低配机 OOM 是常态），队列看似有活却永不动。
+            # 节流重跑：`reclaim_seconds<=0` 回到「只启动时一次」的旧行为。
+            if not once and reclaim_seconds > 0 and \
+                    time.monotonic() - last_reclaim >= reclaim_seconds:
+                last_reclaim = time.monotonic()
+                n = reclaim_stale(store, cfg)
+                if n:
+                    total.notes.append(f"reclaimed_stale={n}")
+                    writer.write({"code": "WORK_RECLAIM", "count": n})
+                    writer.flush()
             rep = drain_once(store, cfg, root, workers=workers, writer=writer)
             for k in ("drained", "done", "failed", "rejected", "drift"):
                 setattr(total, k, getattr(total, k) + getattr(rep, k))

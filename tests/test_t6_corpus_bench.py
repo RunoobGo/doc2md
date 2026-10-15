@@ -250,11 +250,51 @@ class TestTables:
 
 
 class TestSamplerPrimitives:
-    def test_proc_tree_and_rss(self):
+    def test_default_backend_samples_tree(self):
+        """CH-469：默认后端断言改为平台无关——写死 "proc" 等于把「本机是 Linux」
+        编进断言，macOS 上必红（实测）。契约是：POSIX 本机必然有可用后端，
+        且能采到自身 pid 与正的 RSS。
+        """
         pids, rss, backend = bench.sample_tree(os.getpid())
-        assert backend == "proc"                     # Linux 沙箱上默认后端
+        assert backend in ("proc", "ps", "psutil")       # POSIX 探测结果因宿主而异
         assert os.getpid() in pids
         assert rss.get(os.getpid(), 0) > 0
+
+    def test_proc_branch_reads_a_fake_proc_tree(self, tmp_path):
+        """proc 分支在任意宿主上确定测试：CH-469 把 `/proc` 根做成可注入参数。
+
+        原来的 `pytest.skip("host has no /proc")` 让 macOS 上这条分支零覆盖，
+        而它恰恰是 Linux 长跑用的采样路径——跳过等于把「本机不是 Linux」当成
+        「不必验证」。现在用假 proc 树断言：后代遍历（含孙进程）、VmRSS 解析、
+        非数字目录忽略、status 缺失的进程跳过而不是整棵崩。
+        """
+        root, child, grand = os.getpid(), os.getpid() + 1, os.getpid() + 2
+        for pid, ppid, rss in ((root, 1, None), (child, root, 2048), (grand, child, 4096)):
+            d = tmp_path / str(pid)
+            d.mkdir()
+            lines = [f"Name:\tp{pid}", f"PPid:\t{ppid}"]
+            if rss is not None:
+                lines.append(f"VmRSS:\t{rss} kB")
+            (d / "status").write_text("\n".join(lines) + "\n", encoding="ascii")
+        (tmp_path / "self").mkdir()                    # 非数字条目：忽略
+        vanished = tmp_path / str(grand + 1)           # 采样瞬间退出的进程：跳过
+        vanished.mkdir()                               # 有 pid 目录、无 status 可读
+
+        pids, rss = bench._tree_proc(root, proc_root=str(tmp_path))
+        assert sorted(pids) == sorted([root, child, grand])
+        assert rss == {child: 2048, grand: 4096}       # root 无 VmRSS 行 → 不入表
+
+    def test_proc_backend_only_when_proc_exists(self):
+        """真实 /proc 存在时（Linux CI）确认探测与采样口径一致；非 Linux 宿主
+        由 `test_proc_branch_reads_a_fake_proc_tree` 覆盖同一分支，不产生跳过。
+        """
+        if not os.path.isdir("/proc"):
+            assert bench._probe_backend() == "ps"       # macOS：POSIX 无 proc → ps
+        else:
+            pids, rss, backend = bench.sample_tree(os.getpid())
+            assert backend == "proc"
+            assert os.getpid() in pids
+            assert rss.get(os.getpid(), 0) > 0
 
     def test_ps_backend_matches_proc_tree(self, monkeypatch):
         """macOS 分支在 Linux 上实测：GNU procps 与 BSD ps 的
@@ -271,7 +311,11 @@ class TestSamplerPrimitives:
         assert (backend, pids, rss) == ("none", [os.getpid()], {})
 
     def test_backend_override_wins_over_probe(self, monkeypatch):
-        """/proc 存在时默认 proc，但环境变量强制覆盖优先（排障口径）。"""
+        """环境变量覆盖优先于探测（排障口径）。CH-469：原断言写死「无 /proc 时
+        默认 proc」，在 macOS 上探测本就返回 ps，等于断言了宿主的文件系统布局。
+        改为伪造探测值为 proc，再验覆盖仍是唯一权威——契约与宿主无关。
+        """
+        monkeypatch.setattr(bench, "_probe_backend", lambda: "proc")
         monkeypatch.setenv("T6_SAMPLER", "ps")
         assert bench._tree_backend() == "ps"
         monkeypatch.delenv("T6_SAMPLER")
@@ -312,7 +356,8 @@ class TestRunDrainEndToEnd:
         # 下界 = 采样至少看到一帧成规模排队（enqueue 全部完成后才 drain）。
         assert 1 <= r["backlog_peak"] <= 4   # 下界 1：只断言采样器接线正常（拍到峰值帧是时序运气，CH-464）
         assert r["peak_tree_mb"] > 0
-        assert r["sampler"] == "proc" and r["rss_available"] is True
+        # CH-469：sampler 后端断言平台无关（写死 proc 在 macOS 必红）
+        assert r["sampler"] in ("proc", "ps", "psutil") and r["rss_available"] is True
         assert r["queue_series"] and r["rss_series"]
         # CH-464：小语料 drain 全程 <0.5s，0.1s 采样可能没有落在半排空区间——
         # half_drain_s 允许 None（排队曲线 queue_series 才是硬口径）

@@ -125,6 +125,39 @@ def test_batch_reports_gate_reject_per_file(tmp_path, cfg):
     assert by["bad.pdf"]["code"] in ("E4221", "E4131", "E4151", "E5000", "E5031")
 
 
+def _hanging_convert(path, cfg, mode, out):
+    """模块级 worker：进程池按引用 pickle，闭包传不过去。模拟损坏 PDF 让解析栈永挂。"""
+    import time
+    time.sleep(6)
+    return {"file": str(path), "status": "ok"}
+
+
+def test_batch_file_timeout_accounts_hung_files(tmp_path, cfg, monkeypatch):
+    """CH-469：`perf.batch_file_timeout_s` 把「一件挂死拖垮整批」改成逐件超时记账。
+
+    口径是**空窗**：连续 N 秒没有任何文件完成 → 仍在排队的件全部记 E5000 超时。
+    （原写法 `fut.result(timeout=N)` 装在 as_completed 循环里永不触发——件是先完成
+    才轮得到读结果，挂死时依旧卡在「等下一件完成」。）默认 0 = 不设限：千页级文档
+    的合法耗时可能很长，不能被上限误杀，所以这里显式给 1s。
+    """
+    import time
+
+    from doc2md.pipeline import batch
+    monkeypatch.setattr(batch, "_convert_one", _hanging_convert)
+    c = copy.deepcopy(cfg)
+    c["perf"]["batch_file_timeout_s"] = 1
+    files = _paths()[:2]
+    t0 = time.monotonic()
+    res = batch.run_batch(files, cfg=c, out_dir=tmp_path / "out", workers=2)
+    dt = time.monotonic() - t0
+    assert len(res) == 2
+    assert {Path(r["file"]).name for r in res} == {f.name for f in files}
+    for r in res:
+        assert r["status"] == "error" and r["code"] == "E5000"
+        assert "timeout after 1s" in r["message"]        # 只带时长，不带任何正文（NFR-20）
+    assert dt < 4, f"空窗未生效，批次仍在等挂死的件：{dt:.1f}s"
+
+
 def test_cli_convert_dir_uses_pool(tmp_path, cfg, monkeypatch):
     """CLI 目录投递走批量路径，产物与配置根一致（--workers 1 可退回串行）。"""
     from doc2md import cli

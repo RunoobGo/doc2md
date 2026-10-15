@@ -81,6 +81,9 @@
 </div>
 
 <div id="blocks"></div>
+<div class="bar" id="morebar" hidden>
+  <button id="more">加载更多块</button><span id="moreinfo" class="meta"></span>
+</div>
 <div id="log"></div>
 
 <script>
@@ -164,18 +167,21 @@ function renderQueue(tasks) {
     const reason = String(det.reason || "").slice(0, 120);
     const file = String(t.source_path || "").split(/[\\/]/).pop() || "-";
     const { wait, dur } = qStageCell(t, now);
-    const tr = document.createElement("tr");
-    tr.className = "st-" + t.status;
+    // CH-469（V-11）：单元格结构在 JS 侧判定（原来拼出 HTML 串再用
+    // `docCell !== "-"` 反推，doc_id 转义后恰为 "-" 时结构就错了），
+    // 所有插值一律 esc()——job_id / doc_id / source_path / error_code / reason
+    // 都是源文档与队列输入派生的字符串。
     const docCell = (t.status === "done" && t.doc_id)
       ? `<button class="link" data-doc="${esc(t.doc_id)}">${esc(t.doc_id)}</button>`
       : esc(t.doc_id || "-");
     const blocks = (t.status === "done" && typeof det.blocks === "number")
       ? ` · ${det.blocks} 块` : "";
+    const tr = document.createElement("tr");
+    tr.className = "st-" + t.status;
     tr.innerHTML =
-      `<td class="job" title="${esc(t.job_id)}">${esc(t.job_id.slice(0, 8))}` +
-      (docCell !== "-" ? `<br>${docCell}</td>` : "</td>") +
+      `<td class="job" title="${esc(t.job_id)}">${esc((t.job_id || "").slice(0, 8))}<br>${docCell}</td>` +
       `<td title="${esc(t.source_path || "")}">${esc(file)}</td>` +
-      `<td><span class="st c-${t.status}">${QSTAGES[t.status] || esc(t.status)}</span>${blocks}</td>` +
+      `<td><span class="st c-${esc(t.status)}">${QSTAGES[t.status] || esc(t.status)}</span>${blocks}</td>` +
       `<td>${esc(t.mode || "standard")}</td>` +
       `<td class="num">${wait}</td><td class="num">${dur}</td>` +
       `<td class="job">${esc(t.error_code || "")}</td>` +
@@ -214,38 +220,84 @@ function qAutoToggle() {
   if (!$("qauto").checked && QSTATE.timer) { clearInterval(QSTATE.timer); QSTATE.timer = null; }
 }
 
+const PAGE = 200;                  // 首屏块窗口（CH-469 / V-5：数千块文档不再一次拉全量）
+const VIEW = { doc: "", next: 0, total: 0 };
+
+const fetchWindow = (d, offset, limit = PAGE) =>
+  api(`/docs/${encodeURIComponent(d)}?offset=${offset}&limit=${limit}`);
+
 async function load() {
   const d = $("doc").value.trim();
   if (!d) return log("先填 doc_id", true);
-  const j = await api(`/docs/${d}`);
+  let j;
+  try { j = await fetchWindow(d, 0); }
+  catch (e) { return log(`载入失败：${e.message}`, true); }
+  VIEW.doc = d;
+  VIEW.total = typeof j.blocks_total === "number" ? j.blocks_total : j.blocks.length;
+  VIEW.next = j.blocks.length;
   locked.clear();
   $("blocks").innerHTML = "";
-  j.blocks.forEach(b => {
+  renderBlocks(j.blocks);
+  showMore();
+  log(`载入 ${VIEW.next}/${VIEW.total} 块（sharded=${!!j.sharded}，pages=${j.pages}）`);
+}
+
+async function loadMore() {
+  if (VIEW.next >= VIEW.total) return;
+  let j;
+  try { j = await fetchWindow(VIEW.doc, VIEW.next); }
+  catch (e) { return log(`追加载入失败：${e.message}`, true); }
+  if (!j.blocks.length) { VIEW.next = VIEW.total; return showMore(); }
+  renderBlocks(j.blocks);
+  VIEW.next += j.blocks.length;
+  showMore();
+  log(`已加载 ${VIEW.next}/${VIEW.total} 块`);
+}
+
+function showMore() {
+  const left = VIEW.total - VIEW.next;
+  $("morebar").hidden = left <= 0;
+  $("moreinfo").textContent = left > 0 ? `还有 ${left} 块未载入` : "";
+}
+
+function renderBlocks(list) {
+  list.forEach(b => {
     locked.set(b.id, b.revision);
     const div = document.createElement("div");
     div.className = "blk" + (b.flags && b.flags.shard_edge ? " edge" : "");
     div.dataset.bid = b.id;
+    // CH-469（V-11）：块 id / 类型 / 吸收标记全部来自源文档（docx 的 w:id、PDF 的
+    // 结构推断），是**不可信输入**；原实现把它们裸插进 innerHTML，构造文档即可在
+    // 审阅页执行脚本。现在所有插值一律过 esc()（连 textarea 里的正文同口径）。
+    const absorbed = (b.flags && Array.isArray(b.flags.absorbed_ids))
+      ? b.flags.absorbed_ids.map(esc).join(",") : "";
     div.innerHTML =
-      `<div class="meta"><b>${b.id}</b><span>${b.type}${b.level ? " h" + b.level : ""}</span>` +
-      `<span>p.${b.page ?? "-"}</span><span>rev ${b.revision}</span>` +
-      (b.flags && b.flags.absorbed_ids && b.flags.absorbed_ids.length
-        ? `<span title="缝合吸收">吸收 ${b.flags.absorbed_ids.join(",")}</span>` : "") +
+      `<div class="meta"><b>${esc(b.id)}</b><span>${esc(b.type)}` +
+      (b.level ? " h" + esc(String(b.level)) : "") + "</span>" +
+      `<span>p.${b.page == null ? "-" : esc(String(b.page))}</span>` +
+      `<span>rev ${esc(String(b.revision))}</span>` +
+      (absorbed ? `<span title="缝合吸收">吸收 ${absorbed}</span>` : "") +
       (b.immutable ? "<span>immutable</span>" : "") + "</div>" +
       `<textarea ${b.immutable ? "disabled" : ""}>${esc(b.text || "")}</textarea>` +
       `<div class="meta"><button data-act="save">保存</button>` +
       `<button data-act="refresh">重取</button><button data-act="audit">审计</button></div>`;
     $("blocks").appendChild(div);
   });
-  log(`载入 ${j.blocks.length} 块（sharded=${!!j.sharded}，pages=${j.pages}）`);
 }
 
-function esc(s) { return (s || "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+function esc(s) { return String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+
+// CH-469（V-11）：块 id 不再拼进 CSS 属性选择器（含引号的 id 会改写选择器）。
+// 改为按 dataset.bid 精确比对——赋值不经解析，天然安全。
+const blkEl = (bid) => [...document.querySelectorAll(".blk")].find(el => el.dataset.bid === bid);
 
 async function save(bid) {
-  const ta = document.querySelector(`[data-bid="${bid}"] textarea`);
+  const el = blkEl(bid);
+  if (!el) return log(`${bid} 不在已加载窗口内`, true);
+  const ta = el.querySelector("textarea");
   const base = locked.get(bid);                  // 打开时锁定的 revision（FR-203）
   try {
-    const r = await api(`/docs/${$("doc").value.trim()}/blocks/${bid}`, {
+    const r = await api(`/docs/${encodeURIComponent(VIEW.doc)}/blocks/${encodeURIComponent(bid)}`, {
       method: "PATCH",
       body: JSON.stringify({ text: ta.value, base_revision: base })
     });
@@ -262,21 +314,29 @@ async function save(bid) {
 }
 
 async function refetch(bid, rev) {
-  const d = $("doc").value.trim();
-  const j = await api(`/docs/${d}`);
+  const el = blkEl(bid);
+  if (!el) return;
+  // CH-469（V-5）：渲染顺序即服务端 rowid 顺序，DOM 下标就是该块的 offset →
+  // 只取它一行（原实现为了一块把整篇文档再拉一遍）。
+  const idx = [...document.querySelectorAll(".blk")].indexOf(el);
+  let j;
+  try { j = await fetchWindow(VIEW.doc, idx, 1); }
+  catch (e) { return log(`${bid} 重取失败：${e.message}`, true); }
   const b = j.blocks.find(x => x.id === bid);
   if (!b) return;
   if (rev === undefined) rev = b.revision;
   locked.set(bid, rev);
-  document.querySelector(`[data-bid="${bid}"] textarea`).value = b.text || "";
+  el.querySelector("textarea").value = b.text || "";
   log(`${bid} 已重取（本地锁定 rev=${rev}）`);
 }
 
 async function showAudit(bid) {
-  const j = await api(`/docs/${$("doc").value.trim()}/audit?block_id=${encodeURIComponent(bid)}`);
-  $("log").textContent = j.audit.map(a =>
-    `${a.ts} ${a.actor} rev ${a.from_revision}→${a.to_revision} reason=${a.reason || "-"}` +
-    `\n  before: ${(a.before || "").slice(0, 80)}`).join("\n") + "\n" + $("log").textContent;
+  const j = await api(`/docs/${encodeURIComponent(VIEW.doc)}/audit?block_id=${encodeURIComponent(bid)}&limit=20`);
+  $("log").textContent =
+    j.audit.map(a =>
+      `${a.ts} ${a.actor} rev ${a.from_revision}→${a.to_revision} reason=${a.reason || "-"}` +
+      `\n  before: ${(a.before || "").slice(0, 80)}`).join("\n") +
+    `\n（最近 ${j.audit.length}/${j.total} 条）\n` + $("log").textContent;
 }
 
 async function doSearch() {
@@ -285,10 +345,13 @@ async function doSearch() {
   if (!q) return;
   const j = await api(`/search?q=${encodeURIComponent(q)}`);
   log(`检索「${q}」→ ${j.total} 命中（mode=${j.mode}）`);
+  let off = 0;
   (j.hits || []).forEach(h => {
-    const el = document.querySelector(`[data-bid="${h.block_id}"] textarea`);
-    if (el) el.classList.add("hit");
+    const el = blkEl(h.block_id);
+    if (el) el.querySelector("textarea").classList.add("hit");
+    else off++;
   });
+  if (off) log(`${off} 条命中在未载入的块窗口内（点「加载更多」后重新检索）`, true);
 }
 
 $("blocks").addEventListener("click", (ev) => {
@@ -298,6 +361,7 @@ $("blocks").addEventListener("click", (ev) => {
   ({ save: () => save(bid), refresh: () => refetch(bid), audit: () => showAudit(bid) })[btn.dataset.act]();
 });
 $("load").onclick = load;
+$("more").onclick = loadMore;
 $("go").onclick = doSearch;
 $("q").addEventListener("keydown", e => { if (e.key === "Enter") doSearch(); });
 $("onlyEdge").addEventListener("change", e => {
