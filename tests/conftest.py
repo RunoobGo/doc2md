@@ -105,7 +105,7 @@ def saved_doc(api_client, small_pdf):
     """把一个真实小样本入库，返回 doc_id（编辑 / 删除门禁共用）。"""
     client, tokens = api_client
     r = client.post("/jobs", json={"path": str(small_pdf)}, headers=hdr(tokens, "editor"))
-    assert r.status_code == 202, r.get_json()
+    assert r.status_code == 202, (r.status_code, r.get_data(as_text=True)[:300])
     jobs = r.get_json()["jobs"]
     assert jobs and jobs[0].get("doc_id"), jobs
     return client, tokens, jobs[0]["doc_id"]

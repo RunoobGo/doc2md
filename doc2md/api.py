@@ -121,11 +121,21 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
 
         # CH-459（A-10）：目录投递时按文件派生幂等键——原实现 N 个文件共用请求里的
         # 同一个键，第 2..N 个全部命中第 1 个作业而静默消失（同步/异步两条路径同病）。
-        # 单文件投递维持原样（键字符串不变），多文件才派生 `键#文件名`。
+        # 单文件投递维持原样（键字符串不变），多文件才派生。
+        # CH-464：派生基准从 basename 改为**相对投递根的路径**——basename 在
+        # 不同子目录同名时碰撞（a/report.pdf 与 b/report.pdf 得同键，第二个文件
+        # 异步路径命中附着、静默丢失；同步路径覆盖第一个 job 的 detail）。
         multi = len(files) > 1
+        base = p if p.is_dir() else p.parent
 
         def _idem_for(f: Path):
-            return f"{idem}#{f.name}" if (idem and multi) else idem
+            if not (idem and multi):
+                return idem
+            try:
+                rel = f.relative_to(base).as_posix()
+            except ValueError:
+                rel = f.name
+            return f"{idem}#{rel}"
 
         # CH-449：[perf].queue_async = true → 只入队、立即 202 返回，由 `doc2md work` 消费。
         # 低配机上「一次丢一个目录」不应把 HTTP 线程占住（也不应同时起步 N 个解析进程）。
@@ -180,7 +190,10 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
         """队列可观测（CH-449）：按状态计数 + 队头明细，不含正文（NFR-20）。"""
         need("read")
         status = request.args.get("status")
-        limit = int(request.args.get("limit", 50))
+        try:
+            limit = int(request.args.get("limit", 50))
+        except ValueError:
+            raise E4001_BadRequest("limit must be an integer") from None
         sql = ("SELECT job_id, doc_id, source_key, status, created_at, started_at,"
                " finished_at, error_code, detail_json, source_path, mode FROM tasks")
         args: tuple = ()
@@ -288,17 +301,27 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
         return jsonify({"deletions": out})
 
     # --- 搜索 / 事件 --------------------------------------------------------
+    def _int_arg(name: str, default: int) -> int:
+        """查询参数整数解析：非数字走 400/E4001（CH-464，原裸 int() 逃逸 500 HTML）。"""
+        raw = request.args.get(name)
+        if raw is None:
+            return default
+        try:
+            return int(raw)
+        except ValueError:
+            raise E4001_BadRequest(f"{name} must be an integer") from None
+
     @app.get("/search")
     def _search():
         need("read")
         return jsonify(search(store, request.args.get("q", ""),
-                              int(request.args.get("limit", 20))))
+                              _int_arg("limit", 20)))
 
     @app.get("/events")
     def events():
         """全局事件总线（前端唯一事件通道）。"""
         need("read")
-        since = int(request.args.get("since", 0))
+        since = _int_arg("since", 0)
         rows = store.q("SELECT * FROM events WHERE seq>? ORDER BY seq LIMIT 200", (since,))
         return jsonify({"events": [dict(r) for r in rows]})
 

@@ -51,11 +51,11 @@ def patch_block(store: Store, doc_id: str, block_id: str, body: dict, actor: str
             " to_revision, actor, ts, reason) VALUES (?,?,?,?,?,?,?,?,?)",
             (doc_id, block_id, old_text, body.get("text", ""), int(base), int(base) + 1,
              actor, now_iso(), body.get("reason", "")))
-
-    # 索引刷新必须在事务外：reindex_block 自带 BEGIN IMMEDIATE，嵌套会失败。
-    # CH-459（A-6 / FR-208「该块索引」）：只删插该块一行——原实现任何单块编辑
-    # 都整文档重写 FTS（N 块文档改一个块 = 重写全部索引行）。
-    reindex_block(store, doc_id, _Block(id=block_id, text=body.get("text", "")))
+        # CH-459（A-6 / FR-208「该块索引」）：只删插该块一行。
+        # CH-464：并入同一事务（原为两笔提交，之间崩溃 → blocks 与
+        # search_blocks 永久不一致且无恢复路径）。
+        reindex_block(store, doc_id, _Block(id=block_id, text=body.get("text", "")),
+                      tx=tx)
     out = {"revision": int(base) + 1, "block_id": block_id}
     if warning:
         out["warning"] = warning

@@ -31,7 +31,9 @@ STEP_ORDER = ["copy_live", "snapshot", "external_encrypt", "simulate_loss",
 
 
 @pytest.fixture
-def drill_env(tmp_path, monkeypatch):
+def drill_env(tmp_path, monkeypatch, cfg):
+    import copy
+    cfg = copy.deepcopy(cfg)   # session 夹具是共享 dict，不得原地改
     """造一个带真实数据的 state.sqlite + 口令环境变量；返回 (root, cfg)。"""
     monkeypatch.setenv("DOC2MD_BACKUP_PASSPHRASE", PASS)
     root = tmp_path / "work"
@@ -56,8 +58,6 @@ def drill_env(tmp_path, monkeypatch):
             "INSERT INTO tokens(token, role, label, created_at) VALUES (?,?,?,?)",
             ("tok-t7-admin", "admin", "t7", now_iso()))
     store.close()
-    from doc2md import config
-    cfg = config.load()
     cfg.setdefault("paths", {})["root"] = str(root)
     return root, cfg
 
@@ -126,19 +126,17 @@ def test_drill_report_leaks_no_plaintext(drill_env):
     assert PASS not in blob                       # 口令同样不得进报告
 
 
-def test_drill_missing_passphrase_is_hard_failure(tmp_path, monkeypatch):
+def test_drill_missing_passphrase_is_hard_failure(tmp_path, monkeypatch, cfg):
     """外置副本强制加密：缺口令直接 E4001，绝不落明文副本。"""
     monkeypatch.delenv("DOC2MD_BACKUP_PASSPHRASE", raising=False)
-    from doc2md import config
     with pytest.raises(E4001_BadRequest):
-        run_drill(config.load(), tmp_path / "work")
+        run_drill(cfg, tmp_path / "work")
 
 
-def test_drill_survives_missing_live_db(tmp_path, monkeypatch):
+def test_drill_survives_missing_live_db(tmp_path, monkeypatch, cfg):
     """线上库不存在时按空 schema 演练（新建部署首次演练同样成立）。"""
     monkeypatch.setenv("DOC2MD_BACKUP_PASSPHRASE", PASS)
-    from doc2md import config
-    rep = run_drill(config.load(), tmp_path / "work")
+    rep = run_drill(cfg, tmp_path / "work")
     assert rep.ok is True and rep.match is True
 
 

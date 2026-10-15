@@ -68,20 +68,30 @@ def reindex(store: Store, doc_id: str, blocks) -> int:
     return len(blocks)
 
 
-def reindex_block(store: Store, doc_id: str, block) -> None:
+def reindex_block(store: Store, doc_id: str, block, tx=None) -> None:
     """单块索引刷新（CH-459 / A-6，FR-208「该块索引」）。
 
     原实现任何单块编辑都 `reindex` 整文档——N 块文档改一个块要重写全部
     FTS 行。本函数只删插该块一行；块被删空文本时只删不插。
+    CH-464：`tx=` 形参允许并入调用方事务——`patch_block` 的 blocks UPDATE
+    与 FTS 刷新原为两笔提交，之间崩溃会让 blocks 与 search_blocks 永久
+    不一致（搜索命中旧内容），且无启动对账恢复。
     """
     from .fts import cjk_aux
-    with store.tx() as tx:
-        tx.execute("DELETE FROM search_blocks WHERE doc_id=? AND block_id=?",
-                   (doc_id, block.id))
+
+    def _do(t):
+        t.execute("DELETE FROM search_blocks WHERE doc_id=? AND block_id=?",
+                  (doc_id, block.id))
         if block.text:
-            tx.execute(
+            t.execute(
                 "INSERT INTO search_blocks(doc_id, block_id, text, aux) VALUES (?,?,?,?)",
                 (doc_id, block.id, block.text[:8000], cjk_aux(block.text[:8000])))
+
+    if tx is not None:
+        _do(tx)
+    else:
+        with store.tx() as t:
+            _do(t)
 
 
 def get_doc(store: Store, doc_id: str) -> dict:

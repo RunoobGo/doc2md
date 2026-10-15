@@ -43,10 +43,13 @@ def test_internal_link_downgrades_to_plain_by_default():
 
 
 def test_internal_link_anchor_optin():
-    """显式 link_internal="anchor" 才产出锚点（此时红线不适用，故单列）。"""
+    """CH-464 收敛：anchor 档正文与 plain 同形（GFM 无自动锚点，`](#dest)` 必为
+    死链且违反渲染红线）；内部链接信息保留在 IR，两档正文均为纯文本。"""
     ir = _ir([Block(id="b1", type="paragraph", text="见第 3 节",
                     links=[{"url": "", "dest": "sec3", "text": "见第 3 节"}])])
-    assert "[见第 3 节](#sec3)" in render(ir, link_internal="anchor")
+    assert render(ir, link_internal="anchor").strip() == "见第 3 节"
+    assert render(ir, link_internal="anchor") == render(ir, link_internal="plain")
+    assert "](#" not in render(ir, link_internal="anchor")   # 红线口径
 
 
 @pytest.mark.parametrize("url,ext", [

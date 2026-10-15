@@ -74,7 +74,8 @@ Windows 中文控制台（cp936）下含 emoji 的文件名不再崩进程，`--
 
 ## 备份加密（NFR-18）
 
-要点在 `ops/backup.md`：外置副本强制 AES-256-GCM 容器（`b"D2MBAE1"` 前缀），口令只走
+要点在 `ops/backup.md`：外置副本强制 AES-256-GCM 分块容器（v2，`b"D2MBAE2"` 前缀、
+随机盐 + 序号 AAD；历史 v1 `b"D2MBAE1"` 只读兼容），口令只走
 `DOC2MD_BACKUP_PASSPHRASE`；macOS 备选 `hdiutil create -encryption AES-256 … SPARSEBUNDLE`。
 未配置外置卷 → 周报该步骤 `skipped`（不算失败）；配置了外置卷但无口令 → `ok=False`，**不落明文**。
 已删数据 ≤14 天从全部副本自然轮出（FR-128）。
@@ -126,7 +127,7 @@ rename 轮转只能有一个属主，三类进程三份文件。
 | `ops/backup.md` | 备份介质与恢复演练细则 |
 | `ops/windows/install-doc2md-tasks.ps1` | Windows 任务计划安装 / 校验 / 卸载（与 launchd 同等能力） |
 
-跟踪约定：契约变更、缺陷、更优做法一律按登记流写入方案 第十一章（当前编号至 `CH-463`，下一条 `CH-464`），实测数字进第十二章并标注语料与测量方法；规格发生变化时同步主题篇章节与本文相应小节，并递增 `doc2md.PLAN_VERSION`（管线契约变化另递增 `PIPELINE_VERSION`）。
+跟踪约定：契约变更、缺陷、更优做法一律按登记流写入方案 第十一章（当前编号至 `CH-465`，下一条 `CH-466`），实测数字进第十二章并标注语料与测量方法；规格发生变化时同步主题篇章节与本文相应小节，并递增 `doc2md.PLAN_VERSION`（管线契约变化另递增 `PIPELINE_VERSION`）。
 
 ## 验收与测试
 

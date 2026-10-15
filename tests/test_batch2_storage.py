@@ -132,22 +132,25 @@ def test_save_ir_replaces_blocks_and_index(store):
 # --- A-5：门禁单遍采集 ------------------------------------------------------
 
 
-def test_gate_collector_matches_check_even5():
-    """流式采集与一次性 check 逐字段同口径（含 avg_chars）。"""
+def test_gate_collector_frozen_expectations():
+    """CH-464：`check()` 内部已走 GateCollector（同一实现），「collector 对比
+    check」是同义反复、回归保护为零——改为对冻结期望值断言（判定语义变更时
+    必须显式改这里，而不是静默跟随实现）。"""
     pages = _pages([900, 5, 900, 900, 5, 900, 900, 900, 900, 900])
-    for mode in ("auto", "even5", "legacy3"):
-        try:
-            old = check(pages, mode=mode)
-        except Exception as exc:                       # 拒收路径也要同口径
-            with pytest.raises(type(exc)):
-                c = GateCollector(len(pages), mode=mode)
-                c.feed(pages)
-                c.finish()
-            continue
-        c = GateCollector(len(pages), mode=mode)
-        c.feed(pages)
-        new = c.finish()
-        assert new.detail() == old.detail(), mode
+    # auto：3 个连续尾部稀疏页不触发（single sparse 不杀），平均字符数冻结
+    r = check(pages, mode="auto")
+    assert r.passed is True and r.stats["total_pages"] == 10
+    assert r.stats["decision_pages"] == 10
+    # even5：采样页含两个稀疏页（5 字符）→ 全部硬拒（任一不达标即拒）
+    from doc2md.errors import E4221_GateReject
+    with pytest.raises(E4221_GateReject):
+        check(pages, mode="even5")
+    c = GateCollector(len(pages), mode="even5")
+    c.feed(pages)
+    res = c.finish(reject_on_any=False)        # 采集面单独看：不拒收、只出判定
+    # even5 采样点 {0,2,4,7,9} 恰含稀疏页 index 4 → 恰 1 页硬拒（冻结口径）
+    assert [p.ok for p in res.pages].count(False) == 1
+    # 分片喂入与整喂等价（真正的流式语义回归，见下一条测试）
 
 
 def test_gate_collector_feed_by_shards_matches_whole():
@@ -184,23 +187,20 @@ def test_gate_collector_rejects_bad_tail():
 
 
 def test_reindex_block_only_touches_one_row(store):
+    """FR-208「该块索引」：编辑 b2 只删插 b2 的 FTS 行，其余行 rowid 不变
+    （rowid 变化 = 该行被整行重写，即整文档重索引的行为证据）。"""
     _seed(store, n=3)
-    before = store.q("SELECT block_id, text FROM search_blocks WHERE doc_id='d1'"
-                     " ORDER BY block_id")
+    before = {r["block_id"]: r["rowid"] for r in store.q(
+        "SELECT block_id, rowid FROM search_blocks WHERE doc_id='d1'")}
     patch_block(store, "d1", "b2", {"text": "改写后的内容 例外情况",
                                     "base_revision": 1}, "tester")
-    after = store.q("SELECT block_id, text FROM search_blocks WHERE doc_id='d1'"
-                    " ORDER BY block_id")
-    assert [r["block_id"] for r in before] == [r["block_id"] for r in after]
-    changed = [r["block_id"] for r in after
-               if r["block_id"] not in {x["block_id"] for x in before
-                                        if x["text"] == after[[y["block_id"] for y in after]
-                                                              .index(r["block_id"])]["text"]}]
-    # 其余两块文本逐字未动（整文档重索引会重建所有行，文本相同但这是幂等性断言）
-    others = {r["block_id"]: r["text"] for r in after if r["block_id"] != "b2"}
-    assert others == {"b1": "内容1 例外情况", "b3": "内容3 例外情况"}
-    assert "改写后的内容" in [r["text"] for r in after if r["block_id"] == "b2"][0]
-    assert changed is not None
+    after = {r["block_id"]: r["rowid"] for r in store.q(
+        "SELECT block_id, rowid FROM search_blocks WHERE doc_id='d1'")}
+    assert after["b1"] == before["b1"] and after["b3"] == before["b3"], \
+        "未编辑块的 FTS 行被重写（整文档重索引行为）"
+    assert after["b2"] != before["b2"]              # 被编辑块确实刷新了
+    assert "改写后的内容" in store.q1(
+        "SELECT text FROM search_blocks WHERE doc_id='d1' AND block_id='b2'")["text"]
 
 
 def test_reindex_block_drops_empty_text(store):
@@ -346,21 +346,87 @@ def test_rollback_non_numeric_revision_is_400(saved_doc):
 
 
 def test_rollback_numeric_string_still_works(saved_doc):
-    """数字字符串仍是合法输入（不是「必须 int」的过度收紧）。"""
+    """数字字符串是合法输入（不是「必须 int」的过度收紧）：
+    先 PATCH 一次产生审计（rev1→2），回滚 "1" 是确定性 200 且正文复原；
+    越界 revision "99" 是确定性 404（无该审计行）。"""
     client, tokens, doc_id = saved_doc
-    bid = client.get(f"/docs/{doc_id}",
-                     headers={"X-Doc2md-Token": tokens["editor"]}
-                     ).get_json()["blocks"][0]["id"]
-    r = client.post(f"/docs/{doc_id}/blocks/{bid}/rollback",
-                    json={"to_revision": "1", "as": "tester"},
-                    headers={"X-Doc2md-Token": tokens["editor"]})
-    assert r.status_code in (200, 404, 425), r.get_json()
+    h = {"X-Doc2md-Token": tokens["editor"]}
+    b0 = client.get(f"/docs/{doc_id}", headers=h).get_json()["blocks"][0]
+    bid, original = b0["id"], b0["text"]
+    r = client.patch(f"/docs/{doc_id}/blocks/{bid}",
+                     json={"text": "改写后的内容 例外情况", "base_revision": 1},
+                     headers=h)
+    assert r.status_code == 200, r.get_json()
+    r1 = client.post(f"/docs/{doc_id}/blocks/{bid}/rollback",
+                     json={"to_revision": "1", "as": "tester"}, headers=h)
+    assert r1.status_code == 200, r1.get_json()
+    assert client.get(f"/docs/{doc_id}", headers=h).get_json()["blocks"][0]["text"] == original
+    r2 = client.post(f"/docs/{doc_id}/blocks/{bid}/rollback",
+                     json={"to_revision": "99", "as": "tester"}, headers=h)
+    assert r2.status_code == 404, r2.get_json()
 
 
-def test_sqlite_error_type_has_no_weakref_gap():
-    """回归护栏：`sqlite3.Connection` 不支持弱引用，登记表必须走持有者对象。"""
-    with pytest.raises(TypeError):
-        import weakref
-        conn = sqlite3.connect(":memory:")
+def _sqlite3_weakref_support_is_absent() -> bool:
+    """CH-464：原「回归护栏」断言的是 CPython stdlib 事实（sqlite3.Connection
+    不支持弱引用），与仓库代码零耦合——Python 未来若给 sqlite3 加弱引用会误红。
+    降级为文档化常量；真正的行为断言在 test_conn_registry_* 三条。"""
+    import weakref
+    conn = sqlite3.connect(":memory:")
+    try:
         weakref.ref(conn)
+        return False
+    except TypeError:
+        return True
+    finally:
         conn.close()
+
+
+def test_conn_registry_design_matches_stdlib_constraint():
+    assert _sqlite3_weakref_support_is_absent(), \
+        "sqlite3 已支持弱引用：_ConnRef 持有者壳可简化（登记 CH-464 的前提消失）"
+
+
+# --- CH-464：第二轮修复的回归钉 ------------------------------------------------
+
+
+def test_multi_file_post_same_basename_diff_dirs(api_client, tmp_path, small_pdf):
+    """幂等键派生改相对投递根路径：不同子目录同名文件各自成 job（CH-464）。"""
+    import shutil
+    client, tokens = api_client
+    d = tmp_path / "drop3"
+    (d / "a").mkdir(parents=True)
+    (d / "b").mkdir(parents=True)
+    shutil.copy(small_pdf, d / "a" / "report.pdf")
+    shutil.copy(small_pdf, d / "b" / "report.pdf")
+    h = {"X-Doc2md-Token": tokens["editor"], "Idempotency-Key": "idem-collision"}
+    r = client.post("/jobs", json={"path": str(d)}, headers=h)
+    jobs = r.get_json()["jobs"]
+    assert len({j["job_id"] for j in jobs}) == 2, "basename 派生 → 同名碰撞，第二个静默丢失"
+    assert all(j["idempotency_hit"] is False for j in jobs)
+
+
+def test_s3_quote_block_stays_in_source_order():
+    """引用行后接正文行：quote 块必须在两段正文之间（CH-464 保序修复）。"""
+    from doc2md.pipeline.s1_parse import Line, RawPage
+    from doc2md.pipeline.s3_structure import analyze
+    page = RawPage(index=0, lines=[
+        Line(text="> 引用行内容"),
+        Line(text="正文段落一。"),
+        Line(text=""),
+        Line(text="正文段落二。"),
+    ])
+    ir = analyze([page])
+    types = [b.type for b in ir.blocks]
+    assert types == ["quote", "paragraph", "paragraph"], types
+
+
+def test_row_cells_sorts_by_x0_before_clustering():
+    """内容流乱序（右列先画）的行也能正确聚类（CH-464 修复）。"""
+    from doc2md.pipeline.s1_parse import _row_cells
+    chars = [  # B 列字符先于 A 列
+        {"text": "B", "x0": 200.0, "x1": 210.0},
+        {"text": "1", "x0": 205.0, "x1": 212.0},
+        {"text": "A", "x0": 20.0, "x1": 30.0},
+        {"text": "2", "x0": 26.0, "x1": 33.0},
+    ]
+    assert _row_cells(chars) == ["A2", "B1"]

@@ -68,7 +68,11 @@ def _inline(text: str, b: Block, *, preserve_strike: bool, link_internal: str) -
         if is_external(url):
             return f"[{label}]({url})"
         if link_internal == "anchor":
-            return f"[{label}](#{lk.get('dest', '')})"
+            # CH-464：anchor 档**不再**产出 `](#dest)`——`assert_render_contract`
+            # 明令禁止自造锚点（GFM 无自动标题锚点，产出的必然是死链），该分支
+            # 原实现与自家红线互斥、形同虚设。正文与 plain 同形（纯文本），内部
+            # 链接信息完整保留在 IR（`links[].dest`）与审阅页，由下游按需消费。
+            return text
         # plain：内部链接保持纯文本，不产生锚点语法
     return text
 

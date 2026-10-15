@@ -3,6 +3,14 @@
 纪律：
 ① 大小 + mtime 连续 stable_seconds 秒无变化才入队，期间只登记不计算；
 ② 递归防护（符号链接不跟随 / 深度 / 隐藏文件 / 单目录上限）复用 FR-129 guard_walk。
+
+CH-464：观察语义收敛为「同内容只报一次稳定」——首见快速通道（CH-462 引入，
+修 `watch --once` 死路径）与常规 pending 路径此前都只对 `enqueued` 做**追加时**
+去重，`return True` 本身不去重：常驻模式下旧文件每轮 poll 都再次返回 True、
+已稳定入队的文件弹窗后重新登记再等一个窗口又返回 True → 每轮把目录内全部
+文件重转换一遍（CPU/磁盘打满、库反复重建）。现在 `enqueued` 记录**提交时戳**：
+未变 → False；重写（size/mtime 变化）→ 弹回 pending 重新走窗口（保留热更新
+能力）。登记簿改 set/dict 消除原 list 的每 key O(n) 扫描。
 """
 from __future__ import annotations
 
@@ -25,34 +33,46 @@ class StabilityTracker:
     """登记 → 稳定 → 入队 的三态登记簿（可脱离 watchdog 单测）。"""
     stable_seconds: float = 5.0
     pending: dict[str, Stamp] = field(default_factory=dict)
-    enqueued: list[str] = field(default_factory=list)
-    registered: list[str] = field(default_factory=list)
+    enqueued: dict[str, Stamp] = field(default_factory=dict)   # 路径 → 提交时戳（CH-464）
+    registered: set[str] = field(default_factory=set)
     first_seen: dict[str, float] = field(default_factory=dict)
 
     def observe(self, path: str | os.PathLike, now: float | None = None) -> bool:
-        """返回 True 表示本次观察后达到稳定、可入队。"""
+        """返回 True 表示本次观察后达到稳定、可入队。
+
+        同内容只返回一次 True；重写（size/mtime 变化）后重新走稳定窗口。
+        """
         t = time.monotonic() if now is None else now
         p = Path(path)
+        key = str(p)
         try:
             st = p.stat()
         except OSError:
-            self.pending.pop(str(p), None)
-            self.first_seen.pop(str(p), None)
+            self.pending.pop(key, None)
+            self.first_seen.pop(key, None)
             return False
-        key, cur = str(p), Stamp(st.st_size, st.st_mtime)
+        cur = Stamp(st.st_size, st.st_mtime)
+        done = self.enqueued.get(key)
+        if done is not None:
+            if done.size == cur.size and done.mtime == cur.mtime:
+                return False                          # CH-464：已提交且未变，不重复
+            # 重写 → 弹回 pending 重新走稳定窗口（热更新语义）
+            self.enqueued.pop(key, None)
+            self.pending[key] = cur
+            self.first_seen[key] = t
+            return False
         prev = self.pending.get(key)
         if prev is None:
-            if key not in self.registered:
-                self.registered.append(key)
+            self.registered.add(key)
             # CH-462：首见文件若 mtime 已老于稳定窗口（写入发生在观察开始之前），
             # 直接判稳定——否则 `watch --once`（cron 模式，每次全新进程、没有
             # 「上一轮」可对比）单轮观察永远返回 False，文件永远不被提交。
             # 常驻模式不受影响：进程启动前就在目录里的老文件同样应当首轮提交。
-            # 判定用墙钟（mtime 是 epoch 基准，与 monotonic 的 `t` 不同基）；
-            # 注入时钟的测试用例首见文件均为新写入，age≈0，不受影响。
+            # 判定用墙钟（mtime 是 epoch 基准，与 monotonic 的 `t` 不同基）。
+            # mtime 在未来（时钟跳变 / 跨机拷贝）时 age 为负：不判稳定，进
+            # pending 走常规窗口——墙钟追上后按常规语义处理，避免未来文件卡死。
             if (time.time() - st.st_mtime) >= self.stable_seconds:
-                if key not in self.enqueued:
-                    self.enqueued.append(key)
+                self.enqueued[key] = cur
                 return True
             self.pending[key] = cur
             self.first_seen[key] = t
@@ -64,8 +84,7 @@ class StabilityTracker:
         if t - self.first_seen.get(key, t) >= self.stable_seconds:
             self.pending.pop(key, None)
             self.first_seen.pop(key, None)
-            if key not in self.enqueued:
-                self.enqueued.append(key)
+            self.enqueued[key] = cur
             return True
         return False
 

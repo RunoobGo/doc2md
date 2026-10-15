@@ -123,6 +123,7 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
     row_lines: list = []                       # 行缓冲（组不成表时退回段落用）
     quote_page = 0
     row_page = 0
+    code_page = 0                              # CH-464：代码块首行所在页（收尾落块用）
 
     def emit_code(page: int) -> None:
         nonlocal seq, code_buf
@@ -215,6 +216,7 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
                 flush_rows(True)             # 行组被结构行终止：按事实判定
                 if code_buf is None:
                     code_buf, code_mode = [], "fence"
+                    code_page = page.index
                 elif code_mode == "fence":
                     emit_code(page.index)
                 else:                           # 缩进/等宽块内的围栏行是普通内容
@@ -236,6 +238,7 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
                 flush_quote()
                 flush_rows(True)             # 行组被结构行终止：按事实判定
                 code_buf, code_mode = [re.sub(r"^(    |\t)", "", text)], "indent"
+                code_page = page.index
                 continue
             # --- 标题（CH-459：DOCX Heading 样式提示优先于启发式）---
             lvl = _heading_level(text, ln.size, base_size, ln.bold,
@@ -282,9 +285,12 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
                     quote_page = page.index
                 quote_buf.append(_quote_text(text))
                 continue
+            flush_quote()   # CH-464：非引用行到达 → 引用缓冲立即落块（原实现推迟到
+                            # 下一个空行/结构行，quote 块会排进其后的段落之间，乱序）
             # --- 等宽字体连续段 → 代码块（CH-459）---
             if ln.mono and not para_buf:
                 code_buf, code_mode = [text], "mono"
+                code_page = page.index
                 continue
             # CH-430：续句标点起头 → 无条件并回上一个内容块（可跨标题/空行打断）
             if _continuation_led(text) and not para_buf:
@@ -313,7 +319,7 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
     flush_quote()
     flush_rows(True)
     if code_buf is not None:
-        emit_code(0)
+        emit_code(code_page)                   # CH-464：原硬编码第 1 页，审阅页页码错位
     ir = IR(doc_id="", source_key="", blocks=blocks, pages=len(pages))
     for i, b in enumerate(ir.blocks, start=1):
         b.id = f"b{i}"

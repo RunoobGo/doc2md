@@ -123,5 +123,4 @@ def test_stitch_never_merges_across_tables():
     right = _ir([_blk("b1", "| c | d |", 1, btype="table")], 1, 2)
     merged, _stats = stitch_shards([left, right], max_pages=300, dedupe=False)
     assert [b.type for b in merged.blocks] == ["table", "table"]
-    assert "| a | b |" != merged.blocks[0].text or True
     assert merged.blocks[0].text == "| a | b |"     # 表格不续接，原文保持

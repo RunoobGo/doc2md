@@ -504,6 +504,11 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         "min_free_mb": config.get(cfg, "perf.min_free_mb"),
         "free_mb": _free_mb(root),
         "console_encoding": getattr(sys.stdout, "encoding", None),
+        # CH-464：FR-107/108 渲染档位与 watch 稳定窗口进自检面——配置拼错
+        # （如 anchor 静默回退语义）在 doctor 即可见，不进运行期静默失效
+        "s4_link_internal": config.get(cfg, "s4.link_internal", "plain"),
+        "s4_preserve_strike": config.get(cfg, "s4.preserve_marks_strike", False),
+        "watch_stable_seconds": config.get(cfg, "watch.stable_seconds", 5),
     }
     # CH-441：清单一律与 pyproject 声明的运行时依赖一致（pypdf 实未使用，列出必误报 MISSING）
     for mod in DEPENDENCY_MODULES:

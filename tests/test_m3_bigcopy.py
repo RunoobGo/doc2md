@@ -47,7 +47,7 @@ def test_large_copy_never_enqueues_mid_write(tmp_path):
     assert tr.observe(f, now) is True
     now += 10.0
     assert tr.observe(f, now) is False
-    assert tr.enqueued == [str(f)]
+    assert list(tr.enqueued) == [str(f)]   # CH-464：enqueued 由 list 改 dict（提交时戳）
 
 
 def test_large_copy_via_poll_all(tmp_path):

@@ -68,7 +68,7 @@ def test_backup_drill_cli_runs_green(tmp_path, monkeypatch):
 
 
 def test_backup_drill_cli_failure_exit_code(tmp_path, monkeypatch):
-    """缺口令 → E4001 穿透为 DrillFailure → 退出码 3（EXIT_BIZ）。"""
+    """缺口令 → E4001 穿透为 DrillFailure → 退出码 4（EXIT_BIZ）。"""
     monkeypatch.delenv("DOC2MD_BACKUP_PASSPHRASE", raising=False)
     assert main(["backup", "drill", "--root", str(tmp_path / "work")]) == 4   # EXIT_BIZ
 
@@ -89,10 +89,14 @@ def test_watch_once_converts_stable_file(tmp_path, small_pdf):
 
 
 def test_watch_once_ignores_unstable_file(tmp_path, small_pdf):
-    """mtime 在稳定窗口内的文件不提交（写入静默窗口语义）。"""
+    """mtime 在稳定窗口内的文件不提交（写入静默窗口语义）。
+    拨成未来 mtime：不依赖 copy 与执行间隔的墙钟运气（CH-464）。"""
     drop = tmp_path / "drop2"
     drop.mkdir()
-    shutil.copy(small_pdf, drop / "fresh.pdf")   # mtime=现在，窗口内
+    dst = drop / "fresh.pdf"
+    shutil.copy(small_pdf, dst)
+    future = dst.stat().st_mtime + 60
+    os.utime(dst, (future, future))              # mtime 未来 → 窗口必然未满
     root = tmp_path / "work"
     assert main(["watch", str(drop), "--once", "--root", str(root)]) == 0
     assert not list((root / "out").glob("*.zip"))
@@ -115,3 +119,33 @@ def test_tokenizer_export_and_verify(tmp_path):
 
     assert main(["tokenizer", "verify", "--manifest", str(manifest),
                  "--gguf", str(gg), "--root", root]) == 0
+
+
+# --- CH-464：watcher 观察语义（同内容只报一次稳定） -----------------------------
+def test_tracker_reports_stable_once_and_retracks_rewrite(tmp_path):
+    from doc2md.security.watcher import StabilityTracker
+    f = tmp_path / "doc.pdf"
+    f.write_bytes(b"x")
+    old = f.stat().st_mtime - 60
+    os.utime(f, (old, old))
+    tr = StabilityTracker(stable_seconds=5.0)
+    assert tr.observe(f, now=100.0) is True            # 首见快速通道（老文件）
+    for _ in range(3):                                 # 常驻模式多轮：不再重复提交
+        assert tr.observe(f, now=100.0) is False
+    # 重写（mtime 变化）→ 弹回 pending 重新走窗口
+    f.write_bytes(b"xx")
+    assert tr.observe(f, now=101.0) is False           # 变化 → 重新登记
+    assert tr.observe(f, now=107.0) is True            # 静默满窗口 → 再提交一次
+    assert tr.observe(f, now=107.5) is False           # 同内容不再重复
+
+
+def test_tracker_future_mtime_not_stuck(tmp_path):
+    """mtime 在未来（时钟跳变/跨机拷贝）：不判稳定、走常规窗口，不永久卡死。"""
+    from doc2md.security.watcher import StabilityTracker
+    f = tmp_path / "future.pdf"
+    f.write_bytes(b"x")
+    future = f.stat().st_mtime + 3600
+    os.utime(f, (future, future))
+    tr = StabilityTracker(stable_seconds=5.0)
+    assert tr.observe(f, now=100.0) is False           # 快速通道不误触发
+    assert tr.observe(f, now=106.0) is True            # 常规窗口到期正常提交

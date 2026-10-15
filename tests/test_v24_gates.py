@@ -86,7 +86,9 @@ def test_shard_two_phase(large_single, large_sharded):
     assert not st.get("fallback"), f"降级单片，非真分片：{st}"
     assert st["shards"] >= 2 and st["blocks_raw"] > st["blocks_after_dedupe"]
     # shard_edge 可筛选：报告有边界行 + data 属性
-    assert any(b.flags.get("shard_edge") for b in large_sharded.ir.blocks) or st["seams"] == 0
+    # CH-464：拆掉 or 逃逸——缝合发生时 shard_edge 必须可筛选
+    if st["seams"] > 0:
+        assert any(b.flags.get("shard_edge") for b in large_sharded.ir.blocks)
 
 
 def test_shard_edge_filterable_in_report(large_sharded):
@@ -183,14 +185,14 @@ def test_product_zip_entries(large_zip_names):
         assert not Path(name).is_absolute()
 
 
-def test_zip_rejects_unsafe_source_name(tmp_path, small_pdf):
+def test_zip_rejects_unsafe_source_name(tmp_path, small_pdf, cfg):
     """打包双闸：越权名不得进 zip 条目。"""
     from doc2md.errors import E4003_FileNameUnsafe
     from doc2md.ir import IR
     from doc2md.pipeline.convert import package
     ir = IR(doc_id="d1", source_key="s1", source_name="../evil.md", format="pdf", pages=1)
     with pytest.raises(E4003_FileNameUnsafe):
-        package(ir, "x", {}, tmp_path, config.load())
+        package(ir, "x", {}, tmp_path, cfg)
 
 
 def test_dirguard_symlink_loop_bounded(golden_dir):

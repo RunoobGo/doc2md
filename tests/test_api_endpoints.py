@@ -79,3 +79,39 @@ def test_system_reload_reflects_settings_override(api_client, tmp_path):
     after = client.get("/settings", headers=hdr(tokens, "reader")).get_json()
     assert before["llm"]["fallback"] is True
     assert after["llm"]["fallback"] is False
+
+
+# --- CH-464：/tokens 端点（token_admin 权限面） --------------------------------
+
+
+def test_tokens_role_matrix_and_revocation(api_client):
+    client, tokens = api_client
+    # 签发：admin 可、editor/reader 403
+    r = client.post("/tokens", json={"role": "reader", "label": "e2e"},
+                    headers=hdr(tokens, "admin"))
+    assert r.status_code == 200 and r.get_json()["role"] == "reader"
+    new_tok = r.get_json()["token"]
+    assert client.post("/tokens", json={"role": "reader"},
+                       headers=hdr(tokens, "editor")).status_code == 403
+    # 新 token 立即可用 → 吊销 → 即时 401（DELETE /tokens/<tok>）
+    h_new = {"X-Doc2md-Token": new_tok}
+    assert client.get("/events", headers=h_new).status_code == 200
+    assert client.delete(f"/tokens/{new_tok}",
+                         headers=hdr(tokens, "admin")).status_code == 200
+    assert client.get("/events", headers=h_new).status_code == 401
+    assert client.delete(f"/tokens/{new_tok}",
+                         headers=hdr(tokens, "editor")).status_code == 403
+
+
+def test_markdown_export_roundtrip(api_client, saved_doc):
+    """GET /docs/<id>/markdown 正路径：200、md 头部 doc_id、与库内块正文一致。"""
+    client, tokens, doc_id = saved_doc
+    h = hdr(tokens, "editor")
+    r = client.get(f"/docs/{doc_id}/markdown", headers=h)
+    assert r.status_code == 200
+    body = r.get_data(as_text=True)
+    assert doc_id in body and body.lstrip().startswith("---")   # front-matter 开头
+    blocks = client.get(f"/docs/{doc_id}", headers=h).get_json()["blocks"]
+    assert all(b["text"] in body for b in blocks if b["text"])
+    # 未知 doc → 404
+    assert client.get("/docs/no-such-doc/markdown", headers=h).status_code == 404

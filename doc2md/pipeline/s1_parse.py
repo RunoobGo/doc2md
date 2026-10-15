@@ -170,7 +170,17 @@ def _attach_links(lines: list[Line], geoms: list[tuple[float, float]], page) -> 
             if not str(action.get("S", "")).endswith("GoTo"):
                 continue                      # 只认 URI / GoTo，其余动作不抽
             d = action.get("D")
-            dest = d.decode("utf-8", "replace") if isinstance(d, bytes) else str(d or "")
+            if isinstance(d, bytes):
+                dest = d.decode("utf-8", "replace")
+            elif isinstance(d, (list, tuple)) and d:
+                # 显式目标数组 [page, /XYZ, x, y, z]（与命名目标同样常见）：
+                # 取页号作 dest；原 str(list) 会产出 "['/XYZ', ...]" 垃圾串
+                try:
+                    dest = str(int(d[0]))
+                except (TypeError, ValueError):
+                    dest = ""
+            else:
+                dest = str(d or "")
         for ln, (top, bottom) in zip(lines, geoms):
             if ln.link or ln.link_internal:
                 continue
@@ -249,6 +259,9 @@ def _row_cells(chars: list[dict]) -> list[str] | None:
     cs = [c for c in chars if (c.get("text") or "").strip()]
     if len(cs) < 2:
         return None
+    # CH-464：聚类假设 x 升序，但内容流不保证（双栏回写、生成器先画右列）——
+    # 乱序时整行被切碎或判成单列。按 x0 排序后再聚类。
+    cs.sort(key=lambda c: float(c.get("x0", 0) or 0))
     widths = sorted(float(c.get("x1", 0) or 0) - float(c.get("x0", 0) or 0) for c in cs)
     median_w = widths[len(widths) // 2] or 1.0
     gap_th = max(8.0, 1.6 * median_w)

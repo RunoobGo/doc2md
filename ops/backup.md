@@ -16,7 +16,11 @@
 本仓库落地 **AES-256-GCM 容器**（`doc2md/ops/backup.py`，cryptography 实现，跨平台、脚本友好）：
 
 ```
-容器格式： b"D2MBAE1" + nonce(12B) + AESGCM( scrypt(n=2**14, r=8, p=1, salt=固定盐) )
+容器格式（v2，CH-461）：
+  b"D2MBAE2" | salt(16B 随机) | chunk_size(4B) | total(8B)
+  + 每块 nonce(12B) + AESGCM(scrypt(n=2**14, r=8, p=1), AAD=魔数+total+序号)
+  分块 4MB 流式加解密（驻留峰值 ≈ 一块）；历史 v1（b"D2MBAE1" + 固定盐 +
+  整库单块）只读兼容、不再生产——旧 .enc 副本仍可恢复，但旧版程序解不了新容器。
 口令来源： 仅环境变量 DOC2MD_BACKUP_PASSPHRASE（不写 plist、不入库、不入日志）
 ```
 

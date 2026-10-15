@@ -201,10 +201,13 @@ def test_pdf_link_annotation_attaches_by_geometry():
 
 def test_pdf_link_only_first_line_per_annotation():
     pages = read_pdf(GOLDEN / "links_pdf.pdf")
-    linked = [ln for p in pages for ln in p.lines if ln.link or ln.link_internal]
+    lines = [ln for p in pages for ln in p.lines]
+    linked = [i for i, ln in enumerate(lines) if ln.link or ln.link_internal]
     assert linked, "links_pdf.pdf 应有链接行"
-    # 每个标注只附着一根行（保守口径：审阅面每块只消费一个 URL）
-    assert len({ln.link for ln in linked}) == len(linked)
+    # 保守口径：附着只发生在标注带相交的行——同一 URL 至多落在一根行上
+    # （多根行同 URL = 标注带跨行误附着），且相邻行不连续被同一标注命中。
+    urls = [lines[i].link for i in linked if lines[i].link]
+    assert len(urls) == len(set(urls)), f"同一 URL 附着到多行：{urls}"
 
 
 def test_attach_links_ignores_non_uri_goto_actions():

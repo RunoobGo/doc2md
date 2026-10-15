@@ -215,15 +215,17 @@ def test_issue_default_allows_all_roles(store: Store):
 
 
 # --- 冻结键 ----------------------------------------------------------------------
-def test_frozen_key_rejects_unknown_value():
-    cfg = config.load()
-    cfg["security"]["sanitize_fail_action"] = "sanitize"
+def test_frozen_key_rejects_unknown_value(cfg):
+    # CH-464 教训钉：cfg 是 session 级共享 dict——改它必须 deepcopy，
+    # 否则污染泄漏到后续全部用例（本轮曾让 /jobs 在别处 500）。
+    c = copy.deepcopy(cfg)
+    c["security"]["sanitize_fail_action"] = "sanitize"
     with pytest.raises(ValueError, match="sanitize_fail_action"):
-        config.validate(cfg)
+        config.validate(c)
 
 
-def test_frozen_key_accepts_default():
-    config.validate(config.load())             # 默认 reject 不得误报
+def test_frozen_key_accepts_default(cfg):
+    config.validate(cfg)                       # 默认 reject 不得误报（cfg 已隔离 cwd）
 
 
 def test_frozen_key_enforced_at_load(tmp_path):
