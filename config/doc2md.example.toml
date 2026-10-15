@@ -44,7 +44,7 @@ workers = 0                            # CH-448：批量转换进程数；0 = �
                                        # 8GB 内存机器别调到 8：驻留 ≈ workers × chunk_pages
 queue_async = false                    # CH-449：true → POST /jobs 只入队，由 `doc2md work` 消费
                                        # false = 同步转换（方案 5.4 既有契约）
-min_free_mb = 512                      # CH-450（NFR-6）：写产物/备份前的剩余空间下限；0 = 关闭门禁
+min_free_mb = 512                      # CH-450（NFR-6）：写产物/备份前的剩余空间下限；本项与 disk_safety_factor 同时为 0 才关闭门禁
 disk_safety_factor = 3                 # 需求 = 源大小 × 该系数
 stale_job_minutes = 30                 # CH-448：`doc2md work` 回收 running 超过该时长且崩溃遗骸（仅限队列来源）
 

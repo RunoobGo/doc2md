@@ -1,6 +1,7 @@
 name: ci
 
-# 方案 8.6：6 条红线断言进 CI（merge-gate），失败阻断合并。
+# 方案 8.6：6 条红线断言进 CI（merge-gate），失败即 CI 红并在 CI 内阻断 full-suite；
+# 平台级「必需检查」受 T1 阻碍未配置（README CI 节）。
 # 分层口径：merge-gate 只跑 `-m gate`（红线，阻断合并）；全量 + 可复现性作为信息面。
 # CH-456（方案 T10）：ruff 静态检查为独立信息作业，与 merge-gate 并行、不互相 needs——
 # 风格判断不得变成红线，也不得拖慢红线层。

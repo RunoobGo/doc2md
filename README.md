@@ -10,7 +10,7 @@ python3 -m venv env && env/bin/pip install -e ".[dev]"
 env/bin/doc2md doctor                    # 环境自检（依赖 / 目录权限 / tokenizer 口径）
 ```
 
-命名纪律：标识符一律小写 `doc2md`；launchd 标签 `md.doc2md.cron` / `md.doc2md.cron.weekly` / `md.doc2md.serve` / `md.doc2md.llm`。
+命名纪律：标识符一律小写 `doc2md`；launchd 标签 `md.doc2md.cron` / `md.doc2md.cron.weekly`（随包分发的两档；`serve` / `llm` 常驻资产为待办 T12，尚无标签）。
 
 ## CLI
 
@@ -21,13 +21,13 @@ doc2md cron --daily | --weekly [--no-backup]
 doc2md convert <file|dir> [--mode auto|single|two_phase --out DIR --workers N --json --follow-symlinks]
 doc2md work [--once --max-jobs N --workers N --idle S --enqueue PATH --status]
 doc2md watch <dir> [--once --interval S]
-doc2md tokenizer export --gguf F [--vocab V --manifest M]
+doc2md tokenizer export F [--vocab V --manifest M]
 doc2md tokenizer verify --manifest M --gguf F
 doc2md doctor
 ```
 
 退出码：`0` 成功 / `2` 用法错误 / `3` 门禁拒收（E4221 等） / `4` 业务错误 / `5` 系统错误。
-CI 里 `doc2md convert --json` 的 stderr 会打印门禁摘要（`shards` / `char_sim` / `half_heads`）。
+CI 里 `doc2md convert --json` 的 stderr 会打印门禁摘要（键为 `mode` / `sampled_pages` / `reasons` / `stats`，CH-462 实核）。
 
 ## 快速开始
 
@@ -126,20 +126,21 @@ rename 轮转只能有一个属主，三类进程三份文件。
 | `ops/backup.md` | 备份介质与恢复演练细则 |
 | `ops/windows/install-doc2md-tasks.ps1` | Windows 任务计划安装 / 校验 / 卸载（与 launchd 同等能力） |
 
-跟踪约定：契约变更、缺陷、更优做法一律按登记流写入方案 第十一章（当前编号至 `CH-462`，下一条 `CH-463`），实测数字进第十二章并标注语料与测量方法；规格发生变化时同步主题篇章节与本文相应小节，并递增 `doc2md.PLAN_VERSION`（管线契约变化另递增 `PIPELINE_VERSION`）。
+跟踪约定：契约变更、缺陷、更优做法一律按登记流写入方案 第十一章（当前编号至 `CH-463`，下一条 `CH-464`），实测数字进第十二章并标注语料与测量方法；规格发生变化时同步主题篇章节与本文相应小节，并递增 `doc2md.PLAN_VERSION`（管线契约变化另递增 `PIPELINE_VERSION`）。
 
 ## 验收与测试
 
 六条 merge-gate 的 CI 定义见 `.github/workflows/ci.yml`：`merge-gate` job 跑
-`pytest -m gate`（Python 3.11/3.12/3.13 矩阵，失败阻断合并），`full-suite` job 依赖它跑全量 +
-黄金样本可复现性 + `doc2md doctor`。
+`pytest -m gate`（Python 3.11/3.12/3.13 矩阵，失败即 CI 红并在 CI 内阻断 `full-suite`），
+`full-suite` job 依赖它跑全量 + 黄金样本可复现性 + `doc2md doctor`；`lint`（ruff）为
+无人依赖的信息作业，不阻断。
 > 现状：workflow 已进远端，每次 push 到 `main` 触发 run（首轮四作业全绿：merge-gate 3.11/3.12/3.13 + full-suite）。
 > 但本仓库是 private + 免费计划，分支保护/规则集 API 返回 403，**无法把 merge-gate 设为必需检查**，
 > 因此「失败不可合并」尚未强制生效（见方案 CH-446/CH-453 与待办 T1）。合并前仍需人工 `pytest -m gate` 判绿。
 
 ```bash
 pytest -m gate            # 红线层：六条 merge-gate + 低配机专项（全绿方可合并；共 67 项，T8 优化后稳定 53s，历史轮次 72–110s 视机器负载）
-pytest tests/             # 全量（含 M0/M2/M3/M4M6/M5/M6c/M8/M9a/DoD/PERF）
+pytest tests/             # 全量（marker 实际取值：M0+M2 / M3 / M5 / M6c / M8 / M9a / DoD / PERF，见 pytest.ini）
 python3 tests/make_golden.py            # 重建黄金样本（输出目录随脚本位置，--golden 可覆盖）
 python3 tests/make_golden.py --force    # 强制重生成
 ```
