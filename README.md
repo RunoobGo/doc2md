@@ -60,6 +60,8 @@ curl -s "localhost:8090/search?q=例外" -H "X-Doc2md-Token: $TOK"
 | `[llm].mode` / `fallback` | `offline` / `true` | 修补助手实现：`offline` = 确定性占位（默认，主链路零网络）；`server` = 本地 llama-server（仅 `127.0.0.1:8080`）。服务不可用时回退 offline 保持主链路；`--llm-no-fallback` 则明确失败（E5041 / 503） |
 | `[llm].op_whitelist` | 5 个 op | 白名单是唯一防线（+5 道校验 + 不可信数据立场），模型听话不是防线；server 与 offline 两条路径同一套校验 |
 
+模型接入实操（选型 / 下载 GGUF / llama-server 启动 / 故障排查）见 `ops/llm.md`。
+
 Windows 中文控制台（cp936）下含 emoji 的文件名不再崩进程，`--json` 输出恒为纯 ASCII
 （两种代码页字节一致，可直接管道给 PowerShell / CI）；`doc2md work --enqueue DIR --once`
 可替代 API 走纯 CLI 批量。
@@ -127,7 +129,7 @@ rename 轮转只能有一个属主，三类进程三份文件。
 | `ops/backup.md` | 备份介质与恢复演练细则 |
 | `ops/windows/install-doc2md-tasks.ps1` | Windows 任务计划安装 / 校验 / 卸载（与 launchd 同等能力） |
 
-跟踪约定：契约变更、缺陷、更优做法一律按登记流写入方案 第十一章（当前编号至 `CH-465`，下一条 `CH-466`），实测数字进第十二章并标注语料与测量方法；规格发生变化时同步主题篇章节与本文相应小节，并递增 `doc2md.PLAN_VERSION`（管线契约变化另递增 `PIPELINE_VERSION`）。
+跟踪约定：契约变更、缺陷、更优做法一律按登记流写入方案 第十一章（当前编号至 `CH-466`，下一条 `CH-467`），实测数字进第十二章并标注语料与测量方法；规格发生变化时同步主题篇章节与本文相应小节，并递增 `doc2md.PLAN_VERSION`（管线契约变化另递增 `PIPELINE_VERSION`）。
 
 ## 验收与测试
 
