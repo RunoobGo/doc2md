@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import re
 import sqlite3
-import time
 
 import pytest
 
@@ -131,21 +130,16 @@ def test_edit_reflected_in_search_within_5s(saved_doc):
                         headers={"X-Doc2md-Token": tokens["admin"]}).get_json()["blocks"]
     bid = blocks[0]["id"]
     marker = "检索哨兵例外条款ZZ"
-    t0 = time.monotonic()
     r = client.patch(f"/docs/{doc}/blocks/{bid}",
                      json={"text": f"{blocks[0]['text']} {marker}", "base_revision": 1},
                      headers={"X-Doc2md-Token": tokens["editor"]})
     assert r.status_code == 200, r.get_json()
-    hit = None
-    while time.monotonic() - t0 < 5.0:
-        hit = client.get(f"/search?q={marker}",
-                         headers={"X-Doc2md-Token": tokens["reader"]}).get_json()
-        if hit["total"]:
-            break
-        time.sleep(0.05)
-    assert hit and hit["total"] >= 1, f"5s 内搜不到新内容：{hit}"
+    # CH-462：索引刷新在 PATCH 事务内同步完成（reindex_block，CH-460），
+    # 无需 5s 墙钟轮询——原轮询是伪异步时代的防御式写法，掩盖了即时语义。
+    hit = client.get(f"/search?q={marker}",
+                     headers={"X-Doc2md-Token": tokens["reader"]}).get_json()
+    assert hit["total"] >= 1, f"PATCH 后应立即可检索：{hit}"
     assert hit["mode"] == "fts"
-    assert time.monotonic() - t0 < 5.0
     # 旧内容仍可检索（同块原文子串）
     old_sub = re.sub(r"\s+", "", blocks[0]["text"])[:6]
     if old_sub:
@@ -205,15 +199,10 @@ def test_token_revocation_effective_within_5s(api_client):
     t = auth.issue(st, "editor", "m8-revoke-me")
     assert client.get("/search?q=x", headers={"X-Doc2md-Token": t}).status_code == 200
     auth.revoke(st, t)
-    t0 = time.monotonic()
-    code = None
-    while time.monotonic() - t0 < 5.0:
-        code = client.get("/search?q=x", headers={"X-Doc2md-Token": t}).status_code
-        if code == 401:
-            break
-        time.sleep(0.05)
-    assert code == 401, "吊销未在 5s 内生效"
-    assert time.monotonic() - t0 < 5.0
+    # CH-462：吊销是 tokens 行的 revoked_at 置位，check() 读库即时判 401，
+    # 不存在「≤5s 生效」的传播延迟——去掉墙钟轮询（慢机 flake 源）。
+    assert client.get("/search?q=x", headers={"X-Doc2md-Token": t}).status_code == 401, \
+        "吊销应即时生效"
     # admin 才能吊销；editor 调 token 管理端点 403
     assert client.delete(f"/tokens/{t}",
                          headers={"X-Doc2md-Token": tokens["editor"]}).status_code == 403

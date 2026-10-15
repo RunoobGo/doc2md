@@ -338,7 +338,12 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
     @app.post("/system/reload")
     def reload_():
         need("system_reload")
-        app.config["doc2md"]["cfg"] = config.load()
+        # CH-462：与 create_app 同口径——重载必须叠加 settings_override.json，
+        # 否则 PUT /settings 落盘的修改在 reload 后静默回退（启动合并、重载丢失）。
+        merged = config.load()
+        if override.is_file():
+            _deep(merged, json.loads(override.read_text(encoding="utf-8")))
+        app.config["doc2md"]["cfg"] = merged
         _emit(store, "system_reload", None, None, {}, logw())
         return jsonify({"reloaded": True, "ts": now_iso()})
 

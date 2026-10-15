@@ -44,6 +44,16 @@ class StabilityTracker:
         if prev is None:
             if key not in self.registered:
                 self.registered.append(key)
+            # CH-462：首见文件若 mtime 已老于稳定窗口（写入发生在观察开始之前），
+            # 直接判稳定——否则 `watch --once`（cron 模式，每次全新进程、没有
+            # 「上一轮」可对比）单轮观察永远返回 False，文件永远不被提交。
+            # 常驻模式不受影响：进程启动前就在目录里的老文件同样应当首轮提交。
+            # 判定用墙钟（mtime 是 epoch 基准，与 monotonic 的 `t` 不同基）；
+            # 注入时钟的测试用例首见文件均为新写入，age≈0，不受影响。
+            if (time.time() - st.st_mtime) >= self.stable_seconds:
+                if key not in self.enqueued:
+                    self.enqueued.append(key)
+                return True
             self.pending[key] = cur
             self.first_seen[key] = t
             return False

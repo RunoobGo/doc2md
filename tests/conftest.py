@@ -39,9 +39,19 @@ def small_pdf(golden_dir: Path) -> Path:
 
 
 @pytest.fixture(scope="session")
-def cfg():
-    from doc2md import config
-    return config.load()
+def cfg(tmp_path_factory):
+    """session 级配置。CH-462（A-16）：在隔离 cwd 下 load——loader 的默认文件
+    查找（./doc2md.toml）与相对路径解析都以 CWD 为准，原实现会把运行 pytest 的
+    工作目录渗入 session 配置（开发者本机恰有 doc2md.toml 时测试结果因机而异）。"""
+    import os
+    cwd = os.getcwd()
+    os.chdir(tmp_path_factory.mktemp("cfg-cwd"))
+    try:
+        from doc2md import config
+        c = config.load()
+    finally:
+        os.chdir(cwd)
+    return c
 
 
 @pytest.fixture

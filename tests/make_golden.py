@@ -11,7 +11,6 @@ import os
 import random
 import re
 import shutil
-import unicodedata
 from pathlib import Path
 
 # 第三方库
@@ -24,6 +23,10 @@ from reportlab.lib.units import cm
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.cidfonts import UnicodeCIDFont
 from reportlab.pdfgen import canvas
+
+# CH-462（A-16）：消毒规则改 import 生产实现——原为逐行复制的漂移副本，
+# 生产端改规则后黄金 expected 仍按旧副本算（红线对着过期口径放行）。
+from doc2md.security.names import sanitize_name
 
 # CH-442：黄金样本必须**逐字节可复现**（SEED=20241013 的本意），但 reportlab 默认把
 # 生成时刻写进 /CreationDate 与 /ID，同一份脚本重跑得到的是内容相同、哈希不同的 PDF
@@ -690,41 +693,6 @@ def make_malicious_names():
 
     print(f"  → 生成 {path.name} ...")
 
-    def sanitize_name(name: str) -> str:
-        """实现消毒规则"""
-        # NFC 归一化
-        name = unicodedata.normalize("NFC", name)
-        # 去 NUL
-        name = name.replace("\x00", "")
-        # 取 basename
-        name = name.replace("\\", "/").split("/")[-1]
-        # 非安全字符替换为 _
-        name = re.sub(r"[^A-Za-z0-9\u4e00-\u9fff._ -]", "_", name)
-        # strip(" .")
-        name = name.strip(" .")
-        # 空则 unnamed
-        if not name:
-            name = "unnamed"
-        # 保留名检查
-        stem = Path(name).stem.lower()
-        reserved = {"con", "prn", "aux", "nul"} | {f"com{i}" for i in range(1, 10)} | {f"lpt{i}" for i in range(1, 10)}
-        if stem in reserved:
-            name = f"_{name}"
-        # UTF-8 截断（保留扩展名）
-        if len(name.encode("utf-8")) > 128:
-            ext_part = Path(name).suffix
-            stem_part = Path(name).stem
-            max_stem_bytes = 128 - len(ext_part.encode("utf-8")) - 1
-            truncated = ""
-            current_bytes = 0
-            for ch in stem_part:
-                ch_bytes = len(ch.encode("utf-8"))
-                if current_bytes + ch_bytes > max_stem_bytes:
-                    break
-                truncated += ch
-                current_bytes += ch_bytes
-            name = truncated + ext_part
-        return name
 
     test_cases = [
         {"input": "../../etc/passwd", "desc": "路径穿越"},

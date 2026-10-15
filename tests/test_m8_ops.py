@@ -12,9 +12,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+from cryptography.exceptions import InvalidTag
 
 from doc2md.ir import IR, Block
-from doc2md.ops.backup import MAGIC_V2, BackupPlan, decrypt_bytes, encrypt_bytes, hdiutil_recipe
+from doc2md.ops.backup import CHUNK_SIZE, MAGIC_V2, BackupPlan, decrypt_bytes, encrypt_bytes, hdiutil_recipe
 from doc2md.storage import repo
 from doc2md.storage.db import Store
 
@@ -42,7 +43,7 @@ def test_encrypt_decrypt_roundtrip():
 
 def test_wrong_passphrase_rejected():
     blob = encrypt_bytes(b"payload", PASS)
-    with pytest.raises(Exception):
+    with pytest.raises(InvalidTag):
         decrypt_bytes(blob, "wrong-pass")
 
 
@@ -247,20 +248,34 @@ _IMPORT_TO_DIST = {"docx": "python-docx", "flask": "flask"}
 
 
 def _third_party_imports(pkg_dir: Path) -> set[str]:
-    import re
+    """CH-462：regex 逐行扫描改 **ast 遍历**——原正则漏掉 importlib.import_module /
+    __import__ 的字符串字面量调用（动态导入不进依赖闭包即装机崩溃），且对
+    多行 from-import（括号换行）的首名之外全部失明。ast 语义化解析无这两类盲区。"""
+    import ast
     import sys
     names: set[str] = set()
-    pat = re.compile(r"^[ \t]*(?:import|from)[ \t]+([a-zA-Z0-9_.]+)", re.M)
     for p in pkg_dir.rglob("*.py"):
-        for m in pat.finditer(p.read_text(encoding="utf-8", errors="ignore")):
-            raw = m.group(1)
-            if raw.startswith("."):          # 相对导入（from . / from ..x）不参与口径比对
-                continue
-            top = raw.split(".")[0]
-            if top in sys.stdlib_module_names or top == "doc2md":
-                continue
-            names.add(top)
-    return names
+        tree = ast.parse(p.read_text(encoding="utf-8", errors="ignore"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    names.add(alias.name.split(".")[0])
+            elif isinstance(node, ast.ImportFrom):
+                if node.level > 0 or node.module is None:
+                    continue                 # 相对导入不参与口径比对
+                names.add(node.module.split(".")[0])
+            elif isinstance(node, ast.Call):
+                fn = node.func
+                is_importlib = (isinstance(fn, ast.Attribute)
+                                and isinstance(fn.value, ast.Name)
+                                and fn.value.id == "importlib"
+                                and fn.attr == "import_module")
+                is_dunder = isinstance(fn, ast.Name) and fn.id == "__import__"
+                if (is_importlib or is_dunder) and node.args:
+                    arg = node.args[0]
+                    if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                        names.add(arg.value.split(".")[0])
+    return {n for n in names if n not in sys.stdlib_module_names and n != "doc2md"}
 
 
 def test_declared_deps_match_actual_imports():
@@ -503,7 +518,7 @@ def test_v1_container_still_decryptable():
 
 def test_stream_roundtrip_multi_chunk_and_tail(tmp_path):
     """多块流式 round-trip：整除 / 不整除末块 / 空输入三种形态。"""
-    from doc2md.ops.backup import CHUNK_SIZE, decrypt_stream, encrypt_stream
+    from doc2md.ops.backup import decrypt_stream, encrypt_stream
     for size in (0, 1, CHUNK_SIZE - 1, CHUNK_SIZE, CHUNK_SIZE + 7, CHUNK_SIZE * 2 + 123):
         data = os.urandom(size)
         src = tmp_path / f"in-{size}"
@@ -520,7 +535,7 @@ def test_stream_roundtrip_multi_chunk_and_tail(tmp_path):
 
 def test_v2_swap_chunks_rejected(tmp_path):
     """交换两块密文 → 序号 AAD 认证失败（重排不可行）。"""
-    from doc2md.ops.backup import CHUNK_SIZE, decrypt_bytes, encrypt_bytes
+    from doc2md.ops.backup import decrypt_bytes, encrypt_bytes
     data = os.urandom(CHUNK_SIZE * 2 + 100)
     blob = bytearray(encrypt_bytes(data, PASS))
     hdr = 7 + 16 + 4 + 8
@@ -528,7 +543,7 @@ def test_v2_swap_chunks_rejected(tmp_path):
     a, b = blob[hdr:hdr + blk], blob[hdr + blk:hdr + blk * 2]
     blob[hdr:hdr + blk] = b
     blob[hdr + blk:hdr + blk * 2] = a
-    with pytest.raises(Exception):
+    with pytest.raises(InvalidTag):
         decrypt_bytes(bytes(blob), PASS)
 
 
@@ -540,9 +555,9 @@ def test_v2_truncated_container_restore_leaves_nothing(tmp_path):
     snap.write_bytes(os.urandom(8192))
     out = plan.to_external(snap, PASS)
     cut = tmp_path / "cut.enc"
-    cut.write_bytes(out.read_bytes()[: -32])   # 掐掉末块尾部
+    cut.write_bytes(out.read_bytes()[: -32])   # 掐掉末块尾部 → 结构截断
     dst = tmp_path / "restored.sqlite"
-    with pytest.raises(Exception):
+    with pytest.raises((InvalidTag, ValueError)):
         plan.restore(cut, dst, PASS)
     assert not dst.exists()
     assert not dst.with_name(dst.name + ".part").exists()
@@ -552,5 +567,6 @@ def test_v2_header_total_tamper_rejected():
     """改头部总块数 → 每块 AAD 都绑定 total，首块即认证失败。"""
     blob = bytearray(encrypt_bytes(b"some-db" * 100, PASS))
     blob[7 + 16 + 4] ^= 0x01                   # total_chunks 最低位翻位
-    with pytest.raises(Exception):
+    # total 被改小 → 尾随字节被拒；被改大 → 结构截断被拒。两条路都不给过。
+    with pytest.raises((InvalidTag, ValueError)):
         decrypt_bytes(bytes(blob), PASS)

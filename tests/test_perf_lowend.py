@@ -483,3 +483,21 @@ def _app(tmp_cfg, tmp_path, cfg, async_queue=False):
 
 def _h(tokens: dict, role: str = "admin") -> dict:
     return {"X-Doc2md-Token": tokens[role]}
+
+
+# --- CH-462 / A-16：zip 完整性（防静默截断） ----------------------------------
+def test_product_zip_complete(large_sharded):
+    """产物 zip 三条目齐全、CRC 全过、ir.json 与内存 IR 块数一致——
+    打包环节若静默丢条目/截断，现有按名字安全性的断言抓不住。"""
+    import json
+    import zipfile
+    assert large_sharded.zip_path, "分片产物未打包"
+    with zipfile.ZipFile(large_sharded.zip_path) as z:
+        assert z.testzip() is None                       # 全条目 CRC 校验
+        names = z.namelist()
+        base = large_sharded.doc_id
+        for entry in ("content.md", "ir.json", "report.html"):
+            assert f"{base}/{entry}" in names, f"缺条目 {entry}"
+        ir = json.loads(z.read(f"{base}/ir.json"))
+        assert len(ir["blocks"]) == len(large_sharded.ir.blocks)
+        assert z.read(f"{base}/content.md").strip()      # 正文非空

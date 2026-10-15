@@ -171,7 +171,8 @@ def test_gate_collector_only_metrics_needed_pages():
 
 def test_gate_collector_rejects_bad_tail():
     pages = _pages([900] * 8 + [5, 5, 5])
-    with pytest.raises(Exception) as ei:
+    from doc2md.errors import E4221_GateReject
+    with pytest.raises(E4221_GateReject) as ei:
         c = GateCollector(len(pages), mode="auto")
         c.feed(pages)
         c.finish()
@@ -274,8 +275,7 @@ def test_single_file_post_keeps_bare_key(api_client, small_pdf):
     j1 = client.post("/jobs", json={"path": str(small_pdf)}, headers=h).get_json()["jobs"][0]
     j2 = client.post("/jobs", json={"path": str(small_pdf)}, headers=h).get_json()["jobs"][0]
     assert j2["idempotency_hit"] is True and j1["job_id"] == j2["job_id"]
-    row = None
-    assert row is None
+    assert j1["doc_id"] == j2["doc_id"]             # 同键同文件 → 同一文档
 
 
 # --- A-12：脱敏口径统一 -----------------------------------------------------

@@ -153,7 +153,8 @@ def test_restore_rejects_tampered_container(drill_env):
     enc.write_bytes(bytes(blob))
     plan = BackupPlan(local_dir=rep.drill_dir / "backups_local",
                       external_dir=rep.drill_dir / "backups_external")
-    with pytest.raises(Exception):                # InvalidTag
+    from cryptography.exceptions import InvalidTag
+    with pytest.raises(InvalidTag):
         plan.restore(enc, root / "should-not-exist.sqlite", PASS)
     assert not (root / "should-not-exist.sqlite").exists()
 

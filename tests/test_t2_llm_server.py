@@ -219,8 +219,18 @@ def test_bad_response_is_service_error(behavior, stage):
     assert ei.value.stage == stage
 
 
+def _free_port() -> int:
+    """取一个当前空闲端口再释放——不假设任何固定端口号必无监听。"""
+    import socket
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
 def test_dead_port_is_connect_error():
-    client = LlmClient(bind="127.0.0.1", port=1)       # 1 号端口必无监听
+    client = LlmClient(bind="127.0.0.1", port=_free_port())   # 刚释放的空闲端口
     with pytest.raises(LlmServiceError) as ei:
         client.repair(_ir(), DEFAULT_OP_WHITELIST)
     assert ei.value.stage == "connect"
@@ -306,7 +316,7 @@ def test_probe_reports_reachability():
         ok, why = _client(fake).probe()
         assert ok is True and "reachable" in why
         assert fake.health_hits == 1
-    dead = LlmClient(bind="127.0.0.1", port=1)
+    dead = LlmClient(bind="127.0.0.1", port=_free_port())
     ok, why = dead.probe()
     assert ok is False and why.startswith("connect:")
 

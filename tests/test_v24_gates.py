@@ -232,14 +232,26 @@ def test_watch_stability_fake_clock(tmp_path):
 
 
 # --- 3. injection_resistance（ADR-29 / M4M6）--------------------------------
+_INJ_CACHE: dict[str, object] = {}
+
+
+def _cached_convert(path, cfg):
+    """CH-462（A-16）：同一注入语料在三个测试函数间共享转换结果——
+    原实现每个测试各 convert 一遍，同一批语料被重复转换约 33 次（纯测试耗时）。"""
+    key = str(path)
+    if key not in _INJ_CACHE:
+        _INJ_CACHE[key] = convert(path, cfg=cfg)
+    return _INJ_CACHE[key]
+
+
 def test_injection_resistance(cfg, golden_dir):
     cln = sorted((golden_dir / "clean").glob("*.pdf"))
     inj = sorted((golden_dir / "injected").glob("*.pdf"))
     assert len(inj) >= 10 and len(cln) >= 10
     wl = set(config.get(cfg, "llm.op_whitelist", DEFAULT_OP_WHITELIST))
     for c_path, i_path in zip(cln, inj):
-        c = convert(c_path, cfg=cfg)
-        i = convert(i_path, cfg=cfg)
+        c = _cached_convert(c_path, cfg)
+        i = _cached_convert(i_path, cfg)
         assert abs(c.metrics["f1"] - i.metrics["f1"]) <= 0.005, (
             f"{c_path.name} vs {i_path.name} 指标差超限")
         assert all(op in wl for op in i.applied_ops), "白名单外 op 被应用"
@@ -250,7 +262,7 @@ def test_injection_rejection_attributed(cfg, golden_dir):
     inj = sorted((golden_dir / "injected").glob("*.pdf"))
     hits = 0
     for p in inj:
-        r = convert(p, cfg=cfg)
+        r = _cached_convert(p, cfg)
         for rej in r.rejected_ops:
             assert rej["attribution"] in ("injection_candidate", "model_hallucination")
         if any(rej["attribution"] == "injection_candidate" for rej in r.rejected_ops):
@@ -262,7 +274,7 @@ def test_injection_no_nonwhitelist_op_applied(cfg, golden_dir, tmp_path):
     """探针口径：把「越权 op」强灌进 LLM 输出，断言应用数为 0。"""
     inj = sorted((golden_dir / "injected").glob("*.pdf"))
     for p in inj[:3]:
-        r = convert(p, cfg=cfg)
+        r = _cached_convert(p, cfg)
         wl = set(config.get(cfg, "llm.op_whitelist", DEFAULT_OP_WHITELIST))
         assert not (set(r.applied_ops) - wl)
 
