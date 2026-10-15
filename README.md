@@ -129,7 +129,7 @@ rename 轮转只能有一个属主，三类进程三份文件。
 | `ops/backup.md` | 备份介质与恢复演练细则 |
 | `ops/windows/install-doc2md-tasks.ps1` | Windows 任务计划安装 / 校验 / 卸载（与 launchd 同等能力） |
 
-跟踪约定：契约变更、缺陷、更优做法一律按登记流写入方案 第十一章（当前编号至 `CH-466`，下一条 `CH-467`），实测数字进第十二章并标注语料与测量方法；规格发生变化时同步主题篇章节与本文相应小节，并递增 `doc2md.PLAN_VERSION`（管线契约变化另递增 `PIPELINE_VERSION`）。
+跟踪约定：契约变更、缺陷、更优做法一律按登记流写入方案 第十一章（当前编号至 `CH-467`，下一条 `CH-468`），实测数字进第十二章并标注语料与测量方法；规格发生变化时同步主题篇章节与本文相应小节，并递增 `doc2md.PLAN_VERSION`（管线契约变化另递增 `PIPELINE_VERSION`）。
 
 ## 验收与测试
 
@@ -162,3 +162,10 @@ python3 tests/make_golden.py --force    # 强制重生成
 
 正文里出现的 `CH-xxx` 只是索引，条目原文与实测证据统一收录在
 `docs/dev-plan.md` 第十一、十二章。
+
+## 本地红线兜底（T1）
+
+平台级必需检查受阻于 GitHub 计划限制（private + 免费计划，分支保护 API 403——CH-458 复测为
+计划级限制而非令牌权限）。客户端兜底：`git config core.hooksPath ops/hooks` 后，每次
+`git push` 前自动跑 `pytest -m gate`，红则拒绝推送（日志在 `/tmp/doc2md-gate.log`）。
+日常不要用 `--no-verify` 绕过。平台侧解锁（升级 Pro/Team 或转 public）后此钩子可保留为双保险。

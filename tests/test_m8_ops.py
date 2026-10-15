@@ -570,3 +570,22 @@ def test_v2_header_total_tamper_rejected():
     # total 被改小 → 尾随字节被拒；被改大 → 结构截断被拒。两条路都不给过。
     with pytest.raises((InvalidTag, ValueError)):
         decrypt_bytes(bytes(blob), PASS)
+
+
+# --- CH-467：pre-push 红线兜底钩子（T1 平台限制的客户端兜底） ------------------
+def test_pre_push_hook_valid_and_gate_aligned():
+    """钩子存在、可执行、语法合法，且红线口径与 CI merge-gate 一致（-m gate）。"""
+    import subprocess
+    hook = Path(__file__).resolve().parent.parent / "ops" / "hooks" / "pre-push"
+    assert hook.is_file()
+    assert os.access(hook, os.X_OK), "钩子必须可执行"
+    src = hook.read_text(encoding="utf-8")
+    assert "pytest" in src and "-m gate" in src, "红线口径必须与 CI merge-gate 同一断言面"
+    assert "no:cacheprovider" in src
+    assert subprocess.run(["sh", "-n", str(hook)], capture_output=True).returncode == 0
+
+
+def test_hooks_path_enabled_hint():
+    """仓库内钩子目录已在 README 说明启用方式（core.hooksPath 是本机配置，不可断言）。"""
+    readme = (Path(__file__).resolve().parent.parent / "README.md").read_text(encoding="utf-8")
+    assert "core.hooksPath ops/hooks" in readme
