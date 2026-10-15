@@ -80,7 +80,7 @@ def test_shard_two_phase(large_single, large_sharded):
     st = large_sharded.meta["shard_stats"]
     assert sim >= 0.99, f"分片 vs 单片相似度 {sim} < 0.99"
     assert not half_sentence_heads(large_sharded)
-    assert large_sharded.meta["sharded"] is True
+    assert large_sharded.meta["sharded"] is False  # T1 acceptance: deliberate red
     assert large_sharded.meta["shard_count"] >= 2
     # 分片确实发生（非降级伪通过，方案 4.3）
     assert not st.get("fallback"), f"降级单片，非真分片：{st}"
