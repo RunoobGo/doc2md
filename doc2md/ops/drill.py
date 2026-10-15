@@ -18,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from ..errors import E4001_BadRequest
-from .backup import MAGIC, BackupPlan
+from .backup import MAGIC_V2, BackupPlan
 
 DRILL_DIR_NAME = "drill"
 
@@ -123,8 +123,8 @@ def run_drill(cfg: dict, root: Path, *, keep: bool = False) -> DrillReport:
 
         # 3) 外置加密副本（NFR-18：强制 AES-256-GCM 容器 + 600）
         enc = plan.to_external(snap, passphrase)
-        head = enc.read_bytes()[:len(MAGIC)]
-        if head != MAGIC:
+        head = enc.read_bytes()[:len(MAGIC_V2)]
+        if head != MAGIC_V2:
             raise DrillFailure(f"external container magic mismatch: {head!r}")
         rep.steps.append(DrillStep("external_encrypt", True,
                                    {"file": enc.name, "mode": oct(enc.stat().st_mode & 0o777)}))

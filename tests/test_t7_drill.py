@@ -17,7 +17,7 @@ import pytest
 from doc2md.errors import E4001_BadRequest
 from doc2md.ir import IR, Block
 from doc2md.ir.model import source_key_of
-from doc2md.ops.backup import MAGIC, BackupPlan
+from doc2md.ops.backup import MAGIC_V2, BackupPlan
 from doc2md.ops.drill import DrillFailure, run_drill
 from doc2md.storage.db import Store, now_iso
 from doc2md.storage.repo import save_ir
@@ -112,7 +112,7 @@ def test_drill_external_container_discipline(drill_env):
     encs = list((rep.drill_dir / "backups_external").glob("*.enc"))
     assert len(encs) == 1
     enc = encs[0]
-    assert enc.read_bytes()[:len(MAGIC)] == MAGIC
+    assert enc.read_bytes()[:len(MAGIC_V2)] == MAGIC_V2
     assert oct(enc.stat().st_mode & 0o777) == "0o600"
 
 
@@ -149,7 +149,7 @@ def test_restore_rejects_tampered_container(drill_env):
     rep = run_drill(cfg, root, keep=True)
     enc = next((rep.drill_dir / "backups_external").glob("*.enc"))
     blob = bytearray(enc.read_bytes())
-    blob[len(MAGIC) + 12 + 5] ^= 0x01             # nonce 之后的密文区翻一比特
+    blob[len(MAGIC_V2) + 16 + 4 + 8 + 12 + 5] ^= 0x01   # 头(7+16+4+8)+nonce 之后的密文区翻一比特
     enc.write_bytes(bytes(blob))
     plan = BackupPlan(local_dir=rep.drill_dir / "backups_local",
                       external_dir=rep.drill_dir / "backups_external")

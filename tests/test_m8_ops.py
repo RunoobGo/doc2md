@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from doc2md.ir import IR, Block
-from doc2md.ops.backup import BackupPlan, decrypt_bytes, encrypt_bytes, hdiutil_recipe
+from doc2md.ops.backup import MAGIC_V2, BackupPlan, decrypt_bytes, encrypt_bytes, hdiutil_recipe
 from doc2md.storage import repo
 from doc2md.storage.db import Store
 
@@ -35,7 +35,7 @@ def _mk_db(p: Path) -> Path:
 def test_encrypt_decrypt_roundtrip():
     data = "正文：例外情况 12345".encode() + os.urandom(64)
     blob = encrypt_bytes(data, PASS)
-    assert blob.startswith(b"D2MBAE1")
+    assert blob.startswith(MAGIC_V2)      # CH-460 / A-11：新容器一律 v2（随机盐）
     assert "例外情况" not in blob.decode("latin-1")     # 密文不含明文
     assert decrypt_bytes(blob, PASS) == data
 
@@ -69,7 +69,7 @@ def test_external_backup_encrypted_and_restorable(tmp_path):
     out = plan.to_external(snap, PASS)
     assert out.suffix == ".enc"
     assert oct(out.stat().st_mode & 0o777) == "0o600"
-    assert b"D2MBAE1" == out.read_bytes()[:7]
+    assert MAGIC_V2 == out.read_bytes()[:7]   # 外置副本为新 v2 容器
     # 恢复 → 可用
     dst = plan.restore(out, tmp_path / "restored.sqlite", PASS)
     got = sqlite3.connect(str(dst)).execute("SELECT x FROM t").fetchone()[0]
@@ -384,7 +384,7 @@ def test_cron_weekly_with_passphrase_writes_enc(tmp_path, cfg, monkeypatch):
     res = cron.run(c, root=tmp_path / "work", mode="weekly")
     assert res.ok, res.steps
     encs = list((tmp_path / "ext").glob("*.enc"))
-    assert encs and encs[0].read_bytes().startswith(b"D2MBAE1")
+    assert encs and encs[0].read_bytes().startswith(MAGIC_V2)
     store.close()
 
 
@@ -433,7 +433,7 @@ def test_dod11_drill_end_to_end(tmp_path, cfg, small_pdf, monkeypatch):
         assert wk.ok, wk.steps
         encs = list((tmp_path / "ext").glob("*.enc"))
         snaps = list(Path(c["ops"]["backup_local_dir"]).glob("state-*.sqlite"))
-        assert encs and snaps and encs[0].read_bytes().startswith(b"D2MBAE1")
+        assert encs and snaps and encs[0].read_bytes().startswith(MAGIC_V2)
         # ⑧ 密钥纪律：口令字面量不得出现在任何持久化介质
         for p in [Path(c["paths"]["root"]) / "state.sqlite", *snaps, *encs,
                   *(root / "logs").glob("*"), *(Path(c["paths"]["reports"])).rglob("*")]:
@@ -477,3 +477,80 @@ def test_dod11_drill_end_to_end(tmp_path, cfg, small_pdf, monkeypatch):
 def urllib_parse_quote(s: str) -> str:
     from urllib.parse import quote
     return quote(s)
+
+
+# --- CH-460 / A-11：容器 v2（随机盐 + 分块流式） ------------------------------
+def test_v2_salt_is_random_per_call():
+    """同口令同数据两次加密：盐与密文都不同（彩虹表预制失效）。"""
+    data = b"payload-" + os.urandom(32)
+    b1 = encrypt_bytes(data, PASS)
+    b2 = encrypt_bytes(data, PASS)
+    assert b1 != b2
+    assert b1[7:7 + 16] != b2[7:7 + 16]        # 头部盐位不同
+    assert decrypt_bytes(b1, PASS) == data and decrypt_bytes(b2, PASS) == data
+
+
+def test_v1_container_still_decryptable():
+    """历史 v1 容器（静态盐）保持可解密——存量外置副本的恢复路径不断。"""
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    from doc2md.ops.backup import LEGACY_SALT, MAGIC, derive_key
+    nonce = os.urandom(12)
+    key = derive_key(PASS, LEGACY_SALT)
+    blob = MAGIC + nonce + AESGCM(key).encrypt(nonce, b"legacy-db-bytes", MAGIC)
+    assert decrypt_bytes(blob, PASS) == b"legacy-db-bytes"
+
+
+def test_stream_roundtrip_multi_chunk_and_tail(tmp_path):
+    """多块流式 round-trip：整除 / 不整除末块 / 空输入三种形态。"""
+    from doc2md.ops.backup import CHUNK_SIZE, decrypt_stream, encrypt_stream
+    for size in (0, 1, CHUNK_SIZE - 1, CHUNK_SIZE, CHUNK_SIZE + 7, CHUNK_SIZE * 2 + 123):
+        data = os.urandom(size)
+        src = tmp_path / f"in-{size}"
+        dst_enc = tmp_path / f"out-{size}.enc"
+        dec = tmp_path / f"out-{size}.sqlite"
+        src.write_bytes(data)
+        with src.open("rb") as s, dst_enc.open("wb") as d:
+            n = encrypt_stream(s, d, PASS)
+        assert n == (size + CHUNK_SIZE - 1) // CHUNK_SIZE
+        with dst_enc.open("rb") as s, dec.open("wb") as d:
+            decrypt_stream(s, d, PASS)
+        assert dec.read_bytes() == data
+
+
+def test_v2_swap_chunks_rejected(tmp_path):
+    """交换两块密文 → 序号 AAD 认证失败（重排不可行）。"""
+    from doc2md.ops.backup import CHUNK_SIZE, decrypt_bytes, encrypt_bytes
+    data = os.urandom(CHUNK_SIZE * 2 + 100)
+    blob = bytearray(encrypt_bytes(data, PASS))
+    hdr = 7 + 16 + 4 + 8
+    blk = CHUNK_SIZE + 16 + 12
+    a, b = blob[hdr:hdr + blk], blob[hdr + blk:hdr + blk * 2]
+    blob[hdr:hdr + blk] = b
+    blob[hdr + blk:hdr + blk * 2] = a
+    with pytest.raises(Exception):
+        decrypt_bytes(bytes(blob), PASS)
+
+
+def test_v2_truncated_container_restore_leaves_nothing(tmp_path):
+    """截断容器 → restore 失败且 dst / .part 都不存在（不留半截库）。"""
+    plan = BackupPlan(local_dir=tmp_path / "bk", external_dir=tmp_path / "ext")
+    plan.local_dir.mkdir(parents=True)
+    snap = plan.local_dir / "state-x.sqlite"
+    snap.write_bytes(os.urandom(8192))
+    out = plan.to_external(snap, PASS)
+    cut = tmp_path / "cut.enc"
+    cut.write_bytes(out.read_bytes()[: -32])   # 掐掉末块尾部
+    dst = tmp_path / "restored.sqlite"
+    with pytest.raises(Exception):
+        plan.restore(cut, dst, PASS)
+    assert not dst.exists()
+    assert not dst.with_name(dst.name + ".part").exists()
+
+
+def test_v2_header_total_tamper_rejected():
+    """改头部总块数 → 每块 AAD 都绑定 total，首块即认证失败。"""
+    blob = bytearray(encrypt_bytes(b"some-db" * 100, PASS))
+    blob[7 + 16 + 4] ^= 0x01                   # total_chunks 最低位翻位
+    with pytest.raises(Exception):
+        decrypt_bytes(bytes(blob), PASS)
