@@ -7,7 +7,11 @@ name: ci
 # CH-456（方案 T10）：ruff 静态检查为独立信息作业，与 merge-gate 并行、不互相 needs——
 # 风格判断不得变成红线，也不得拖慢红线层。
 # CH-471（本轮）：三个作业都加 `timeout-minutes`。缺它时一次挂死会占满 GitHub 的 6 小时
-# 默认上限——红线在几小时内既不是绿也不是红，等于没有红线；现在最坏 15/10/30 分钟必出结论。
+# 默认上限——红线在几小时内既不是绿也不是红，等于没有红线；现在最坏 6/10/30 分钟必出结论。
+# CH-471（merge-gate 超时右调）：原 15 分钟过宽。实测 6 轮成功 CI 的 18 条 merge-gate leg
+# 样本：中位 ~83s、观察到的最慢 2m40s（含 checkout + pip 安装与两次 320 页转换 session
+# fixture），故降到 6 分钟——≈最慢样本的 2.2 倍，仍留冷缓存/慢 runner 余量，同时把挂死时
+# 的空耗从 15 分钟砍到 6（full-suite 的 needs 也就更早拿到结论）。
 # 同时 gate 与 full-suite 改用 `-v`（每行一个用例名，132/481 行的日志代价可忽略）：
 # 挂死发生时「最后一条 PASSED 之后的下一个用例」就是嫌疑人，作业超时无需再猜。
 
@@ -24,7 +28,7 @@ concurrency:
 jobs:
   merge-gate:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 6        # CH-471：实测最慢 leg 2m40s，6min 留 >2x 余量（见文件头口径）
     strategy:
       fail-fast: false
       matrix:
