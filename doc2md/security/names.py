@@ -84,7 +84,10 @@ class UnsafeNameError(E4003_FileNameUnsafe, ValueError):
 def assert_name_safe(name: str, maxlen: int = DEFAULT_MAX_BYTES) -> None:
     """双闸第二道：zip 条目名 / front-matter 写入前二次断言。"""
     problems = []
-    if ".." in name:
+    # CH-471 SEC-4：原 `if ".." in name` 会误伤合法内部连点（如 a..b.pdf → E4003）。
+    # 路径穿越只在「某个完整路径段恰为 ..」时才成立；分隔符本身另由 separator 检查拦截，
+    # 故此处按 / 与 \\ 切段、只标出等于 .. 的整段——既放过 a..b.pdf，也仍拒 ../x、..、a/../b。
+    if any(seg == ".." for seg in re.split(r"[/\\]", name)):
         problems.append("dot-dot")
     if "/" in name or "\\" in name:
         problems.append("separator")

@@ -16,7 +16,7 @@ from __future__ import annotations
 import secrets
 
 from .errors import E4011_Unauthorized, E4031_Forbidden
-from .storage.db import Store, now_iso
+from .storage.db import Store, now_iso, token_hash
 
 ROLES = ("admin", "editor", "reader")
 RANK = {"reader": 1, "editor": 2, "admin": 3}
@@ -38,13 +38,16 @@ MATRIX = {
 
 def issue(store: Store, role: str = "admin", label: str = "",
           allowed: tuple[str, ...] | list[str] = ROLES) -> str:
-    """签发 token；`allowed` 之外的角色的签发即 ValueError（api.token_roles）。"""
+    """签发 token；`allowed` 之外的角色的签发即 ValueError（api.token_roles）。
+
+    CH-471 SVC-9：明文 token 只在此返回一次（给调用方展示），库里落 `token_hash(token)`。
+    """
     if role not in ROLES or role not in tuple(allowed):
         raise ValueError(f"bad role {role}（可签发：{list(allowed)}）")
     token = "d2m_" + secrets.token_urlsafe(24)
     with store.tx() as tx:
         tx.execute("INSERT INTO tokens(token, role, label, created_at) VALUES (?,?,?,?)",
-                   (token, role, label, now_iso()))
+                   (token_hash(token), role, label, now_iso()))
     return token
 
 
@@ -53,9 +56,11 @@ def revoke(store: Store, token: str) -> bool:
 
     原实现返回 None 且不看影响行数：调用方对「吊销了个不存在的 token」与
     「吊销成功」给出完全相同的响应，运维面上无法确认操作真的生效。
+    CH-471 SVC-9：调用方传明文（CLI --revoke 手输），入库按键哈希匹配。
     """
     with store.tx() as tx:
-        tx.execute("UPDATE tokens SET revoked_at=? WHERE token=?", (now_iso(), token))
+        tx.execute("UPDATE tokens SET revoked_at=? WHERE token=?",
+                   (now_iso(), token_hash(token)))
         return tx.rowcount > 0
 
 
@@ -64,7 +69,8 @@ def check(store: Store, token: str | None, action: str,
     """返回角色名；未授权 401，角色不足 403。吊销在窗口期内即时生效。"""
     if not token:
         raise E4011_Unauthorized("missing token")
-    row = store.q1("SELECT role, revoked_at, created_at FROM tokens WHERE token=?", (token,))
+    row = store.q1("SELECT role, revoked_at, created_at FROM tokens WHERE token=?",
+                   (token_hash(token),))
     if not row:
         raise E4011_Unauthorized("unknown token")
     if row["revoked_at"]:

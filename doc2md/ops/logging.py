@@ -36,7 +36,9 @@ class RotatingJsonlWriter:
         self._day = self._utc_day()
         self._path = self.dir / f"{stem}.jsonl"
         self._size = self._path.stat().st_size if self._path.exists() else 0
-        self._fh = open(self._path, "a", encoding="utf-8", errors="replace")
+        # CH-471（PERF-2）：二进制追加写，日志行**一次编码为 bytes** 再落盘并计入
+        # _size（原实现文本模式 write(str) 后又 `len(line.encode())`，每行编两次码）。
+        self._fh = open(self._path, "ab")
         self._lock = threading.Lock()
         self.rotations = 0
 
@@ -59,22 +61,24 @@ class RotatingJsonlWriter:
         if self._path.exists():
             self._path.replace(self.dir / f"{self.stem}.jsonl.1")
         self._day = self._utc_day()
-        self._fh = open(self._path, "a", encoding="utf-8", errors="replace")
+        self._fh = open(self._path, "ab")
         self._size = 0
-        marker = json.dumps({"code": "E_LOG_ROTATE", "ts": _now_iso(),
-                             "keep": self.rotate_keep}, ensure_ascii=False) + "\n"
+        marker = (json.dumps({"code": "E_LOG_ROTATE", "ts": _now_iso(),
+                              "keep": self.rotate_keep}, ensure_ascii=False) + "\n"
+                  ).encode("utf-8", errors="replace")
         self._fh.write(marker)
-        self._size += len(marker.encode("utf-8"))
+        self._size += len(marker)
         self.rotations += 1
 
     def write(self, record: dict) -> None:
         # NFR-20：日志不得含正文片段 —— 长文本字段一律截断为指纹
-        line = json.dumps(_scrub(record), ensure_ascii=False, default=str) + "\n"
+        data = (json.dumps(_scrub(record), ensure_ascii=False, default=str) + "\n"
+                ).encode("utf-8", errors="replace")
         with self._lock:
             if self._should_rotate():
                 self._rotate()
-            self._fh.write(line)
-            self._size += len(line.encode("utf-8"))
+            self._fh.write(data)
+            self._size += len(data)
 
     def flush(self) -> None:
         with self._lock:

@@ -11,6 +11,12 @@ CH-464：观察语义收敛为「同内容只报一次稳定」——首见快�
 文件重转换一遍（CPU/磁盘打满、库反复重建）。现在 `enqueued` 记录**提交时戳**：
 未变 → False；重写（size/mtime 变化）→ 弹回 pending 重新走窗口（保留热更新
 能力）。登记簿改 set/dict 消除原 list 的每 key O(n) 扫描。
+
+CH-471（PERF-1 / 决策 D3）：本轮**保持纯轮询为默认**（不引入 watchdog，守住 4 运行
+时依赖闭环这一核心价值）。size+mtime 短路（上段 `enqueued` 判据）就是「跳过未变更
+文件重复处理」的无新依赖优化——未变文件每轮只做 O(1) 字典比对即返回 False，不再重
+新转换/计算；事件驱动快路径（watchdog + 轮询对账）登记为未来可选增强，其大目录 CPU
+收益需真机测量（登记 X-11）。
 """
 from __future__ import annotations
 
@@ -34,7 +40,6 @@ class StabilityTracker:
     stable_seconds: float = 5.0
     pending: dict[str, Stamp] = field(default_factory=dict)
     enqueued: dict[str, Stamp] = field(default_factory=dict)   # 路径 → 提交时戳（CH-464）
-    registered: set[str] = field(default_factory=set)
     first_seen: dict[str, float] = field(default_factory=dict)
     # CH-469（O-8）：连续 N 轮没在清单里见到 → 判定已消失，出登记簿
     stale_rounds: int = 3
@@ -51,7 +56,7 @@ class StabilityTracker:
         恰好相近时被当成「已提交过」而漏转换。
         """
         dropped: list[str] = []
-        tracked = set(self.pending) | set(self.enqueued) | self.registered | set(self.first_seen)
+        tracked = set(self.pending) | set(self.enqueued) | set(self.first_seen)
         for key in seen:
             self.misses.pop(key, None)
         for key in tracked - seen:
@@ -62,7 +67,6 @@ class StabilityTracker:
             self.pending.pop(key, None)
             self.enqueued.pop(key, None)
             self.first_seen.pop(key, None)
-            self.registered.discard(key)
             self.misses.pop(key, None)
             dropped.append(key)
         return dropped
@@ -93,7 +97,6 @@ class StabilityTracker:
             return False
         prev = self.pending.get(key)
         if prev is None:
-            self.registered.add(key)
             # CH-462：首见文件若 mtime 已老于稳定窗口（写入发生在观察开始之前），
             # 直接判稳定——否则 `watch --once`（cron 模式，每次全新进程、没有
             # 「上一轮」可对比）单轮观察永远返回 False，文件永远不被提交。

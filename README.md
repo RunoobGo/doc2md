@@ -108,7 +108,7 @@ pwsh ops/windows/install-doc2md-tasks.ps1 -Uninstall        # 卸载
 注册 `md.doc2md.cron`（每日 00:00）与 `md.doc2md.cron.weekly`（周日 00:30）两个任务，
 以当前用户最低权限运行，无需管理员；电池供电照跑、错过的时间窗开机补跑。
 任务定义（`ops/windows/*.xml`）不含任何口令；时间触发按**本机本地时间**解释
-（launchd 侧固定 UTC，要同口径可把机器时区设为 UTC，或用 `-DailyAt` 换算）。
+（launchd 的 `StartCalendarInterval` 同样按**系统本地墙钟**触发——plist 里的 `TZ=UTC` 只设定子进程读到的时钟口径、不改触发时刻；要与 Windows 严格同频两边都按本地钟即可，需要 UTC 口径则把机器时区设为 UTC，或用 `-DailyAt` 换算）。
 排障：`Get-ScheduledTask -TaskName md.doc2md.cron* | Format-List *`。
 
 ## 日志（NFR-19 / CH-444）
@@ -132,17 +132,23 @@ rename 轮转只能有一个属主，三类进程三份文件。
 | `ops/backup.md` | 备份介质与恢复演练细则 |
 | `ops/windows/install-doc2md-tasks.ps1` | Windows 任务计划安装 / 校验 / 卸载（与 launchd 同等能力） |
 
-跟踪约定：契约变更、缺陷、更优做法一律按登记流写入方案 第十一章（当前编号至 `CH-469`，下一条 `CH-470`），实测数字进第十二章并标注语料与测量方法；规格发生变化时同步主题篇章节与本文相应小节，并递增 `doc2md.PLAN_VERSION`（管线契约变化另递增 `PIPELINE_VERSION`；状态库结构变化另递增 `DB_VERSION`，CH-469 起为 `5`）。
+跟踪约定：契约变更、缺陷、更优做法一律按登记流写入方案 第十一章（当前编号至 `CH-471`，下一条 `CH-472`），实测数字进第十二章并标注语料与测量方法；规格发生变化时同步主题篇章节与本文相应小节，并递增 `doc2md.PLAN_VERSION`（管线契约变化另递增 `PIPELINE_VERSION`；状态库结构变化另递增 `DB_VERSION`，CH-469 起为 `5`）。
 
 ## 验收与测试
 
 六条 merge-gate 的 CI 定义见 `.github/workflows/ci.yml`：`merge-gate` job 跑
 `pytest -m gate`（Python 3.11/3.12/3.13 矩阵，失败即 CI 红并在 CI 内阻断 `full-suite`），
 `full-suite` job 依赖它跑全量 + 黄金样本可复现性 + `doc2md doctor`；`lint`（ruff）为
-无人依赖的信息作业，不阻断。
+无人依赖的信息作业，不阻断。两个作业都带 `timeout-minutes`（15 / 10 / 30）且测试步骤用
+`-vv`（CH-471）：没有上界时一次挂死会占满 6 小时默认限，红线在那几小时里既非绿也非红；
+`-vv` 才打得出逐用例行（`pytest.ini` 的 `addopts` 已含 `-q`，单 `-v` 会被抵成 0 档），
+挂死时能直接指认到用例。
 > 现状（CH-468 起）：仓库已公开，`main` 分支保护已配置——`merge-gate (3.11/3.12/3.13)` 为**必需检查**，
 > 三个 gate 任一失败即禁止合并（`full-suite` 因 `needs` 同样被阻断）。验收：故意失败的 PR #1 被
 > `mergeStateStatus=BLOCKED` 拦下。另有本地 pre-push 钩子双保险（见「本地红线兜底」）。
+> 边界（CH-470）：必需状态检查拦的是 **PR 合并**，直接 `git push origin main` 仍会成功（远端返回
+> `Bypassed rule violations … 3 of 3 required status checks are expected`）；要让"红即不可入库"对直推
+> 也成立，需为 `main` 打开「Require a pull request before merging」，那是改变日常工作流的决策项。
 
 ```bash
 pytest -m gate            # 红线层：六条 merge-gate + 低配机专项 + CH-469 两批安全/契约专项（全绿方可合并）

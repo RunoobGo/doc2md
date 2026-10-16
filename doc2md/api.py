@@ -4,7 +4,8 @@
 修订：PATCH 必填 base_revision + 425/E4251 + current_revision；
      POST /jobs 目录扫描统一走 FR-129（超限 413/E4133）；
      token 三角色 + --role；GET /settings reader 可见、PUT 需 admin。
-事件：仅全局总线 /events（FR-125 硬规则，CH-401）；per-job 端点仅 CLI/脚本 UA。
+事件：全局总线 /events 供前端；per-job 端点仅 CLI/脚本 UA（CH-401 / FR-125，
+咨询性约定而非安全边界——UA 可伪造，鉴权由 need("read") 承担；SVC-9）。
 """
 from __future__ import annotations
 
@@ -22,11 +23,13 @@ from .errors import (
     E4001_BadRequest,
     E4031_Forbidden,
     E4041_NotFound,
+    E4091_DocOverwrite,
+    E5031_StorageError,
 )
 from .ops.logging import RotatingJsonlWriter, scrub_record
 from .pipeline.convert import convert
 from .scheduler import Scheduler
-from .security.dirguard import WalkLimits, scan_or_raise
+from .security.dirguard import scan_or_raise, walk_limits
 from .storage.db import Store, now_iso
 from .storage.repo import (
     count_blocks,
@@ -131,6 +134,24 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
     def _404(e):
         return err(E4041_NotFound("no such route"))
 
+    @app.errorhandler(Exception)
+    def _unhandled(e):
+        """SVC-2（CH-471）：未归类异常一律走 {code,message,detail} JSON 契约。
+
+        原实现只注册 ApiError/Doc2mdError/404 三个处理器；任何其它异常
+        （BadZipFile / IndexError / 存储抖动）逃逸成 Werkzeug 默认 **HTML 500**，
+        违反附录 C「响应错误一律走该契约，5xx 同样」。路由级 HTTPException
+        （405/415…）原样透传保持 Flask 默认；其余转 E5000。
+        以 int `.code`（HTTP 状态）判别 HTTPException，避免为一次 isinstance
+        引入 werkzeug 依赖（本包 code 恒为字符串 "E4001" 式，不冲突）。
+        NFR-20：日志只记异常类名，不落消息正文/请求体。
+        """
+        code = getattr(e, "code", None)
+        if isinstance(code, int) and 100 <= code < 600 and hasattr(e, "get_response"):
+            return e
+        logw().write({"code": "E_UNHANDLED", "exc": type(e).__name__})
+        return err(Doc2mdError("internal error"))
+
     # --- 作业 ---------------------------------------------------------------
     @app.post("/jobs")
     def post_job():
@@ -138,16 +159,14 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
         b = body()
         path = b.get("path", "")
         idem = request.headers.get("Idempotency-Key") or b.get("idempotency_key")
+        # CH-471（STOR-5）：重复转换默认护编辑，force=true 才允许覆盖已有编辑
+        force = bool(b.get("force"))
         if not path:
             raise E4001_BadRequest("path required")
         p = Path(path)
         files: list[Path] = []
         if p.is_dir():
-            lim = WalkLimits(
-                follow_symlinks=bool(config.get(cur(), "watch.follow_symlinks", False)),
-                max_depth=int(config.get(cur(), "watch.max_depth", 20)),
-                skip_hidden=bool(config.get(cur(), "watch.skip_hidden", True)),
-                max_files_per_dir=int(config.get(cur(), "watch.max_files_per_dir", 5000)))
+            lim = walk_limits(cur())
             # CH-469（O-10）：走 scan_or_raise——目录没扫完（超时）必须 413/E4133，
             # 不能把半截清单当完整结果入队（用户视角是「目录里明明有，队列里没有」）。
             files = [Path(f) for f in scan_or_raise(p, lim)]
@@ -198,28 +217,93 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
                             "consume_with": "doc2md work"}), 202
 
         out = []
+
+        def _finish_one(f, ir, doc_id, source_key):
+            j = sched.submit(doc_id, source_key, idem_key=_idem_for(f))
+            # CH-459（A-4）：save_ir / mark(done) / 事件三写合并为单事务
+            # （原 5 次独立提交，WAL + synchronous=FULL 每次 fsync）。
+            # CH-471（STOR-5）：库内已有编辑时 save_ir 抛 E4091，整笔事务回滚
+            # （job 不标 done、编辑原样保留），本文件记为 conflict 后继续处理其余。
+            try:
+                with store.tx() as tx:
+                    save_ir(store, ir, tx=tx, force=force)
+                    sched.mark(j.job_id, "done", tx=tx)
+                    _emit(store, "job_done", doc_id, j.job_id,
+                          {"blocks": len(ir.blocks)}, logw(), tx=tx)
+            except E4091_DocOverwrite as e:
+                sched.mark(j.job_id, "rejected", e.code,
+                           {"reason": "edited_blocks_present",
+                            "edited_blocks": e.detail.get("edited_blocks")})
+                _emit(store, "job_rejected", doc_id, j.job_id,
+                      {"code": e.code, "source": "api"}, logw())
+                out.append({"file": f.name, "job_id": j.job_id, "doc_id": doc_id,
+                            "status": "conflict", "code": e.code,
+                            "edited_blocks": e.detail.get("edited_blocks")})
+                return
+            out.append({"file": f.name, "job_id": j.job_id, "doc_id": doc_id,
+                        "attached": j.attached, "idempotency_hit": j.idem_hit,
+                        "sharded": ir.sharded, "shard_count": ir.shard_count})
+
+        if not files:
+            return jsonify({"jobs": out}), 202
+
+        # SVC-3（CH-471）：多文件目录原为「一个请求线程内串行 convert 全部」，
+        # 吞吐随文件数线性恶化（正是 queue_async 要避免、但它默认关）。大批量改走
+        # run_batch 进程池（与 CLI/worker 同一吞吐层，产物口径逐字节一致）。但进程池
+        # 按请求新建：小批次建池 + 子进程预热 pdfplumber 的成本高于收益，且长驻父进程
+        # 里偶发 worker 失败（本机实测）→ 小/中批仍走进程内串行：确定、无池抖动，
+        # 并保留「错误按 HTTP 码传播」既有契约（413/E4131、415/E4151…）与即时 doc_id。
+        # 并行阈值可调（perf.sync_min_parallel，见决策/登记 B）。
+        parallel_min = max(2, int(config.get(cur(), "perf.sync_min_parallel", 8) or 0))
+        if len(files) >= parallel_min:
+            from .pipeline.batch import default_workers, run_batch
+            from .worker import _read_ir
+            by_file = {r["file"]: r for r in run_batch(
+                files, cfg=cur(), out_dir=root / "out",
+                workers=default_workers(cfg))}
+            for f in files:
+                r = by_file.get(str(f)) or {"status": "error", "code": "E5000"}
+                if r["status"] == "rejected":
+                    j = sched.submit_rejected(f.name, r.get("code", "E4221"),
+                                              {"reason": r.get("message", "")},
+                                              idem_key=_idem_for(f))
+                    out.append({"file": f.name, "job_id": j.job_id,
+                                "status": "rejected", "code": r.get("code", "E4221")})
+                elif r["status"] != "ok":
+                    out.append({"file": f.name, "status": "error",
+                                "code": r.get("code", "E5000")})
+                else:
+                    ir = _read_ir(r.get("zip", ""))
+                    if ir is None:
+                        out.append({"file": f.name, "doc_id": r.get("doc_id", ""),
+                                    "status": "error", "code": "E5031"})
+                        continue
+                    _finish_one(f, ir, r.get("doc_id", ""), r.get("source_key", ""))
+            return jsonify({"jobs": out}), 202
+
         for f in files:
             try:
                 res = convert(f, cfg=cur(), out_dir=root / "out")
             except Doc2mdError as e:
                 if e.code == "E4221":
-                    j = sched.submit("reject:" + f.name, idem_key=_idem_for(f))
-                    sched.mark(j.job_id, "rejected", e.code, e.detail)
-                    out.append({"file": f.name, "status": "rejected", "code": e.code})
-                else:
-                    raise
-                continue
-            j = sched.submit(res.doc_id, res.source_key, idem_key=_idem_for(f))
-            # CH-459（A-4）：save_ir / mark(done) / 事件三写合并为单事务
-            # （原 5 次独立提交，WAL + synchronous=FULL 每次 fsync）。
-            with store.tx() as tx:
-                save_ir(store, res.ir, tx=tx)
-                sched.mark(j.job_id, "done", tx=tx)
-                _emit(store, "job_done", res.doc_id, j.job_id,
-                      {"blocks": len(res.ir.blocks)}, logw(), tx=tx)
-            out.append({"file": f.name, "job_id": j.job_id, "doc_id": res.doc_id,
-                        "attached": j.attached, "idempotency_hit": j.idem_hit,
-                        "sharded": res.ir.sharded, "shard_count": res.ir.shard_count})
+                    j = sched.submit_rejected(f.name, e.code, e.detail,
+                                              idem_key=_idem_for(f))
+                    out.append({"file": f.name, "job_id": j.job_id,
+                                "status": "rejected", "code": e.code})
+                    continue
+                # CH-471（SVC-8）：多文件同步批次中途硬错误（413/E4131、415/E4151…）
+                # 原本 `raise` → 请求整体 4xx，但前面 `_finish_one` 已提交落库的文件
+                # 留在库里 → 客户端只拿到错误、不知哪些文件已成功（半成品批次）。
+                # 多文件改记本文件 error 后继续（不建 job 行），与 run_batch 并行路径
+                # 同口径（每文件状态进 out、整体 202）；单文件仍按 HTTP 码传播，
+                # 保留 413/415 契约（见 test_perf_lowend 的 disk-short / magic 用例）。
+                # 选「逐文件续」而非「回滚整批」：已提交的转换不重做（性能优先），
+                # 且批内每个文件都有明确终态（功能全面）。
+                if len(files) > 1:
+                    out.append({"file": f.name, "status": "error", "code": e.code})
+                    continue
+                raise
+            _finish_one(f, res.ir, res.doc_id, res.source_key)
         return jsonify({"jobs": out}), 202
 
     @app.get("/jobs")
@@ -227,10 +311,12 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
         """队列可观测（CH-449）：按状态计数 + 队头明细，不含正文（NFR-20）。"""
         need("read")
         status = request.args.get("status")
-        try:
-            limit = int(request.args.get("limit", 50))
-        except ValueError:
-            raise E4001_BadRequest("limit must be an integer") from None
+        # CH-471（SVC-8）：与 `_window` 同口径——非数字走 400/E4001，负值拒绝。
+        # 原裸 `int()` 无负值保护 → `?limit=-1` 拼进 SQL 得 `LIMIT -1`（SQLite 语义
+        # 是「全部」），既绕过队列分页可观测上限，又与 `_window` 的拒负不一致。
+        limit = _int_arg("limit", 50)
+        if limit < 0:
+            raise E4001_BadRequest("limit must be >= 0")
         sql = ("SELECT job_id, doc_id, source_key, status, created_at, started_at,"
                " finished_at, error_code, detail_json, source_path, mode FROM tasks")
         args: tuple = ()
@@ -270,9 +356,16 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
         if not zp.exists():
             raise E4041_NotFound("artifact not found")
         import zipfile
-        with zipfile.ZipFile(zp) as z:
-            name = [n for n in z.namelist() if n.endswith("content.md")][0]
-            return Response(z.read(name).decode("utf-8"), mimetype="text/markdown")
+        try:
+            with zipfile.ZipFile(zp) as z:
+                names = [n for n in z.namelist() if n.endswith("content.md")]
+                if not names:
+                    raise E4041_NotFound("artifact content.md missing")
+                return Response(z.read(names[0]).decode("utf-8"),
+                                mimetype="text/markdown")
+        except zipfile.BadZipFile as exc:
+            raise E5031_StorageError("artifact unreadable",
+                                     detail={"reason": type(exc).__name__}) from exc
 
     @app.patch("/docs/<doc_id>/blocks/<block_id>")
     def patch(doc_id, block_id):
@@ -384,12 +477,17 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
 
     @app.get("/jobs/<job_id>/events")
     def job_events(job_id):
-        """per-job 端点：仅 CLI / 脚本 UA（FR-125 硬规则，CH-401）。"""
+        """per-job 端点：面向 CLI / 脚本 UA（CH-401 / FR-125）。
+
+        CH-471 SVC-9：这是**咨询性约定**，不是安全边界——User-Agent 由客户端自报、可任意
+        伪造（`curl -A doc2md-cli`）。真正的访问控制是下面的 `need("read")`（token 角色门）。
+        UA 检查只是把误用（前端应走 /events 总线）尽早挡回并给出引导，不构成鉴权。
+        """
         ua = request.headers.get("User-Agent", "")
         if not any(h in ua for h in SCRIPT_UA_HINTS):
             raise E4031_Forbidden(
                 "per-job events endpoint is CLI/script only; use /events bus",
-                detail={"ua": ua[:60], "rule": "FR-125"})
+                detail={"ua": ua[:60], "rule": "FR-125", "advisory": True})
         need("read")
         rows = store.q("SELECT * FROM events WHERE job_id=? ORDER BY seq", (job_id,))
         return jsonify({"events": [dict(r) for r in rows]})
@@ -417,9 +515,14 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
         # 未知键在这里是硬错误（装载期只警告）：PUT 是显式写入，拼错的键进了
         # override 文件就会在每次重启时静默失效。
         candidate = copy.deepcopy(app.config["doc2md"]["cfg"])
+        baseline = app.config["doc2md"]["cfg"]
         _deep(candidate, b)
         try:
             config.validate(candidate)
+            # CH-471 SVC-6（D4）：红线键（run.offline_assert）禁止经运行期 PUT 修改——
+            # 一次 PUT 关掉断网守护 = 进程静默可出站。convert(cfg) 仍可显式带该键（合法 profile），
+            # 拦的是「在线途中改」，故只在此处比对基线，不改 config.validate 的通用口径。
+            config.check_runtime_immutable(candidate, baseline)
         except config.ConfigError as exc:
             raise E4001_BadRequest(f"invalid configuration: {exc}") from None
         with app.config["doc2md"]["cfg_lock"]:

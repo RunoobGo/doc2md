@@ -147,7 +147,7 @@ def read_pdf(path: str | Path, page_span: tuple[int, int] | None = None,
                     top = float(ln.get("top", 0.0) or 0.0)
                     bottom = float(ln.get("bottom", 0.0) or 0.0)
                     lchars = _slice_chars(chars, cs_index, top, bottom)
-                    st = _line_style(lchars, top, bottom)
+                    st = _line_style(lchars)
                     lines.append(Line(text=ln.get("text", ""), size=st[0],
                                       bold=st[1], italic=st[2], strike=st[3],
                                       mono=st[4],
@@ -238,14 +238,16 @@ def _slice_chars(chars: list[dict], index: tuple[list[int], list[float]],
     return [chars[j] for j in sorted(order[lo:hi])]
 
 
-def _line_style(chars: list[dict], top: float, bottom: float) -> tuple[float, bool, bool, bool, bool]:
-    """按几何区间 [top, bottom) 取行内 char 的众数字号与样式多数派。
+def _line_style(chars: list[dict]) -> tuple[float, bool, bool, bool, bool]:
+    """取**已按几何区间切好**的行内 char 的众数字号与样式多数派。
 
     CH-459：第五返回值 `mono` = 行内多数字体为等宽家族（代码块信号）。
+    CH-471（PIPE-2）：入参 `chars` 已由 `_slice_chars` 用 `[top-1.0, max(bottom,
+    top+1.0))` 同一边界切好，原此处再过滤一遍**恒等于原列表**（逐行全字符比对，
+    与 `_char_index` 的 bisect 优化自相矛盾），删除之——G6 逐字节等价。
     """
     from collections import Counter
-    cs = [c for c in chars if float(c.get("top", 0.0)) >= top - 1.0
-          and float(c.get("top", 0.0)) < max(bottom, top + 1.0)]
+    cs = chars
     if not cs:
         return (0.0, False, False, False, False)
     size = Counter(round(float(c.get("size", 0.0)), 1) for c in cs).most_common(1)[0][0]

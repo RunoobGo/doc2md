@@ -473,7 +473,7 @@ def test_tracker_prunes_disappeared_files(tmp_path):
     assert t.prune(seen=set()) == [], "偶发一轮没扫到不得立刻出册"
     assert t.prune(seen=set()) == []
     assert t.prune(seen=set()) == [key]
-    assert not t.pending and not t.enqueued and not t.first_seen and key not in t.registered
+    assert not t.pending and not t.enqueued and not t.first_seen   # CH-471 Q-1：冗余 registered 已删
 
 
 def test_pruned_file_is_reconverted_after_it_comes_back(tmp_path):

@@ -13,8 +13,9 @@
     错过的时间窗开机后补跑（StartWhenAvailable=true，对齐 launchd 唤醒补跑语义）。
 
     口令纪律（NFR-20 / NFR-18）：DOC2MD_BACKUP_PASSPHRASE 绝不写进 XML、脚本或日志。
-    -SetPassphrase 走 Read-Host -AsSecureString，只写入**用户级**环境变量；
-    更强做法是 Credential Manager 包装脚本，见 ops/backup.md。
+    -SetPassphrase 走 Read-Host -AsSecureString（输入不回显），值只写入**用户级**环境变量——
+    注意该值会以明文持久化在注册表 `HKCU\Environment`（用户态可读，非「不落盘」）。
+    更强做法是 Credential Manager / DPAPI 包装脚本，见 ops/backup.md。
 
 .PARAMETER Exe
     doc2md 可执行文件路径。缺省依次尝试：PATH 中的 doc2md、<repo>\.venv|env|venv\Scripts\doc2md.exe。
@@ -31,7 +32,9 @@
     周任务触发时间（本机本地时间，HH:mm）。默认 00:30（周日）。
 
 .PARAMETER SetPassphrase
-    交互式设置用户级 DOC2MD_BACKUP_PASSPHRASE 环境变量（不回显、不落盘）。
+    交互式设置用户级 DOC2MD_BACKUP_PASSPHRASE 环境变量（输入不回显；值以**明文**持久化到
+    用户级环境变量即注册表 `HKCU\Environment`，故并非「不落盘」，只是不进 XML/脚本/日志。
+    需要静态保护请改用 Credential Manager / DPAPI 包装，见 ops/backup.md）。
 
 .PARAMETER Uninstall
     卸载两个计划任务（等价 launchctl unload + 删 plist）。
@@ -193,13 +196,13 @@ $userId = "$env:USERDOMAIN\$env:USERNAME"
 Write-Step "部署根：$repoRoot｜运行身份：$userId（最低权限，无需管理员）"
 
 if ($SetPassphrase) {
-    $secure = Read-Host -AsSecureString "DOC2MD_BACKUP_PASSPHRASE（外置副本口令，不回显不落盘）"
+    $secure = Read-Host -AsSecureString "DOC2MD_BACKUP_PASSPHRASE（外置副本口令；输入不回显，将以明文存于用户级环境变量 HKCU\Environment）"
     $plain = [Runtime.InteropServices.Marshal]::PtrToStringBSTR(
         [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure))
     if (-not $plain) { throw "口令不能为空" }
     [Environment]::SetEnvironmentVariable("DOC2MD_BACKUP_PASSPHRASE", $plain, "User")
     $plain = $null
-    Write-Step "已写入用户级环境变量 DOC2MD_BACKUP_PASSPHRASE（新开终端/会话后生效）"
+    Write-Step "已写入用户级环境变量 DOC2MD_BACKUP_PASSPHRASE（明文持久化于注册表 HKCU\Environment；新开终端/会话后生效）"
 }
 
 if ($Uninstall) {

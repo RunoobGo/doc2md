@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -13,18 +14,31 @@ sys.path.insert(0, str(ROOT / "tests"))
 
 GOLDEN = ROOT / "tests" / "golden"
 
+# CH-471（TEST-1，HIGH）：golden 资产/MANIFEST 缺失时红线门禁必须**硬失败**，
+# 不得静默 skip——原 `_need`/`golden_dir` 用 skip，会让「从未生成样本」的机器
+# 上 `pytest -m gate` 一片绿（假通过）。仅显式 DOC2MD_ALLOW_MISSING_GOLDEN=1
+# 才降级为 skip，供有意的子集运行。
+def _missing(msg: str) -> None:
+    full = (f"{msg} — run `.venv/bin/python tests/make_golden.py` "
+            f"(或设 DOC2MD_ALLOW_MISSING_GOLDEN=1 降级为 skip)")
+    if os.environ.get("DOC2MD_ALLOW_MISSING_GOLDEN") == "1":
+        pytest.skip(full, allow_module_level=False)
+    pytest.fail(full)
+
 
 def _need(name: str) -> Path:
     p = GOLDEN / name
     if not p.exists():
-        pytest.skip(f"golden sample missing: {name}", allow_module_level=False)
+        _missing(f"golden sample missing: {name}")
     return p
 
 
 @pytest.fixture(scope="session")
 def golden_dir() -> Path:
     if not GOLDEN.is_dir():
-        pytest.skip("tests/golden not generated (run tests/make_golden.py)")
+        _missing("tests/golden not generated")
+    if not (GOLDEN / "MANIFEST.json").is_file():
+        _missing("golden MANIFEST.json missing")
     return GOLDEN
 
 
@@ -115,7 +129,7 @@ def saved_doc(api_client, small_pdf):
 def names_manifest(golden_dir: Path) -> list[str]:
     p = golden_dir / "names" / "malicious_names.json"
     if not p.is_file():
-        pytest.skip("names/malicious_names.json missing")
+        _missing("names/malicious_names.json missing")   # CH-471 TEST-1：硬失败非 skip
     data = json.loads(p.read_text(encoding="utf-8"))
     return data if isinstance(data, list) else data.get("names", [])
 

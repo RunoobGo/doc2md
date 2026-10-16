@@ -55,9 +55,13 @@ def assert_free_space(target_dir: str | Path, src_size: int, *, cfg: dict | None
                       what: str = "artifact") -> int:
     """写产物前检查剩余空间；不足 → E4131_TooLarge（413）。返回当前可用 MB。
 
-    需求 = max([perf].min_free_mb, 源大小 × [perf].disk_safety_factor)：
-    前者是「不管转什么文件都要留的余量」（日志、sqlite WAL），后者防「小文件
-    把盘写到只剩 1MB」。两项同时置 0 = 显式关闭门禁（配额自管的挂载点）。
+    需求 = [perf].min_free_mb + 源大小 × [perf].disk_safety_factor（叠加）：
+    前者是「不管转什么文件都要留的余量」（日志、sqlite WAL），后者是本次写入估算
+    （zip + report.html + 同份 IR + 解压余量）。
+    CH-471（CFG-2）：原实现取二者 `max`，大文件写完后剩余会跌到 min_free_mb 之下——
+    即「写前刚过门禁、写到一半 WAL/日志抢不到那 512MB」的翻车面。叠加语义才与上面那句
+    「都要留的余量」一致：门禁保证写入完成后仍保有固定下限。
+    两项同时置 0 = 显式关闭门禁（配额自管的挂载点）；任一非 0 则至少要求该值。
     """
     factor = 3.0
     floor_mb = 512
@@ -66,11 +70,13 @@ def assert_free_space(target_dir: str | Path, src_size: int, *, cfg: dict | None
         factor = float(config.get(cfg, "perf.disk_safety_factor", factor) or 0)
         floor_mb = int(config.get(cfg, "perf.min_free_mb", floor_mb))
     avail_mb = free_mb(target_dir)
-    need_mb = max(max(floor_mb, 0), int(need_bytes(src_size, max(factor, 0.0))
-                                        / (1024 * 1024)) if factor > 0 else 0)
+    write_mb = (int(need_bytes(src_size, max(factor, 0.0)) / (1024 * 1024))
+                if factor > 0 else 0)
+    need_mb = max(floor_mb, 0) + write_mb
     if need_mb and avail_mb < need_mb:
         raise E4131_TooLarge(
             f"insufficient free space for {what}: need {need_mb}MB, free {avail_mb}MB",
             detail={"target": str(target_dir), "free_mb": avail_mb, "need_mb": need_mb,
                     "rule": "NFR-6"})
     return avail_mb
+

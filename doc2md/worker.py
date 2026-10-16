@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import config
+from .errors import E4091_DocOverwrite
 from .pipeline.batch import default_workers, run_batch
 from .scheduler import Scheduler
 from .storage.db import Store, now_iso
@@ -146,7 +147,19 @@ def drain_once(store: Store, cfg: dict, root, *, workers: int | None = None,
                     rep.notes.append(f"{job['job_id']}: ir unreadable")
                     _event(store, job, res, "job_failed", writer)
                     continue
-                drift = _finish_ok(store, sched, job, res, ir, writer=writer)
+                try:
+                    drift = _finish_ok(store, sched, job, res, ir, writer=writer)
+                except E4091_DocOverwrite as e:
+                    # CH-471（STOR-5）：库内已有编辑 → 拒绝覆盖（编辑原样保留）。
+                    # 无人值守的 work/watch 路径默认不 force：宁可显式 rejected
+                    # 也不静默丢编辑；需要覆盖由调用方带 force 重投。
+                    sched.mark(job["job_id"], "rejected", e.code,
+                               {"reason": "edited_blocks_present",
+                                "edited_blocks": e.detail.get("edited_blocks")})
+                    rep.rejected += 1
+                    rep.notes.append(f"{job['job_id']}: overwrite conflict (edits kept)")
+                    _event(store, job, res, "job_rejected", writer)
+                    continue
                 rep.done += 1
                 rep.drift += 1 if drift else 0
             elif res["status"] == "rejected":

@@ -59,6 +59,8 @@ class OpValidator:
 
     def __init__(self, blocks, whitelist: list[str] | None = None):
         self.blocks = {b.id: b for b in blocks}
+        self._order = list(blocks)
+        self._index = {b.id: i for i, b in enumerate(self._order)}
         self.whitelist = set(whitelist or DEFAULT_OP_WHITELIST)
 
     def apply(self, ops: list[dict]) -> tuple[list[dict], list[dict]]:
@@ -94,12 +96,20 @@ class OpValidator:
                 reasons.append(f"occupied:{tid}")
         return reasons
 
-    @staticmethod
-    def _targets(op: dict) -> list[str]:
+    def _targets(self, op: dict) -> list[str]:
+        """op 声明目标 + **有效写集**（SVC-1，CH-471）。
+
+        `merge_block` 改写的是紧邻前驱，不是声明的 target；若只校验 target，
+        一个指向非 immutable 块的 merge 可以悄悄重写 immutable 前驱。把前驱 id
+        并入写集，immutable/占用校验才覆盖真正的落笔处。
+        """
         t = op.get("target") or op.get("block_id")
-        if isinstance(t, str):
-            return [t]
-        return list(t or [])
+        targets = [t] if isinstance(t, str) else list(t or [])
+        if op.get("op") == "merge_block" and len(targets) == 1:
+            i = self._index.get(targets[0])
+            if i is not None and i > 0:
+                targets.append(self._order[i - 1].id)
+        return targets
 
     @staticmethod
     def _attribute(op: dict) -> str:
@@ -427,6 +437,10 @@ def _merge_block(ir, b) -> bool:
     if idx == 0:
         return False
     prev = ir.blocks[idx - 1]
+    # SVC-1：validator 已在写集里拦 immutable 前驱；此处二次设防，覆盖绕过校验
+    # 直接调 apply_ops 的调用方（immutable 块不得以任何理由被改写/吸收）。
+    if prev.immutable:
+        return False
     if prev.type not in ("paragraph", "list_item"):
         return False
     a, t = (prev.text or "").rstrip(), (b.text or "").lstrip()

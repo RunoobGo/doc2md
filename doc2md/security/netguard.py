@@ -10,8 +10,9 @@ CH-469（O-1）三处收口：
   后进入者会把**上一层的守护函数**当作 original 记下，先退出者把真实实现写回，
   后退出者再把守护函数装回去 → 守护永久残留在进程里（服务面后续所有出站连接
   全被拦），或反向出现「守护还在、补丁已被摘」的空窗。
-- **绕过面**：`connect_ex`（非阻塞 connect，语义等价）与 UDP 的 `sendto` 同样
-  是出站原语，原实现只拦 `connect` → 一个 `connect_ex` 就绕开红线。
+- **绕过面**：`connect_ex`（非阻塞 connect，语义等价）、数据报的 `sendto` 与 `sendmsg`
+  同样是出站原语，原实现只拦 `connect` → 一个 `connect_ex` 就绕开红线。CH-471 SEC-1 补齐
+  `sendmsg`（`sendto` 之外的第二条数据报发送通道）。
 - **允许清单**：`localhost` 原先按**字面名**放行。hosts 投毒 / 异常 DNS 把
   `localhost` 指到公网地址时，名字匹配等于没匹配；现在凡不在字面 IP 白名单里的
   主机名，一律解析后逐个判定是否回环（解析失败按拒绝）。
@@ -21,6 +22,11 @@ CH-469（O-1）三处收口：
   批量场景由 spawn 子进程各自重新施加（守护写在 convert 入口，不依赖继承）。
 - 多线程服务面（`doc2md serve`）下补丁是全局的：守护期间其他线程的连接同样受检。
   这是「宁可误报也不漏报」的取舍，误报面仅限同期真的在连外网。
+- CH-471（SEC-2）：对非字面 IP 的**主机名**，`_allowed` 需先 `getaddrinfo` 解析才能判定
+  是否回环——这一步会向系统解析器发一条 DNS 查询（即一次出站），随后才拦下 TCP 连接。
+  真离线机上解析失败即判「不可达→拒绝」，失败关闭；联网机上则把被拦的主机名泄给本地
+  DNS。因主链路只连 loopback（`llm.bind`/`api.bind`），实际不触发名字解析；如需绝对
+  不解析，可把目标一律写成 IP 字面量，或对未知主机名直接拒（未采，避免误伤 localhost）。
 """
 from __future__ import annotations
 
@@ -108,19 +114,43 @@ def _guarded_sendto(self, data, *args, **kw):
     return _ORIG["sendto"](self, data, *args, **kw)
 
 
+def _sendmsg_address(args: tuple, kw: dict):
+    """从 sendmsg 的调用形参里取出目标地址（无则 None）。
+
+    签名 `sendmsg(message[, ancdata, flags, address])`——address 既可能是第 3 个可选
+    位置参（args[2]），也可能同名关键字；其余 args（ancdata / flags）不是地址。
+    """
+    addr = kw.get("address")
+    if addr is None and len(args) >= 3:
+        addr = args[2]
+    return addr
+
+
+def _guarded_sendmsg(self, message, *args, **kw):
+    # CH-471 SEC-1：`sendmsg` 是 `sendto` 之外的另一条数据报出站原语，未打补丁即可绕过红线。
+    # 连接态套接字用占位 (0, 0) 表示「走已连接的对端」，此时不重复判定（出站面在 connect 已判）。
+    addr = _sendmsg_address(args, kw)
+    if addr is not None and addr != (0, 0):
+        _check(addr)
+    return _ORIG["sendmsg"](self, message, *args, **kw)
+
+
 def _install(allowed: set[str]) -> None:
     _ORIG["connect"] = socket.socket.connect
     _ORIG["connect_ex"] = socket.socket.connect_ex
     _ORIG["sendto"] = socket.socket.sendto
+    _ORIG["sendmsg"] = socket.socket.sendmsg
     socket.socket.connect = _guarded_connect
     socket.socket.connect_ex = _guarded_connect_ex
     socket.socket.sendto = _guarded_sendto
+    socket.socket.sendmsg = _guarded_sendmsg
 
 
 def _uninstall() -> None:
     socket.socket.connect = _ORIG.pop("connect")
     socket.socket.connect_ex = _ORIG.pop("connect_ex")
     socket.socket.sendto = _ORIG.pop("sendto")
+    socket.socket.sendmsg = _ORIG.pop("sendmsg")
     _ORIG.clear()
     _STATE["resolvers"].clear()
 

@@ -5,6 +5,7 @@ from .repo import (
                    get_doc,
                    list_blocks,
                    purge_files,
+                   reconcile_search,
                    reindex,
                    reindex_block,
                    save_ir,
@@ -12,4 +13,5 @@ from .repo import (
 )
 
 __all__ = ["Store", "now_iso", "save_ir", "reindex", "reindex_block", "get_doc",
-           "list_blocks", "search", "delete_doc", "delete_source", "purge_files"]
+           "list_blocks", "search", "delete_doc", "delete_source", "purge_files",
+           "reconcile_search"]

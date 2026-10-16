@@ -93,7 +93,9 @@ def run(cfg: dict | None = None, root: Path | None = None, mode: str = "daily",
                       encrypted_external=bool(
                           config.get(cfg, "ops.backup_external_encrypted", True)),
                       work_root=root,
-                      work_dir_mode=str(config.get(cfg, "ops.work_dir_mode", "700")))
+                      work_dir_mode=str(config.get(cfg, "ops.work_dir_mode", "700")),
+                      cfg=cfg)
+
     if with_backup:
         # NFR-6（CH-450）：备份同样是写盘。快照大小 = 库大小（外置副本 ≈ ×1.05，
         # AES-GCM + nonce），按同一系数口径预估；空间不足记为失败步骤而不是半截文件。
@@ -131,8 +133,9 @@ def run(cfg: dict | None = None, root: Path | None = None, mode: str = "daily",
                     rep.ok = False
                 else:
                     try:
-                        assert_free_space(plan.external_dir, snap.stat().st_size, cfg=cfg,
-                                          what="external_backup")
+                        # CH-471（OPS-4）：外置卷剩余空间守卫已下沉到 plan.to_external
+                        # （plan 带 cfg → 内部自检），这里不再重复预检，to_external 成为
+                        # 唯一闸口，直接调用方也受同一道保护。
                         out = plan.to_external(snap, phrase)
                         rep.add("external_backup", path=str(out), bytes=out.stat().st_size,
                                 encrypted=True)
@@ -140,6 +143,7 @@ def run(cfg: dict | None = None, root: Path | None = None, mode: str = "daily",
                         rep.add("external_backup", code=exc.code, message=exc.message,
                                 ok=False)
                         rep.ok = False
+
             removed = plan.rotate()
             rep.add("rotation", removed=[str(p) for p in removed])
 
@@ -150,7 +154,6 @@ def run(cfg: dict | None = None, root: Path | None = None, mode: str = "daily",
     # 5) 日志轮转检查
     rotated = writer.check()
     rep.add("log_rotation", rotated=rotated)
-    writer.close()
 
     # 6) 事件保留期清理（[ops].events_retention_days）
     days = int(config.get(cfg, "ops.events_retention_days", 30))
@@ -162,6 +165,29 @@ def run(cfg: dict | None = None, root: Path | None = None, mode: str = "daily",
                        (f"-{days} days",)).rowcount
     rep.add("events_purge", removed=n, retention_days=days)
 
+    # 7) 终态作业保留期清理（CH-471 / SVC-4，[ops].tasks_retention_days）：
+    #    tasks 除逐 doc 级联（repo.delete_doc）外此前永不清理，长运行实例无界增长，
+    #    且 GET /jobs 每 5s 重扫全表 GROUP BY status → 延迟持续恶化。只删**终态**
+    #    （done/failed/rejected）且已过保留期的行，queued/running 属在途不动。
+    #    finished_at 口径同 events：用 datetime() 归一，避免 ISO '+00:00' 直比溢出。
+    tdays = int(config.get(cfg, "ops.tasks_retention_days", 30))
+    with store.tx() as tx:
+        tn = tx.execute(
+            "DELETE FROM tasks WHERE status IN ('done','failed','rejected') "
+            "AND finished_at IS NOT NULL AND finished_at <> '' "
+            "AND datetime(finished_at) < datetime('now', ?)",
+            (f"-{tdays} days",)).rowcount
+    rep.add("tasks_purge", removed=tn, retention_days=tdays)
+
+    # 8) 搜索索引对账（CH-471 / STOR-3）：blocks 与 search_blocks 计数背离即整篇
+    #    重建索引（复活 reindex 死代码），修掉「迁移崩溃 / 历史缺陷 → 检索静默失效」。
+    from .storage.repo import reconcile_search
+    rec = reconcile_search(store)
+    rep.add("search_reconcile", **rec)
+    if rec["docs_repaired"] or rec["orphans_removed"]:
+        writer.write({"code": "CRON_SEARCH_RECONCILE", **rec})
+
+    writer.close()
     rep.finished_at = now_iso()
     reports = config.path_setting(cfg, "paths.reports", root, str(root / "reports"))
     reports.mkdir(parents=True, exist_ok=True)

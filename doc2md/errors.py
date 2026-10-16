@@ -3,6 +3,7 @@
 冻结纪律（方案 5.2 / 上游 v2.4 §10-4）：既有错误码段位不可变更，本期只新增：
 - E4133 目录文件数超限（FR-129）
 - E4251 版本冲突（本期赋予真实语义：乐观锁命中，ADR-28）
+- E4091 重复转换护编辑（CH-471 STOR-5；409 段位此前未占用）
 """
 
 
@@ -73,6 +74,16 @@ class E4251_RevisionConflict(ApiError):
     code, http = "E4251", 425
 
 
+class E4091_DocOverwrite(ApiError):
+    """CH-471（STOR-5）：重复转换会覆盖已有编辑（块 revision>1）→ 默认拒绝。
+
+    内容寻址 doc_id 让同源文件永远落到同一文档行；原实现 `INSERT OR REPLACE` +
+    `DELETE FROM blocks` 会静默清空用户编辑。本码把「会丢编辑」的覆盖升级成
+    明确冲突，调用方需 `force=true` 才放行。409 段位此前未占用（冻结段位不变更）。
+    """
+    code, http = "E4091", 409
+
+
 # --- 5xx：内部 ----------------------------------------------------------------
 class E5031_StorageError(Doc2mdError):
     code, http = "E5031", 500
@@ -93,6 +104,7 @@ CODE_INDEX = {
         E4001_BadRequest, E4003_FileNameUnsafe, E4011_Unauthorized, E4031_Forbidden,
         E4041_NotFound, E4131_TooLarge, E4133_DirTooWide,
         E4151_UnsupportedType, E4221_GateReject, E4251_RevisionConflict,
+        E4091_DocOverwrite,
         E5031_StorageError, E5041_LlmUnavailable,
     ]
 }

@@ -6,6 +6,7 @@ CH-469（O-15）：`SPEC` 表驱动的类型 / 区间 / 枚举校验 + 未知键
 """
 from __future__ import annotations
 
+import ipaddress
 import os
 import re
 import tomllib
@@ -28,6 +29,15 @@ PROFILES: dict[str, dict[str, Any]] = {
 # FR-127 红线：消毒失败即拒收，不设降级（方案 6.1）——该键不是行为开关。
 FROZEN_KEYS: dict[str, tuple[Any, ...]] = {
     "security.sanitize_fail_action": ("reject",),
+}
+
+# CH-471 SVC-6（D4）：可经 `config.load()` / `convert(cfg=...)` 显式设置、但**禁止经
+# 运行期 PUT /settings 修改**的红线键。offline_assert 是离线安全网开关（默认 true）：
+# 代码/配置文件按 profile 显式关掉是合法用法，但「在线服务途中被一次 PUT 关掉」就是
+# 静默解除断网守护——所以它进 API 不可变集合，而不是 FROZEN_KEYS（后者连 convert 的
+# 合法 cfg 也会拦，破坏既有契约）。值 → 允许集合；PUT 命中即 400。
+RUNTIME_IMMUTABLE_KEYS: dict[str, tuple[Any, ...]] = {
+    "run.offline_assert": (True,),
 }
 
 
@@ -92,6 +102,7 @@ SPEC: dict[str, tuple[str, Any]] = {
     # [perf]
     "perf.workers": _int(0, 64),
     "perf.queue_async": BOOL,
+    "perf.sync_min_parallel": _int(1, 100_000),
     "perf.min_free_mb": _int(0, 10_000_000),
     "perf.disk_safety_factor": _int(0, 100),
     "perf.stale_job_minutes": _int(0, 100_000),
@@ -106,6 +117,7 @@ SPEC: dict[str, tuple[str, Any]] = {
     # [api]
     "api.bind": STR,
     "api.port": _int(1, 65_535),
+    "api.allow_remote_bind": BOOL,
     "api.token_roles": STRLIST,
     "api.revoke_effective_seconds": _num(0, 10_000),
     "api.base_revision_required": BOOL,
@@ -124,6 +136,7 @@ SPEC: dict[str, tuple[str, Any]] = {
     "logs.rotate_keep": _int(1, 1_000),
     # [ops]
     "ops.events_retention_days": _int(1, 100_000),
+    "ops.tasks_retention_days": _int(1, 100_000),
     "ops.backup_local_dir": STR,
     "ops.backup_external_dir": STR,      # 空串 = 未配置（cron 记 skipped，不算失败）
     "ops.backup_external_encrypted": BOOL,
@@ -231,6 +244,31 @@ def validate(cfg: dict) -> None:
         v = get(cfg, dotted)
         if v not in allowed:
             raise ConfigError(f"{dotted} 只支持 {list(allowed)}，当前为 {v!r}")
+    # CH-471 SVC-5（D4）：默认强制 loopback 绑定。api/llm 服务只应监听本机回环；
+    # 绑到 0.0.0.0 / 局域网 IP 会把离线单机变成对外可达的服务（NFR-1 违背）。
+    # 确需远程暴露须显式 api.allow_remote_bind = true（该键本身不设冻结，是有意 opt-in）。
+    if not get(cfg, "api.allow_remote_bind"):
+        for dotted in ("api.bind", "llm.bind"):
+            v = get(cfg, dotted)
+            if v is not None and not _is_loopback_bind(str(v)):
+                raise ConfigError(
+                    f"{dotted}={v!r} 非本机回环：默认只允许 loopback 绑定，"
+                    f"如需对外暴露请显式设 api.allow_remote_bind = true")
+
+
+def check_runtime_immutable(candidate: dict, baseline: dict) -> None:
+    """运行期配置变更门禁（CH-471 SVC-6 / D4）。
+
+    `RUNTIME_IMMUTABLE_KEYS` 里的红线键允许出现在 `config.load()` / `convert(cfg=...)`
+    的显式配置里（合法的按 profile 用法），但不许被 PUT /settings 从基线**改动**——
+    否则在线途中一次请求就能关掉离线守护。改回同值（无实际变化）放行。
+    """
+    for dotted in RUNTIME_IMMUTABLE_KEYS:
+        cur_v, base_v = get(candidate, dotted), get(baseline, dotted)
+        if cur_v != base_v:
+            raise ConfigError(
+                f"{dotted} 为运行期不可变红线键，禁止经 PUT /settings 修改"
+                f"（基线 {base_v!r} → 请求 {cur_v!r}）；确需调整请改配置文件后重启")
 
 
 class _Sentinel:
@@ -251,6 +289,26 @@ def _leaf(cfg: dict, parts: list[str]) -> Any:
 
 def _fmt(v: Any) -> str:
     return f"{v!r}（{type(v).__name__}）"
+
+
+def _is_loopback_bind(value: str) -> bool:
+    """判断 bind 值是否只监听本机回环（CH-471 SVC-5）。
+
+    口径：`localhost` 或 IP `is_loopback`（127.0.0.0/8、::1）为真；
+    `0.0.0.0` / `::`（unspecified，全部接口）与局域网 IP 或无法解析的主机名一律为假
+    —— 校验取保守侧，把「不能确定是回环」当作「对外暴露」。
+    """
+    host = value.strip()
+    if not host:
+        return False
+    if host.lower() == "localhost":
+        return True
+    if host.startswith("[") and host.endswith("]"):   # 容忍 IPv6 的 [::1] 写法
+        host = host[1:-1]
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 def _check(dotted: str, spec: tuple[str, Any], val: Any) -> None:

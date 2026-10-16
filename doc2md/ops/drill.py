@@ -73,8 +73,13 @@ def fingerprint(db_path: Path) -> dict:
     峰值翻倍（低配机上直接 OOM，而演练正是要在低配机上跑）。改成服务端游标
     `fetchmany` 逐行喂哈希：每行 sha256 视作大整数、按模 2^256 累加。
     加法可交换 ⇒ 与原来的「排序后整体哈希」一样与行序无关；重复行按重数计入
-    （两行相同即加两次）；要伪造同指纹得先找到 sha256 原像。
+    （两行相同即加两次）。
+    用途边界（CH-471 OPS-2）：这只是一把**非对抗性**的差异探针——比对「恢复出来的库
+    vs 丢失前的库」是否内容一致，能可靠抓出意外损坏/漏恢复。它**不是**防篡改指纹：
+    模 2^256 的加性合并与顺序无关，攻击者可用子集和构造同值指纹，**无需**任何 sha256
+    原像。若将来需要防篡改，应改用带键 MAC（或在对行哈希排序后取异或等抗加性的组合）。
     """
+
     con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     try:
         out: dict[str, dict] = {}
@@ -135,7 +140,9 @@ def run_drill(cfg: dict, root: Path, *, keep: bool = False) -> DrillReport:
             local_dir=local_dir, external_dir=external_dir,
             rotation_days=int(_cfg_get(cfg, "ops.backup_rotation_days", 14)),
             work_root=work,
-            work_dir_mode=str(_cfg_get(cfg, "ops.work_dir_mode", "700")))
+            work_dir_mode=str(_cfg_get(cfg, "ops.work_dir_mode", "700")),
+            cfg=cfg)
+
         snap = plan.snapshot(live_copy)
         rep.steps.append(DrillStep("snapshot", True, {"file": snap.name}))
         # O-12：权限位没真正落下（SMB/NFS/exFAT 等无 POSIX 权限的卷）不是失败，

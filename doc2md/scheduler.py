@@ -65,6 +65,19 @@ class Scheduler:
                 return Job(row["job_id"], doc_id, "queued", attached=True)
         return Job(job_id, doc_id, "queued")
 
+    def submit_rejected(self, name: str, code: str, detail: dict | None = None,
+                        *, idem_key: str | None = None) -> Job:
+        """记一条「投递即拒收」的终态作业（CH-471 SVC-10 去重）。
+
+        同步 /jobs、并行批、CLI watch 三处原本各自重复 `submit("reject:"+name)` +
+        `mark(..., "rejected", code, detail)`；前缀命名与终态口径散在三份代码里易漂移，
+        收敛到此。返回 Job 供调用方继续 emit 事件 / 组装响应。
+        """
+        j = self.submit("reject:" + name, idem_key=idem_key)
+        self.mark(j.job_id, "rejected", code, detail)
+        return j
+
+
     def mark(self, job_id: str, status: str, error_code: str = "", detail: dict | None = None,
              tx=None):
         """状态推进。CH-459（A-4）：`tx` 形参允许并入调用方事务——

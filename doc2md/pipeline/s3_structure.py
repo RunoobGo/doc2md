@@ -112,7 +112,7 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
     """页级行 → 块序列（段落合并 / 标题判定 / 列表判定 / 表格代码引用分页）。"""
     blocks: list[Block] = []
     if base_size is None:
-        base_size = _modal_size(pages)
+        base_size = modal_size(pages)
     seq = 0
     # CH-459：跨页存续的聚集状态
     code_buf: list[str] | None = None          # None = 不在代码块内
@@ -334,7 +334,7 @@ def _font(ln) -> dict:
             "size": round(ln.size, 1), "bold": bool(ln.bold)}
 
 
-def _modal_size(pages: list[RawPage]) -> float:
+def modal_size(pages: list[RawPage]) -> float:
     """正文字号 = 按**字符数**加权的众数。
 
     按行计数会被大号标题主导（每页 1~2 行标题字号 14~16，正文行多但单行字数少

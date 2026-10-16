@@ -33,6 +33,14 @@ def patch_block(store: Store, doc_id: str, block_id: str, body: dict, actor: str
             raise E4001_BadRequest("base_revision must be an integer",
                                    detail={"field": "base_revision"}) from None
 
+    # CH-471 STOR-6：PATCH 必须显式带 str 文本。原实现 `body.get("text", "")` 把
+    # 「字段缺失 / text=null」当成空串静默清空整块并写进审计——乐观锁校验通过后却吞掉内容，
+    # 是最隐蔽的数据丢失面。缺字段/非字符串 → 400，让用户改写空串（空串是合法的显式清空）。
+    text = body.get("text")
+    if not isinstance(text, str):
+        raise E4001_BadRequest("text is required and must be a string",
+                               detail={"field": "text"})
+
     with store.tx() as tx:
         row = tx.execute(
             "SELECT revision, text, immutable FROM blocks WHERE doc_id=? AND block_id=?",
@@ -53,18 +61,18 @@ def patch_block(store: Store, doc_id: str, block_id: str, body: dict, actor: str
         tx.execute(
             "UPDATE blocks SET text=?, revision=revision+1, updated_by=?, updated_at=?"
             " WHERE doc_id=? AND block_id=? AND revision=?",
-            (body.get("text", ""), actor, now_iso(), doc_id, block_id, int(base)))
+            (text, actor, now_iso(), doc_id, block_id, int(base)))
         if tx.rowcount != 1:
             raise E4251_RevisionConflict("revision conflict")
         tx.execute(
             "INSERT INTO edit_audit(doc_id, block_id, before, after, from_revision,"
             " to_revision, actor, ts, reason) VALUES (?,?,?,?,?,?,?,?,?)",
-            (doc_id, block_id, old_text, body.get("text", ""), int(base), int(base) + 1,
+            (doc_id, block_id, old_text, text, int(base), int(base) + 1,
              actor, now_iso(), body.get("reason", "")))
         # CH-459（A-6 / FR-208「该块索引」）：只删插该块一行。
         # CH-464：并入同一事务（原为两笔提交，之间崩溃 → blocks 与
         # search_blocks 永久不一致且无恢复路径）。
-        reindex_block(store, doc_id, _Block(id=block_id, text=body.get("text", "")),
+        reindex_block(store, doc_id, _Block(id=block_id, text=text),
                       tx=tx)
     out = {"revision": int(base) + 1, "block_id": block_id}
     if warning:

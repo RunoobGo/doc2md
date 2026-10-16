@@ -20,7 +20,7 @@ from ..security.names import sanitize_name
 from ..security.netguard import offline_guard
 from . import s1_5_gate, s4_render
 from .s1_parse import read_any, sniff
-from .s3_structure import analyze
+from .s3_structure import analyze, modal_size
 from .sharding import shard_plan, stitch_shards
 
 
@@ -92,10 +92,15 @@ def _convert(path: str | Path, *, cfg: dict, mode: str | None,
         spans = [(0, total)]
 
     t0 = time.monotonic()
+    # CH-471（PIPE-1 / G1）：正文字号众数必须按**全文档**算一次再传每片。原实现每片
+    # 各自 `analyze(sub)` 现算本片众数，字体跨片异质时各片 base_size 不同 → 同页在
+    # 分片与单片下判成不同标题层级，破坏「分片≡单片」。均匀字体文档下 modal 值不变，
+    # 逐字节等价保持（large_320p 门禁即此情形）。
+    base_size = modal_size(pages_all)
     shard_irs: list[IR] = []
     for si, (lo, hi) in enumerate(spans):
         sub = pages_all[lo:hi]
-        ir = analyze(sub)
+        ir = analyze(sub, base_size=base_size)
         ir.doc_id, ir.source_key = doc_id, source_key
         ir.source_name, ir.source_name_raw = safe, raw
         ir.format, ir.pages = fmt, len(sub)
@@ -115,7 +120,7 @@ def _convert(path: str | Path, *, cfg: dict, mode: str | None,
             # 页正文片段，而这里落进 IR extra_meta → 产物 front-matter 与报告，
             # 违反 NFR-20（s1_parse._open_source 同口径）。
             ir, stats = _fallback_single(pages_all, shard_irs[0], doc_id, source_key,
-                                         safe, raw, fmt, total,
+                                         safe, raw, fmt, total, base_size=base_size,
                                          reason=type(exc).__name__)
     else:
         ir = shard_irs[0]
@@ -160,8 +165,9 @@ def _convert(path: str | Path, *, cfg: dict, mode: str | None,
                   zip_path=zip_path)
 
 
-def _fallback_single(pages, head, doc_id, source_key, safe, raw, fmt, total, reason=""):
-    ir = analyze(pages)
+def _fallback_single(pages, head, doc_id, source_key, safe, raw, fmt, total,
+                     base_size=None, reason=""):
+    ir = analyze(pages, base_size=base_size)
     ir.doc_id, ir.source_key = doc_id, source_key
     ir.source_name, ir.source_name_raw = safe, raw
     ir.format, ir.pages = fmt, total

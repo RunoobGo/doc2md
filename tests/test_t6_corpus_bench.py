@@ -351,10 +351,13 @@ class TestRunDrainEndToEnd:
         assert r["enqueue_rejected"] == {"E4151": 2}
         assert r["rejected_codes"] == {"E4151": 1}
         # 峰值积压的上下界（不钉精确值：6 件语料整个 drain 约 0.3s，
-        # 0.1s 采样只抓到 2-3 帧，「恰好拍到 4 件同时在场」是时序运气）。
+        # 0.1s 采样只抓到 1-3 帧，「恰好拍到 4 件同时在场」是时序运气）。
         # 上界 = 真正入队的任务数（3 好件 + 1 截断；notpdf/empty 入队即拒）；
-        # 下界 = 采样至少看到一帧成规模排队（enqueue 全部完成后才 drain）。
-        assert 1 <= r["backlog_peak"] <= 4   # 下界 1：只断言采样器接线正常（拍到峰值帧是时序运气，CH-464）
+        # 下界取 0（CH-472）：本机 12 轮实测常常只落在**一帧**，而这一帧多半是
+        # 终态（queued/running 已清零，backlog_peak=0 占 7/12、=2 占 5/12）。
+        # 「采样器接线正常」不由这里证明——它由 test_queue_counts_reads_db 的
+        # 确定性断言 + 下面的 queue_series 非空证明；把宿主时序写进下界就是伪覆盖。
+        assert 0 <= r["backlog_peak"] <= 4
         assert r["peak_tree_mb"] > 0
         # CH-469：sampler 后端断言平台无关（写死 proc 在 macOS 必红）
         assert r["sampler"] in ("proc", "ps", "psutil") and r["rss_available"] is True

@@ -204,8 +204,13 @@ def _cmd_token(args: argparse.Namespace, cfg: dict) -> int:
 
 def _token_body(args, cfg, store, auth) -> int:
     if args.list_tokens:
+        # CH-471 SVC-9：库里只存 token 哈希（明文仅签发时展示一次）。--list 输出哈希前缀，
+        # 既够运维按 label/时间定位并吊销，也不再从 DB/终端泄露可用凭证。
         rows = store.q("SELECT token, role, label, created_at, revoked_at FROM tokens")
-        print(json.dumps([dict(r) for r in rows], ensure_ascii=False, indent=2))
+        print(json.dumps([{"token_sha256": r["token"][:16], "role": r["role"],
+                           "label": r["label"], "created_at": r["created_at"],
+                           "revoked_at": r["revoked_at"]} for r in rows],
+                         ensure_ascii=False, indent=2))
         return EXIT_OK
     if args.revoke:
         # CH-469（V-13）：`auth.revoke` 现在回报是否命中。原实现在这里同样
@@ -395,13 +400,8 @@ def _dir_files(src: Path, cfg: dict, follow: bool) -> list[Path]:
     退出码 0、报告齐全，剩下的文件永远没人转。常驻 watch 不受此约束：它的下一轮
     本来就是补齐语义（见 security/watcher.poll_all）。
     """
-    from .security.dirguard import WalkLimits, scan_or_raise
-    lim = WalkLimits(follow_symlinks=follow or bool(
-        config.get(cfg, "watch.follow_symlinks", False)),
-        max_depth=int(config.get(cfg, "watch.max_depth", 20)),
-        skip_hidden=bool(config.get(cfg, "watch.skip_hidden", True)),
-        max_files_per_dir=int(config.get(cfg, "watch.max_files_per_dir", 5000)))
-    return [Path(f) for f in scan_or_raise(src, lim)
+    from .security.dirguard import scan_or_raise, walk_limits
+    return [Path(f) for f in scan_or_raise(src, walk_limits(cfg, follow_symlinks=follow))
             if Path(f).suffix.lower() in (".pdf", ".docx")]
 
 
@@ -409,7 +409,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
     from . import worker
     from .pipeline.convert import convert
     from .scheduler import Scheduler
-    from .security.dirguard import WalkLimits
+    from .security.dirguard import walk_limits
     from .security.watcher import StabilityTracker
     from .storage.db import Store
     from .storage.repo import save_ir
@@ -419,11 +419,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
 
     def loop() -> int:
         sched = Scheduler(store)
-        lim = WalkLimits(
-            follow_symlinks=bool(config.get(cfg, "watch.follow_symlinks", False)),
-            max_depth=int(config.get(cfg, "watch.max_depth", 20)),
-            skip_hidden=bool(config.get(cfg, "watch.skip_hidden", True)),
-            max_files_per_dir=int(config.get(cfg, "watch.max_files_per_dir", 5000)))
+        lim = walk_limits(cfg)
         tracker = StabilityTracker(
             stable_seconds=float(config.get(cfg, "watch.stable_seconds", 5)))
         interval = args.interval or tracker.stable_seconds
@@ -462,8 +458,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
                     print(_jline({"watched": p.name, "doc_id": res.doc_id,
                                   "job_id": j.job_id}))
                 except E4221_GateReject as exc:
-                    j = sched.submit("reject:" + p.name)
-                    sched.mark(j.job_id, "rejected", exc.code, exc.detail)
+                    j = sched.submit_rejected(p.name, exc.code, exc.detail)
                     print(_jline({"watched": p.name, "status": "rejected",
                                   "code": exc.code}), file=sys.stderr)
                     # CH-469（V-12）：原为 `rc = EXIT_GATE`（赋值）。EXIT_GATE=3 小于

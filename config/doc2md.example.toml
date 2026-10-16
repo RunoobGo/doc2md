@@ -43,6 +43,7 @@ link_internal = "plain"                # CH-416：PDF goto / DOCX 书签链接�
 workers = 0                            # CH-448：批量转换进程数；0 = 自动 min(4, CPU)
                                        # 8GB 内存机器别调到 8：驻留 ≈ workers × chunk_pages
 queue_async = false                    # CH-449：true → POST /jobs 只入队，由 `doc2md work` 消费
+sync_min_parallel = 8                  # CH-471（SVC-3）：同步目录达此文件数才走进程池；否则串行
                                        # false = 同步转换（方案 5.4 既有契约）
 min_free_mb = 512                      # CH-450（NFR-6）：写产物/备份前的剩余空间下限；本项与 disk_safety_factor 同时为 0 才关闭门禁
 disk_safety_factor = 3                 # 需求 = 源大小 × 该系数
@@ -61,6 +62,7 @@ max_files_per_dir = 5000               # 超限 413 / E4133（CH-410）
 [api]
 bind = "127.0.0.1"                     # 离线单机：只回环，不对外
 port = 8090
+allow_remote_bind = false              # CH-471 SVC-5：非回环 bind 默认被 config.validate 拒绝
 token_roles = ["admin", "editor", "reader"]
 revoke_effective_seconds = 5
 base_revision_required = true          # false = 乐观锁灰度 optional 阶段
@@ -71,6 +73,7 @@ rotate_keep = 5
 
 [ops]
 events_retention_days = 30
+tasks_retention_days = 30              # CH-471（SVC-4）：终态作业保留期，防 tasks 无界增长
 backup_local_dir = "work/reports/backups"
 backup_external_dir = "/Volumes/doc2md-backup"   # 注释掉 = 周报按配置跳过（CH-433）
 backup_external_encrypted = true       # NFR-18：false 会被拒绝执行（PermissionError）

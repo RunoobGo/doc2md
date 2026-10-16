@@ -51,6 +51,8 @@ def test_serve_token_issue_and_revoke(tmp_path, capsys):
     assert main(["serve", "token", "--root", root, "--list"]) == 0
     rows = json.loads(capsys.readouterr().out)
     assert [x["role"] for x in rows] == ["editor"]
+    # CH-471 SVC-9：--list 不得泄露可用 token（库里只存哈希，输出为截断哈希前缀）
+    assert "token_sha256" in rows[0] and "d2m_" not in json.dumps(rows)
 
     assert main(["serve", "token", "--root", root, "--revoke", tok]) == 0
     assert json.loads(capsys.readouterr().out)["revoked"] is True

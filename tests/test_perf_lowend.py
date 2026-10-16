@@ -15,6 +15,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 import sys
 import zipfile
 from pathlib import Path
@@ -45,7 +46,15 @@ def _entry_hashes(zp: str | Path) -> dict:
 def _paths() -> list[Path]:
     missing = [s for s in SAMPLES if not (GOLDEN / s).is_file()]
     if missing:
-        pytest.skip(f"golden samples missing: {missing}")
+        # CH-471（TEST-1，HIGH）：本模块整体是 gate 层——golden 缺失必须**硬失败**而非
+        # skip，否则「从未生成样本」的机器上 `pytest -m gate` 一片绿（红线静默消失）。
+        # 口径与 conftest._missing 一致：仅 DOC2MD_ALLOW_MISSING_GOLDEN=1 才降级 skip。
+        msg = (f"golden samples missing: {missing} — run "
+               f"`.venv/bin/python tests/make_golden.py` (或设 "
+               f"DOC2MD_ALLOW_MISSING_GOLDEN=1 降级为 skip)")
+        if os.environ.get("DOC2MD_ALLOW_MISSING_GOLDEN") == "1":
+            pytest.skip(msg)
+        pytest.fail(msg)
     return [GOLDEN / s for s in SAMPLES]
 
 
@@ -155,7 +164,10 @@ def test_batch_file_timeout_accounts_hung_files(tmp_path, cfg, monkeypatch):
     for r in res:
         assert r["status"] == "error" and r["code"] == "E5000"
         assert "timeout after 1s" in r["message"]        # 只带时长，不带任何正文（NFR-20）
-    assert dt < 4, f"空窗未生效，批次仍在等挂死的件：{dt:.1f}s"
+    # CH-471（TEST-4）：空窗生效时 dt≈超时(1s)+进程池开销；若守卫回归失效，两件会等
+    # 满 _hanging_convert 的 6s 睡眠才返回。阈值取 5s——远高于正常值、又低于 6s 的失败
+    # 特征，慢 runner 上的池启动抖动不会误报，真回归仍会触发。
+    assert dt < 5, f"空窗未生效，批次仍在等挂死的件：{dt:.1f}s"
 
 
 def test_cli_convert_dir_uses_pool(tmp_path, cfg, monkeypatch):

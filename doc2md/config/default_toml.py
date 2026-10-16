@@ -48,6 +48,9 @@ workers = 0                            # CH-448：批量转换进程数上限；
                                        # 低配机（8GB Win11）保持 workers ≤ 4 + chunk ≤ 32
 queue_async = false                    # CH-449：POST /jobs 只入队、由 `doc2md work` 消费
                                        # 默认 false = 保持同步返回既有契约（方案 8.1 红线不变）
+sync_min_parallel = 8                  # CH-471（SVC-3）：同步 POST /jobs 走 run_batch 进程池的
+                                       # 文件数阈值；低于它仍进程内串行（小批次建池成本>收益，
+                                       # 且保留错误按 HTTP 码传播契约）。大批量据此并行。
 min_free_mb = 512                      # NFR-6：写产物 / 备份前的剩余磁盘门禁（不足 → 413/E4131）
 disk_safety_factor = 3                 # 需求 = 待写字节 × 该系数（zip + 临时 + 解压余量）
 stale_job_minutes = 30                 # CH-448：work 进程被 OOM 杀掉后，running 超过此分钟数
@@ -69,6 +72,9 @@ max_files_per_dir = 5000
 [api]
 bind = "127.0.0.1"
 port = 8090
+allow_remote_bind = false              # CH-471 SVC-5 / D4：默认强制 loopback。
+                                       # api.bind / llm.bind 非本机回环（如 0.0.0.0、局域网 IP）
+                                       # 会被 config.validate 拒绝；确需对外暴露才显式设 true。
 token_roles = ["admin", "editor", "reader"]   # P-54 / CH-407
 revoke_effective_seconds = 5           # NFR-9：吊销即时生效窗口
 base_revision_required = true          # ADR-28 / 方案 8.5：false = 灰度 optional 阶段
@@ -95,6 +101,7 @@ rotate_keep = 5
 
 [ops]
 events_retention_days = 30
+tasks_retention_days = 30              # CH-471（SVC-4）：终态作业保留期，防 tasks 无界增长
 backup_local_dir = "work/reports/backups"
 backup_external_dir = ""                      # CH-469（O-15）：外置卷路径；空 = 未配置，
                                               # 周报把该步记为 skipped 且不算失败（CH-433）

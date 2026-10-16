@@ -1,10 +1,15 @@
 name: ci
 
 # 方案 8.6：6 条红线断言进 CI（merge-gate），失败即 CI 红并在 CI 内阻断 full-suite；
-# 平台级「必需检查」受 T1 阻碍未配置（README CI 节）。
+# 平台级「必需检查」已于 CH-468 配置为 merge-gate 三档（PR 路径阻断；直推 main 仍可绕过，
+# 见 CH-470，所以 ops/hooks/pre-push 保留）。
 # 分层口径：merge-gate 只跑 `-m gate`（红线，阻断合并）；全量 + 可复现性作为信息面。
 # CH-456（方案 T10）：ruff 静态检查为独立信息作业，与 merge-gate 并行、不互相 needs——
 # 风格判断不得变成红线，也不得拖慢红线层。
+# CH-471（本轮）：三个作业都加 `timeout-minutes`。缺它时一次挂死会占满 GitHub 的 6 小时
+# 默认上限——红线在几小时内既不是绿也不是红，等于没有红线；现在最坏 15/10/30 分钟必出结论。
+# 同时 gate 与 full-suite 改用 `-v`（每行一个用例名，132/481 行的日志代价可忽略）：
+# 挂死发生时「最后一条 PASSED 之后的下一个用例」就是嫌疑人，作业超时无需再猜。
 
 on:
   push:
@@ -19,6 +24,7 @@ concurrency:
 jobs:
   merge-gate:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -38,10 +44,11 @@ jobs:
           pip install -e ".[dev]"
 
       - name: six merge-gates (red line)
-        run: python -m pytest -m gate -q --durations=10
+        run: python -m pytest -m gate -vv --durations=10
 
   lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -53,10 +60,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
       - name: ruff (F/E/I hygiene, informational)
+        # CH-471（TEST-5a）：显式 continue-on-error——「信息面」不应仅靠分支保护不引用它
+        # 来成立；原写法红 lint 仍会把整个工作流染红。风格判断不入红线（CH-456）。
+        continue-on-error: true
         run: ruff check .
 
   full-suite:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: merge-gate
     steps:
       - uses: actions/checkout@v4
@@ -69,7 +80,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
       - name: Full test suite
-        run: python -m pytest -q --durations=15
+        run: python -m pytest -vv --durations=15
       - name: Golden assets byte-reproducible (CH-442)
         run: python -m pytest -q tests/test_golden_repro.py
       - name: doctor self-check (CH-441 dep single source)

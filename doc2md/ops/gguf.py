@@ -36,6 +36,15 @@ class GgufError(ValueError):
     pass
 
 
+# CH-471 OPS-3：按值尺寸帽。损坏 / 恶意的头部会把「下一步要读多少」写成 2**63，
+# 于是 _rd_string 直接 f.read(2**63) 触发巨型分配，或数组 comprehension 无界展开 → DoS。
+# 帽取「任何合法 GGUF 都远小于此」：单个字符串 8 MiB（连 chat_template 都差几个数量级），
+# 单个数组元素数 2e7（真实词表 ≪ 此）。命中即拒绝（GgufError），把「读到一半才崩」变成
+# 「读之前就拒」。配合 X-10：GGUF 仍是本地受信输入，帽是纵深防御，不是信任边界。
+_MAX_STR = 8 << 20            # 单个字符串声明长度上限（字节）
+_MAX_ARR = 20_000_000         # 单个数组元素数上限
+
+
 @dataclass
 class Gguf:
     version: int
@@ -48,9 +57,29 @@ class Gguf:
         return list(self.kv.get("tokenizer.ggml.tokens") or [])
 
 
+def _rd_exact(f, size: int, what: str) -> bytes:
+    raw = f.read(size)
+    if len(raw) != size:
+        raise GgufError(f"gguf truncated reading {what}: wanted {size}, got {len(raw)}")
+    return raw
+
+
+def _rd_u64(f) -> int:
+    return struct.unpack("<Q", _rd_exact(f, 8, "8-byte field"))[0]
+
+
+def _rd_u32(f) -> int:
+    return struct.unpack("<I", _rd_exact(f, 4, "4-byte field"))[0]
+
+
 def _rd_string(f) -> str:
-    (n,) = struct.unpack("<Q", f.read(8))
-    return f.read(n).decode("utf-8", "replace")
+    n = _rd_u64(f)
+    if n > _MAX_STR:                          # OPS-3：先帽后读，绝不按声明长度直接分配
+        raise GgufError(f"gguf string length {n} exceeds cap {_MAX_STR}")
+    raw = f.read(n)
+    if len(raw) != n:                         # 短读 = 文件被截断，而不是合法 GGUF
+        raise GgufError(f"gguf string truncated: wanted {n}, got {len(raw)}")
+    return raw.decode("utf-8", "replace")
 
 
 def _rd_value(f, vtype: int):
@@ -59,19 +88,23 @@ def _rd_value(f, vtype: int):
     if vtype == T_STRING:
         return _rd_string(f)
     if vtype == T_ARRAY:
-        (atype,) = struct.unpack("<I", f.read(4))
-        (count,) = struct.unpack("<Q", f.read(8))
+        (atype,) = struct.unpack("<I", _rd_exact(f, 4, "array elem type"))
+        count = _rd_u64(f)
+        if count > _MAX_ARR:                  # OPS-3：元素数帽，挡住 2**63 无界展开
+            raise GgufError(f"gguf array count {count} exceeds cap {_MAX_ARR}")
         if atype == T_STRING:
             return [_rd_string(f) for _ in range(count)]
         fmt = _SCALAR.get(atype)
         if fmt is None:
             raise GgufError(f"nested array type {atype} unsupported")
         size = struct.calcsize(fmt)
-        return [struct.unpack(fmt, f.read(size))[0] for _ in range(count)]
+        return [struct.unpack(fmt, _rd_exact(f, size, "array elem"))[0]
+                for _ in range(count)]
     fmt = _SCALAR.get(vtype)
     if fmt is None:
         raise GgufError(f"unknown gguf value type {vtype}")
-    return struct.unpack(fmt, f.read(struct.calcsize(fmt)))[0]
+    size = struct.calcsize(fmt)
+    return struct.unpack(fmt, _rd_exact(f, size, "scalar value"))[0]
 
 
 def read_metadata(path: str | Path, max_kv: int = 4096) -> Gguf:
@@ -88,17 +121,17 @@ def read_metadata(path: str | Path, max_kv: int = 4096) -> Gguf:
     with p.open("rb") as f:
         if f.read(4) != GGUF_MAGIC:
             raise GgufError(f"not a GGUF file: {p.name}")
-        (version,) = struct.unpack("<I", f.read(4))
+        (version,) = struct.unpack("<I", _rd_exact(f, 4, "version"))
         if version not in (2, 3):
             raise GgufError(f"unsupported GGUF version {version}")
-        (n_tensors,) = struct.unpack("<Q", f.read(8))
-        (n_kv,) = struct.unpack("<Q", f.read(8))
+        n_tensors = _rd_u64(f)
+        n_kv = _rd_u64(f)
         if n_kv > max_kv:
             raise GgufError(f"{p.name} declares {n_kv} KV pairs, limit is {max_kv}")
         kv: dict = {}
         for _ in range(n_kv):
             key = _rd_string(f)
-            (vtype,) = struct.unpack("<I", f.read(4))
+            vtype = _rd_u32(f)
             kv[key] = _rd_value(f, vtype)
         return Gguf(version=version, n_tensors=n_tensors, n_kv=n_kv, kv=kv)
 

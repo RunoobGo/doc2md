@@ -572,7 +572,7 @@ def test_v2_header_total_tamper_rejected():
         decrypt_bytes(bytes(blob), PASS)
 
 
-# --- CH-467：pre-push 红线兜底钩子（T1 平台限制的客户端兜底） ------------------
+# --- CH-467：pre-push 红线钩子（直推 main 的唯一防线；必需检查不拦直推，见 CH-470） --
 def test_pre_push_hook_valid_and_gate_aligned():
     """钩子存在、可执行、语法合法，且红线口径与 CI merge-gate 一致（-m gate）。"""
     import subprocess

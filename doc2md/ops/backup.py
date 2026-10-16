@@ -49,6 +49,12 @@ def derive_key(passphrase: str, salt: bytes) -> bytes:
     CH-469（O-3）：`salt` 改为**必填**。原默认值是 v1 的静态盐，任何新调用只要
     忘了传参就悄悄退回「同口令跨部署同一把密钥」——正是 v2 随机盐要消除的那条。
     需要历史兼容的调用方（只有 v1 解密路径）显式传 `LEGACY_SALT`。
+
+    CH-471 SEC-5（D5 决策 = 保持 2^14）：OWASP 建议 scrypt N≥2^17，但 v2 容器头
+    只写 `magic + salt + chunk_size + total`，**不含 KDF 参数**。若直接把 N 提到 2^17，
+    派生密钥随之改变，而 `decrypt_stream` 无从得知旧容器用的是哪个 N → 现存全部加密备份
+    解密时 GCM 认证失败、永久不可恢复。数据安全优先于此强度小提升，故维持 2^14 并登记：
+    提 N 须与「头部携带 KDF 参数 + 按参数派生」的向后兼容格式改造同批进行（属未来变更）。
     """
     return Scrypt(salt=salt, length=32, n=2**14, r=8, p=1).derive(
         passphrase.encode("utf-8"))
@@ -178,7 +184,9 @@ class BackupPlan:
     encrypted_external: bool = True
     work_root: Path | None = None      # M8：work/ 权限 700 的落点（缺省从 local_dir 反推）
     work_dir_mode: str = "700"         # ops.work_dir_mode（CH-456：原为硬编码 0o700）
+    cfg: dict | None = None            # CH-471（OPS-4）：传入则写盘路径自带磁盘守卫
     mode_warnings: list[str] = field(default_factory=list)   # O-12：非 POSIX 卷的 chmod 结果
+
 
     def snapshot(self, state_db: Path, ts: datetime | None = None) -> Path:
         """本地快照（work/ 内可明文，前提是 work/ 权限 700）。"""
@@ -249,12 +257,21 @@ class BackupPlan:
         if not self.encrypted_external:
             raise PermissionError("NFR-18: external backup must be encrypted")
         self.external_dir.mkdir(parents=True, exist_ok=True)
+        # CH-471（OPS-4）：内部磁盘守卫——原实现只有 cron 在调用点预检，直接 to_external
+        # （手抄片段 / 未来调用方）会跳过剩余空间检查、把外置卷写满留半截容器。plan 带
+        # cfg 时这里成为唯一闸口；纯测试用裸 plan（cfg=None）保持原样直写。
+        if self.cfg is not None:
+            from .diskguard import assert_free_space
+            assert_free_space(self.external_dir, snapshot.stat().st_size,
+                              cfg=self.cfg, what="external_backup")
         out = self.external_dir / (snapshot.name + ".enc")
         with snapshot.open("rb") as src, out.open("wb") as dst:
             encrypt_stream(src, dst, passphrase)
             _fsync(dst)                          # O-14：外置卷掉电不留半截容器
+        _fsync_dir(self.external_dir)            # OPS-4：新文件目录项抗掉电
         _chmod600(out, self.mode_warnings)
         return out
+
 
     def restore(self, enc_path: Path, dst: Path, passphrase: str) -> Path:
         """恢复（CH-460 / A-11：流式解密 + 失败不留半截文件）。
@@ -273,8 +290,10 @@ class BackupPlan:
             tmp.unlink(missing_ok=True)
             raise
         tmp.replace(dst)
+        _fsync_dir(dst.parent)                   # OPS-4：rename 后落父目录项，原子性才抗掉电
         _chmod600(dst, self.mode_warnings)
         return dst
+
 
     def rotate(self, now: datetime | None = None) -> list[Path]:
         """轮出：> rotation_days 的本工具副本删除（FR-128「已删数据 ≤14 天轮出」）。
@@ -316,6 +335,27 @@ class BackupPlan:
 def _fsync(fh) -> None:
     fh.flush()
     os.fsync(fh.fileno())
+
+
+def _fsync_dir(path) -> None:
+    """CH-471（OPS-4）：rename / create 之后 fsync 父目录，让「目录项本身」也抗掉电。
+
+    `_fsync(文件)` 只保证内容离开页缓存；新建或原子改名后，那条目录项还在目录 inode
+    的待落盘状态——掉电可能「内容在、名字看不到」或 rename 回退。POSIX 上以
+    `O_RDONLY` 打开目录再 fsync 即可。非 POSIX 卷 / 无权限打开目录会失败：内容已单独
+    fsync 过，这里静默降级，绝不让备份整体翻车。
+    """
+    try:
+        fd = os.open(str(path), os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
 
 
 def _chmod600(path: Path, warnings: list[str]) -> None:
