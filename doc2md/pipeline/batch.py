@@ -138,12 +138,14 @@ def run_batch(paths: Sequence[str | Path], *, cfg: dict | None = None,
     # 若只留收敛后的集合，异常分支就再也取不到该件对应的文件名（记账会丢件）。
     futs = {pool.submit(_convert_one, f, cfg, mode, out): f for f in files}
     pending = set(futs)
+    abandoned = False          # 是否走了「空窗超时」分支（留下仍在跑的 worker）
     try:
         while pending:
             done, pending_now = wait(pending, timeout=window, return_when=FIRST_COMPLETED)
             if not done and window is not None:
                 # 空窗：仍在跑的件无法安全中止（强杀 worker 会连带砍掉别的在途件），
                 # 但批次必须给出结论——逐个记超时并取消排队件。
+                abandoned = True
                 for fut in pending:
                     fut.cancel()
                     r = Summary(file=str(futs[fut]), status="error", code="E5000",
@@ -169,5 +171,19 @@ def run_batch(paths: Sequence[str | Path], *, cfg: dict | None = None,
         # 活动 worker 交由 shutdown 收尾（wait=False 不让取消再变成阻塞点）。
         for fut in pending:
             fut.cancel()
+        # 先抓本池 worker 句柄——shutdown 会把 `_processes` 置 None，之后再取就没了。
+        workers = list((getattr(pool, "_processes", None) or {}).values())
         pool.shutdown(wait=False, cancel_futures=True)
+        # CH-471（CI 收口 / 登记 X-16）：仅空窗超时（abandoned）后主动终止**本池**残留
+        # worker。concurrent.futures 会在解释器退出时 join 管理线程/子进程；3.12.x 上
+        # 「已 cancel 却仍在跑」的 worker 让这条 join 死锁——父进程打完 `132 passed` 报告
+        # 后卡在退出、一直占着 CI 作业直到被 timeout-minutes 杀掉（3.11/3.13 与本机 3.15
+        # 不复现）。这里按 pid 只终止本 executor 自己的 worker（非全局 active_children，
+        # 绝不触碰别处的池）；成功批次走不到这里，正常路径零改动，产物逐字节等价（G6）。
+        if abandoned:
+            for proc in workers:
+                try:
+                    proc.terminate()
+                except (OSError, ValueError, RuntimeError):
+                    pass
     return results
