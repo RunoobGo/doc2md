@@ -181,6 +181,15 @@ def cmd_serve(args: argparse.Namespace) -> int:
     from .api import create_app
     app = create_app(cfg, root)
     host = args.host or str(config.get(cfg, "api.bind", "127.0.0.1"))
+    # CH-473（R5-SEC-2 / D4 闭环）：`--host` 与配置同口径。原实现只校验 TOML 内的
+    # api.bind（loopback 检查在 config.validate 里、对 load 的文件生效），一行
+    # `serve --host 0.0.0.0` 即绕过「默认只监听回环」的离线单机姿态——CLI 面与
+    # 配置面口径分裂。非 loopback 须显式 opt-in（api.allow_remote_bind）。
+    if not config.is_loopback_bind(host) and not config.get(
+            cfg, "api.allow_remote_bind", False):
+        print(f"serve refused: host {host!r} 非本机回环（NFR-1 离线单机姿态）；"
+              f"确需对外暴露请设 api.allow_remote_bind = true 后重试", file=sys.stderr)
+        return EXIT_USAGE
     port = args.port or int(config.get(cfg, "api.port", 8090))
     print(f"doc2md serve http://{host}:{port} root={root} pipeline={PIPELINE_VERSION}",
           file=sys.stderr)
@@ -559,6 +568,12 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         ok, why = LlmClient.from_cfg(cfg).probe()
         checks["llm_server"] = "reachable" if ok else f"unreachable ({why})"
     print(json.dumps(checks, ensure_ascii=False, indent=2))
+    # CH-473（CFG-2，LOW）：配置语义非法（冻结键校验不过）时自检必须非零退出。
+    # 原实现只把 MISSING 依赖算失败——`config_frozen_keys: invalid` 照样退 0，
+    # 「doctor 全绿」与「配置实际不可用」并存，自检面失去门禁意义。配置错按
+    # O-15 口径映射为用法退出码（EXIT_USAGE），与加载期配置错同族。
+    if not frozen_ok:
+        return EXIT_USAGE
     return EXIT_OK if not any(str(v).startswith("MISSING") for v in checks.values()) else EXIT_SYS
 
 

@@ -68,6 +68,12 @@ def save_ir(store: Store, ir: IR, profile: str = "standard", tx=None,
              ir.pages, int(ir.sharded), ir.shard_count, "done", profile, created_at, ts,
              json.dumps(ir.meta(), ensure_ascii=False)))
         t.execute("DELETE FROM blocks WHERE doc_id=?", (ir.doc_id,))
+        # CH-473（R5-STOR-1 / STOR-5 的 force 半修）：覆盖时同事务清掉该 doc 的编辑
+        # 审计行——edit_audit 的 before/after 与 revision 序列随块删除已失效，残留行
+        # 会让 `rollback(to_revision=N)` 把**覆盖前的旧文本**当新版本复活（数据安全面）。
+        # 无编辑时该表本就为空（有审计 ⟺ 存在 revision>1 的块），删 0 行无害。
+        purged_audit = t.execute(
+            "DELETE FROM edit_audit WHERE doc_id=?", (ir.doc_id,)).rowcount or 0
         t.executemany(
             "INSERT INTO blocks(doc_id, block_id, type, text, level, page,"
             " flags_json, marks_json, immutable, revision) VALUES (?,?,?,?,?,?,?,?,?,?)",
@@ -87,6 +93,7 @@ def save_ir(store: Store, ir: IR, profile: str = "standard", tx=None,
                       (ts, "doc_overwritten", ir.doc_id, None,
                        json.dumps({"overwritten_blocks": prev_blocks,
                                    "overwritten_edits": edited,
+                                   "purged_audit": purged_audit,
                                    "forced": bool(force)}, ensure_ascii=False)))
 
     if tx is not None:

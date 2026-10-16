@@ -413,9 +413,10 @@ def test_revoke_real_token_then_401(api_client, headers):
     assert client.get("/search?q=例外", headers=h).status_code == 401
     # 二次吊销同一 token：revoked_at 已置但行仍在 → rowcount=1，仍报成功（幂等）；
     # 只有「库里根本没有」才 404（见 test_revoke_unknown_token_is_404）。
-    assert client.delete(f"/tokens/{tok}", headers=headers(tokens)).status_code == 200
-    # 二次吊销同一 token：已 revoked 的行仍在库里 → 仍报成功（幂等），不存在才 404
-    assert client.delete(f"/tokens/{tok}", headers=headers(tokens)).status_code == 200
+    # CH-473（TEST-2，LOW）：原实现在此重复了两遍完全相同的 status 断言——
+    # 改为断言响应体契约（revoked 恒 true），使每次重复调用都有独立信息量。
+    again = client.delete(f"/tokens/{tok}", headers=headers(tokens))
+    assert again.status_code == 200 and again.get_json()["revoked"] is True
 
 
 # --- V-8：乐观锁入参 ------------------------------------------------------------

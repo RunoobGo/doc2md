@@ -66,7 +66,10 @@ def revoke(store: Store, token: str) -> bool:
 
 def check(store: Store, token: str | None, action: str,
           revoke_window: float = 5.0) -> str:
-    """返回角色名；未授权 401，角色不足 403。吊销在窗口期内即时生效。"""
+    """返回角色名；未授权 401，角色不足 403。吊销**即时生效**（CH-473 / R5-SVC-9 澄清：
+    `revoke_window` 形参自引入起即无使用方——吊销写 `revoked_at` 后下次 check 即拒，
+    没有传播窗口。保留形参只为不破坏调用方签名；文档中「≤5s 生效」的旧口径偏保守，
+ 以本实现为准：即时）。"""
     if not token:
         raise E4011_Unauthorized("missing token")
     row = store.q1("SELECT role, revoked_at, created_at FROM tokens WHERE token=?",

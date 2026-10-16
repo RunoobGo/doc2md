@@ -55,7 +55,14 @@ _INJECT_HINT = re.compile(
 
 
 class OpValidator:
-    """5 道校验 + 白名单；返回 (accepted, rejected[归因])。"""
+    """5 道校验 + 白名单；返回 (accepted, rejected[归因])。
+
+    CH-473（R5-LLM-1）已知取舍：`_index` 在构造时快照。同批 ops 含 `split_block`
+    时，后续 `merge_block` 的真实前驱可能是 split 产生的新块，而校验锚定的是旧
+    前驱——无安全后果（新块继承 immutable、`_merge_block` 二次设防；新 id 不在
+    快照，后续 op 必被 target_missing 拒），仅 occupied 语义轻微错位。需要时
+    改为对 split 目标的后续 op 动态 ±1 查表。
+    """
 
     def __init__(self, blocks, whitelist: list[str] | None = None):
         self.blocks = {b.id: b for b in blocks}
@@ -363,10 +370,16 @@ def apply_ops(ir, accepted: list[dict]) -> int:
       外部引用按 id 寻址，重排会让审计/FTS 命中错块）；
     - merge_block：把目标块文本并入前一块（absorbed_ids 留痕，与缝合同构）。
     基座纪律：本函数不 import 包内其他模块（方案 3.6），CJK/拉丁拼接规则本地实现。
+
+    CH-473（R5-LLM-2）：入口建一次 `id→block` 字典。原实现每个 op 都
+    `next(x for x in ir.blocks …)` 全表扫描——64 ops × 6000 块 ≈ 40 万次
+    比较/文档，叠加在 LLM 路径的解析延迟上大文档可感知。split 产生的新块
+    同步进字典（validator 本就不放行未知 id，此处保直接调用方的健壮性）。
     """
+    index = {x.id: x for x in ir.blocks}
     n = 0
     for op in accepted:
-        b = next((x for x in ir.blocks if x.id == op.get("target")), None)
+        b = index.get(op.get("target"))
         if b is None:
             continue
         name = op.get("op")
@@ -386,7 +399,7 @@ def apply_ops(ir, accepted: list[dict]) -> int:
             b.provenance.setdefault("modified_by", []).append("llm:mark_table_boundary")
             n += 1
         elif name == "split_block":
-            if _split_block(ir, b, op):
+            if _split_block(ir, b, op, index):
                 n += 1
         elif name == "merge_block":
             if _merge_block(ir, b):
@@ -394,8 +407,12 @@ def apply_ops(ir, accepted: list[dict]) -> int:
     return n
 
 
-def _split_block(ir, b, op: dict) -> bool:
-    """按 at（字符偏移，缺省取文本中点）切块；空侧不切。"""
+def _split_block(ir, b, op: dict, index: dict | None = None) -> bool:
+    """按 at（字符偏移，缺省取文本中点）切块；空侧不切。
+
+    CH-473（R5-LLM-2）：`index` 为调用方（apply_ops）预建的 id→block 字典，
+    用于 O(1) 查 id 冲突（原全表 any 扫描）并登记新块；缺省时自建。
+    """
     text = b.text or ""
     at = op.get("at")
     try:
@@ -408,8 +425,10 @@ def _split_block(ir, b, op: dict) -> bool:
     if not head or not tail:
         return False
     b.text = head
+    if index is None:
+        index = {x.id: x for x in ir.blocks}
     n = 1
-    while any(x.id == f"{b.id}s{n}" for x in ir.blocks):
+    while f"{b.id}s{n}" in index:            # R5-LLM-2：字典 O(1) 替全表扫描
         n += 1
     # 用目标块自身的类构造（基座纪律：本模块不 import 包内 ir 模块）
     nb = type(b)(id=f"{b.id}s{n}", type=b.type, text=tail, level=b.level,
@@ -428,6 +447,7 @@ def _split_block(ir, b, op: dict) -> bool:
         b.links = links[:half]
         nb.links = links[half:]
     ir.blocks.insert(ir.blocks.index(b) + 1, nb)
+    index[nb.id] = nb                        # R5-LLM-2：新块入字典，后续 op 可寻址
     return True
 
 

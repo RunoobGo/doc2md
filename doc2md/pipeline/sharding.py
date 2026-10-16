@@ -103,7 +103,8 @@ def fingerprint(b: Block) -> str:
 
 
 def overlap_dedupe(blocks: list[Block], spans: list[tuple[int, int]],
-                   max_pages: int = 300) -> list[Block]:
+                   max_pages: int = 300,
+                   shard_bounds: list[int] | None = None) -> list[Block]:
     """CH-423：删除片间重叠区造成的重复块。
 
     只在片界前后窗口内比对指纹；重复时保留前一份（文档顺序第一出现的即正确位置）。
@@ -114,6 +115,19 @@ def overlap_dedupe(blocks: list[Block], spans: list[tuple[int, int]],
     是后者的**真后缀**（后一片只拿到跨片段落的尾缀），判为伪影丢弃；若某已保留的
     窗口块正文是它的**真前缀**（前一片在片界处被截断，后一片给出完整版），
     用完整版替换截断版。两条都只在「最近 64 个已保留块」这一常量比对面内查找。
+
+    CH-473（R5-PIPE-5 / R5-PIPE-6，G1「分片≡单片」）两条收紧：
+    - `_seam_suffix` 加**相邻页约束**（`b.page == a.page + 1`）：跨页续写段落的尾缀
+      块恒为「起始页的下一页」；缺此约束时文档里重复出现的独立短句（法律/公文的
+      重复条款、「特此说明。」恰是前一片某长段的结尾）页不相邻也会被判成尾缀而
+      **整块误删**——它不是任何段落的尾缀，是真实内容（静默丢字 + 分片≠单片）。
+    - `_seam_truncated` 加**片级锚定**：被替换的截断版必须是「某一片的最后一块」
+      且完整版来自后一片（`shard_bounds` 由 `stitch_shards` 按片序传入）。块层
+      文本无法区分「片界截断版 + 后片完整版」与「同页两个真实块构成前缀关系」
+      （列表项「注意」与「注意事项如下：……」）——只有片界位置能：真实短块不是
+      片末块（同页同片的更长块跟在它之后），锚定不成立即不替换。锚定漏判时退化为
+      「截断内容留两份」，由 `shard_two_phase` 门禁的块数相等断言可判定暴露，
+      不会变成静默丢内容。
     """
     if len(spans) < 2:
         return blocks
@@ -123,10 +137,12 @@ def overlap_dedupe(blocks: list[Block], spans: list[tuple[int, int]],
         boundaries |= overlap_pages
     if not boundaries:
         return blocks
+    # 片级锚定表：每片最后一块的全局索引（CH-473 / R5-PIPE-6；未提供 = 退化为纯文本判定）
+    last_idx = {e - 1 for e in shard_bounds} if shard_bounds else set()
     seen: set[str] = set()
     out: list[Block] = []
-    tail: list[Block] = []                        # 最近保留的若干块（尾缀/前缀比对面）
-    for b in blocks:
+    tail: list[tuple[int, Block]] = []           # (全局索引, 块)——片级锚定需要索引
+    for idx, b in enumerate(blocks):
         # CH-469：指纹只在片界窗口内计算——seen 仅被窗口内的块填充，
         # 窗口外块不可能命中，原先对全文档每块 sha256 是纯 CPU 浪费
         # （320 页样本 ≈ 每片一次全量重扫）。指纹含页号，相等必同页，
@@ -141,13 +157,13 @@ def overlap_dedupe(blocks: list[Block], spans: list[tuple[int, int]],
             if src is not None:
                 b.flags.setdefault("dropped_dup_of", fingerprint(src))
                 continue
-            cut = _seam_truncated(tail, b, boundaries)
+            cut = _seam_truncated(tail, b, boundaries, idx, last_idx)
             if cut is not None and _replace_recent(out, cut):
                 seen.discard(fingerprint(cut))
                 cut.flags.setdefault("dropped_dup_of", fp)
             seen.add(fp)
         out.append(b)
-        tail.append(b)
+        tail.append((idx, b))
         if len(tail) > 64:
             del tail[:-64]
     return out
@@ -161,13 +177,19 @@ def _same_face(a: Block, b: Block) -> bool:
     return abs(float(fa.get("size", 0) or 0) - float(fb.get("size", 0) or 0)) < 0.5
 
 
-def _seam_suffix(tail: list[Block], b: Block) -> Block | None:
-    """在 tail 里找「b 是其真后缀」的前一片块，找不到返回 None。"""
+def _seam_suffix(tail: list[tuple[int, Block]], b: Block) -> Block | None:
+    """在 tail 里找「b 是其真后缀」的前一片块，找不到返回 None。
+
+    CH-473（R5-PIPE-5）：加**相邻页约束**——跨页续写段落从起始页的下一页才开始
+    产出尾缀块，故命中必满足 `b.page == a.page + 1`。缺此约束时，文档中重复出现的
+    独立短句（「特此说明。」恰是前一片某长段的结尾、且落在后一片的重叠窗口页）
+    页不相邻也会被删——那不是任何段落的尾缀，是真实内容。
+    """
     tb = (b.text or "").strip()
     if not tb:
         return None
-    for a in reversed(tail):
-        if a.page >= b.page or not _same_face(a, b):
+    for _idx, a in reversed(tail):
+        if a.page >= b.page or b.page != a.page + 1 or not _same_face(a, b):
             continue
         ta = (a.text or "").strip()
         if len(ta) > len(tb) and ta.endswith(tb):
@@ -175,13 +197,23 @@ def _seam_suffix(tail: list[Block], b: Block) -> Block | None:
     return None
 
 
-def _seam_truncated(tail: list[Block], b: Block, boundaries: set[int]) -> Block | None:
-    """在 tail 里找「b 的正文以它为真前缀」的同页窗口块（前一片的截断版），找不到返回 None。"""
+def _seam_truncated(tail: list[tuple[int, Block]], b: Block, boundaries: set[int],
+                    b_idx: int = -1, last_idx: set[int] | None = None) -> Block | None:
+    """在 tail 里找「b 的正文以它为真前缀」的同页窗口块（前一片的截断版），找不到返回 None。
+
+    CH-473（R5-PIPE-6）：加**片级锚定**——截断版必须是某一片的最后一块
+    （`a_idx in last_idx`）且完整版来自后一片（`b_idx > a_idx`）。同页两个真实块
+    天然构成前缀关系时（列表项「注意」与「注意事项如下：……」），短块不是片末块
+    （同页同片的更长块跟在它之后），锚定不成立即不替换。块层文本无法区分这两种
+    结构，只有片界位置能。未提供 `last_idx`（测试直调）时退化为纯文本判定。
+    """
     tb = (b.text or "").strip()
     if not tb or b.page not in boundaries:
         return None
-    for a in reversed(tail):
+    for a_idx, a in reversed(tail):
         if a.page != b.page or not _same_face(a, b):
+            continue
+        if last_idx and (a_idx not in last_idx or b_idx <= a_idx):
             continue
         ta = (a.text or "").strip()
         if len(tb) > len(ta) and tb.startswith(ta):
@@ -220,11 +252,18 @@ def stitch_shards(shard_irs: list[IR], max_pages: int = 300,
              (ir.extra_meta.get("shard") for ir in shard_irs) if m]
     spans = [s for s in spans if s] or [(0, 0)]
 
-    blocks: list[Block] = [b for ir in shard_irs for b in ir.blocks]
+    blocks: list[Block] = []
+    bounds: list[int] = []                       # 每片结束的累计索引（CH-473 / R5-PIPE-6）
+    for ir in shard_irs:
+        blocks.extend(ir.blocks)
+        bounds.append(len(blocks))
     dropped_dupes = 0
     n_before = len(blocks)
     if dedupe:
-        blocks = overlap_dedupe(blocks, spans, max_pages)
+        # 片级锚定与 spans 同源（都按 extra_meta["shard"] 过滤）：长度不一致
+        # （异常 IR 缺 shard meta）时放弃锚定，退化为纯文本判定。
+        anchored = bounds if len(bounds) == len(spans) else None
+        blocks = overlap_dedupe(blocks, spans, max_pages, shard_bounds=anchored)
         dropped_dupes = n_before - len(blocks)
     _renumber(blocks)                          # CH-426：缝合前先统一编号
 

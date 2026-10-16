@@ -27,24 +27,15 @@ def render(ir: IR, *, preserve_strike: bool = False, link_internal: str = "plain
     for b in ir.blocks:
         md = _render_block(b, preserve_strike=preserve_strike, link_internal=link_internal)
         if md:
+            # CH-473（PIPE-11）：空行压缩只作用于**非代码块**。围栏结构由块类型
+            # 唯一决定（只有 code 块包 ```），不再对整篇做正则切围栏——正文里
+            # 出现的 ``` 字面行（文档内示例、引用内容）会让非贪婪配对错位：
+            # 轻则把正文误判成代码免于压缩，重则把真实代码块暴露给 `\n{3,}`
+            # 压缩（S3 emit_code 特意保留的代码空行被压扁，代码内容失真）。
+            if b.type != "code":
+                md = re.sub(r"\n{3,}", "\n\n", md)
             parts.append(md)
-    text = "\n\n".join(parts)
-    # CH-469：空行压缩只作用于围栏之外。原实现对整篇做 `re.sub(r"\n{3,}")`，
-    # 会把 S3 emit_code 特意保留的代码块内空行压扁（代码内容失真）。
-    text = _collapse_outside_fences(text).strip() + "\n"
-    return text
-
-
-def _collapse_outside_fences(text: str) -> str:
-    """``` 分段：奇数段是围栏代码（原样保留），偶数段压缩连续空行。"""
-    chunks = re.split(r"(```[^\n]*\n.*?```)", text, flags=re.S)
-    out: list[str] = []
-    for idx, chunk in enumerate(chunks):
-        if idx % 2 == 1:                        # 代码段：一个字节都不动
-            out.append(chunk)
-        else:
-            out.append(re.sub(r"\n{3,}", "\n\n", chunk))
-    return "".join(out)
+    return "\n\n".join(parts).strip() + "\n"
 
 
 def _render_block(b: Block, **opt) -> str:

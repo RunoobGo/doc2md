@@ -7,6 +7,7 @@ from .loader import (
                      ConfigError,
                      check_runtime_immutable,
                      get,
+                     is_loopback_bind,
                      load,
                      path_setting,
                      unknown_keys,
@@ -15,5 +16,5 @@ from .loader import (
 
 __all__ = ["load", "get", "path_setting", "validate", "PROFILES", "SPEC", "SECTIONS",
            "ConfigError", "unknown_keys", "check_runtime_immutable",
-           "RUNTIME_IMMUTABLE_KEYS",
+           "RUNTIME_IMMUTABLE_KEYS", "is_loopback_bind",
            "DEFAULT_TOML", "TOML_BASENAME"]

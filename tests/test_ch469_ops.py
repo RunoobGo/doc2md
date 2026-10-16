@@ -24,7 +24,6 @@
 """
 from __future__ import annotations
 
-import ipaddress
 import json
 import os
 import socket
@@ -170,12 +169,28 @@ def test_offline_guard_denies_unresolvable_name(monkeypatch):
         assert not _allows("model.internal")
 
 
-def test_loopback_literal_helper_only_accepts_ip_literals():
-    for junk in ("localhost", "127.1", "999.999.999.999", ""):
-        assert not netguard._is_loopback_literal(junk)
-    for lit in ("127.0.0.1", "::1", "127.9.9.9"):
-        assert netguard._is_loopback_literal(lit)
-    assert ipaddress.ip_address("::1").is_loopback
+def test_loopback_literal_helper_only_accepts_ip_literals(monkeypatch):
+    """CH-473（TEST-3，LOW）：原断言 `ipaddress.ip_address("::1").is_loopback`
+    是验证 stdlib 自身，恒真、零信息量。改为驱动 netguard 真实判定 hook：
+    IP 字面量必须**不查 DNS** 直通；主机名 / 畸形字面量必须走解析判定
+    （解析结果非回环 → 拦）。"""
+    calls: list[str] = []
+
+    def fake(host, port, *a, **kw):
+        calls.append(host)
+        return [(2, 1, 6, "", ("93.184.216.34", 0))]   # 一律解析到公网
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake)
+    with offline_guard(True):
+        # 回环字面量：直通，且不得触发任何解析
+        for lit in ("127.0.0.1", "::1", "127.9.9.9"):
+            assert _allows(lit), lit
+        assert not calls, f"字面量判定不应查 DNS：{calls}"
+        # 主机名 / 畸形字面量 / 空串：不得按字面放行，走解析后一律拦
+        for junk in ("localhost", "127.1", "999.999.999.999", ""):
+            assert not _allows(junk), junk
+        assert calls and set(calls) <= {"localhost", "127.1",
+                                        "999.999.999.999"}, calls
 
 
 # --- O-2：轮出的作用面 ---------------------------------------------------------
@@ -837,7 +852,10 @@ def test_load_accepts_pristine_defaults(tmp_path, monkeypatch):
     ("run.profile", "turbo"), ("chunks.tokenizer", "qwen3"),
     ("s2.mode", "hybrid"), ("s1_5.sample_pages", "all"),
     ("s4.link_internal", "keep"), ("llm.mode", "remote"),
-    ("ops.work_dir_mode", "rwx"), ("ops.work_dir_mode", 7),
+    ("ops.work_dir_mode", "rwx"),
+    # CH-473（Q-1）：八进制权限改收「三位八进制字符串或 int 0..0o777」两种形态
+    # （TOML `0o700` 字面量经 tomllib 解析为 int 448）——越界 int 仍拒。
+    ("ops.work_dir_mode", 0o1000), ("ops.work_dir_mode", 448.0),
     ("security.sanitize_fail_action", "warn"),
     ("security.max_name_bytes", 1), ("watch.max_depth", 0),
     ("s1.chunk_pages", "32"), ("llm.op_whitelist", "split_block"),

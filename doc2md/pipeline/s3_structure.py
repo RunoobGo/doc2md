@@ -109,11 +109,18 @@ def _attach_link(b: Block, ln) -> None:
 
 
 def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
-    """页级行 → 块序列（段落合并 / 标题判定 / 列表判定 / 表格代码引用分页）。"""
+    """页级行 → 块序列（段落合并 / 标题判定 / 列表判定 / 表格代码引用分页）。
+
+    CH-473（PIPE-9）：块 id 一律在文末按落块顺序统一重排（`b1..bN`），循环内
+    不再预写 `id=f"b{seq+1}"`——原实现在 8 处循环分支里维护 `seq` 计数器，
+    而 `flush_rows` 的「组不成表逐行退回段落」分支一次落多块却只递增一次 seq，
+    同批退回行拿到同一个 id（重复 id）；且这些预写值随后又被文末重排整体
+    覆盖，属纯死写。预写值没有任何读取方（`_join_back`/`_attach_link` 均不
+    看 id），故循环内一律占位 `""`，唯一赋值点是收尾重排。
+    """
     blocks: list[Block] = []
     if base_size is None:
         base_size = modal_size(pages)
-    seq = 0
     # CH-459：跨页存续的聚集状态
     code_buf: list[str] | None = None          # None = 不在代码块内
     code_mode = ""                             # fence（显式围栏）| indent | mono
@@ -132,54 +139,50 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
     para_page = 0
 
     def emit_code(page: int) -> None:
-        nonlocal seq, code_buf
+        nonlocal code_buf
         buf = list(code_buf or [])
         while buf and not buf[-1]:
             buf.pop()
         while buf and not buf[0]:
             buf.pop(0)
         if buf:
-            blocks.append(Block(id=f"b{seq + 1}", type="code",
+            blocks.append(Block(id="", type="code",
                                 text="\n".join(buf), page=page))
-            seq += 1
         code_buf = None
 
     def flush_para() -> None:
-        nonlocal seq, para_buf, para_font, para_page, para_lines
+        nonlocal para_buf, para_font, para_page, para_lines
         before = len(blocks)
-        _flush(para_buf, blocks, seq, para_font, para_page)
+        _flush(para_buf, blocks, para_font, para_page)
         if len(blocks) > before:              # 段缓冲非空且缝合后非空才落块
             for ln in para_lines:             # CH-459：取段内首条带链接行
                 if ln.link or ln.link_internal:
                     _attach_link(blocks[-1], ln)
                     break
-        seq += 1
         para_buf = []
         para_lines = []
 
     def flush_quote() -> None:
-        nonlocal seq, quote_buf
+        nonlocal quote_buf
         if quote_buf:
-            blocks.append(Block(id=f"b{seq + 1}", type="quote",
+            blocks.append(Block(id="", type="quote",
                                 text="\n".join(quote_buf), page=quote_page))
-            seq += 1
         quote_buf = []
 
     def flush_rows(as_table: bool) -> None:
-        nonlocal seq, row_buf, row_x0, row_lines
+        nonlocal row_buf, row_x0, row_lines
         if not row_lines:
             return
         if as_table and len(row_buf) >= _ROW_MIN:
-            blocks.append(Block(id=f"b{seq + 1}", type="table",
+            blocks.append(Block(id="", type="table",
                                 text=_gfm_table(row_buf), page=row_page))
         else:                                   # 组不成表：逐行退回段落（漏判不误判）
             for i, ln in enumerate(row_lines):
-                blocks.append(Block(id=f"b{seq + 1}", type="paragraph",
+                blocks.append(Block(id="", type="paragraph",
                                     text=ln.text.strip(), font=_font(ln),
                                     page=row_page))
                 if i == 0 and (ln.link or ln.link_internal):
                     _attach_link(blocks[-1], ln)
-        seq += 1
         row_buf, row_x0, row_lines = [], [], []
 
     for page in pages:
@@ -193,10 +196,9 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
                 flush_rows(True)             # 行组被结构行终止：按事实判定
                 if code_buf is not None:
                     emit_code(page.index)
-                blocks.append(Block(id=f"b{seq + 1}", type="page_break",
+                blocks.append(Block(id="", type="page_break",
                                     text=ln.text.replace("\x0c", "").strip(),
                                     page=page.index))
-                seq += 1
                 continue
             text = ln.text.rstrip()
             # --- 空行：代码块内保留（代码含空行），否则冲刷段/引用缓冲 ---
@@ -249,9 +251,8 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
                 flush_para()
                 flush_quote()
                 flush_rows(True)             # 行组被结构行终止：按事实判定
-                _append(Block(id=f"b{seq + 1}", type="heading", text=text.strip(),
-                              level=lvl, font=_font(ln), page=page.index), blocks, seq)
-                seq += 1
+                blocks.append(Block(id="", type="heading", text=text.strip(),
+                                    level=lvl, font=_font(ln), page=page.index))
                 _attach_link(blocks[-1], ln)
                 continue
             # --- 列表（既有口径不变）---
@@ -259,9 +260,8 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
                 flush_para()
                 flush_quote()
                 flush_rows(True)             # 行组被结构行终止：按事实判定
-                _append(Block(id=f"b{seq + 1}", type="list_item", text=text.strip(),
-                              font=_font(ln), page=page.index), blocks, seq)
-                seq += 1
+                blocks.append(Block(id="", type="list_item", text=text.strip(),
+                                    font=_font(ln), page=page.index))
                 _attach_link(blocks[-1], ln)
                 continue
             # --- 表格行候选（CH-459：S1 已聚出单元格）---
@@ -323,6 +323,8 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
     if code_buf is not None:
         emit_code(code_page)                   # CH-464：原硬编码第 1 页，审阅页页码错位
     ir = IR(doc_id="", source_key="", blocks=blocks, pages=len(pages))
+    # CH-473（PIPE-9）：块 id 的唯一赋值点——按落块顺序整体重排。循环内的
+    # 预写 id 是死写（无读取方）且「一次落多块」的分支会产生重复 id，已移除。
     for i, b in enumerate(ir.blocks, start=1):
         b.id = f"b{i}"
     _fix_levels(ir)
@@ -393,8 +395,11 @@ def _can_continue(prev: str) -> bool:
     return not p.endswith(("。", "！", "？", "；", ".", "!", "?", ";", "：", ":"))
 
 
-def _flush(buf: list[str], blocks: list[Block], seq: int, font: dict, page: int) -> None:
-    """行缓冲 → 段落块：逐行按中西文规则缝合。"""
+def _flush(buf: list[str], blocks: list[Block], font: dict, page: int) -> None:
+    """行缓冲 → 段落块：逐行按中西文规则缝合。
+
+    CH-473（PIPE-9）：不再收 `seq` 预写 id——唯一赋值点是 `analyze` 收尾重排。
+    """
     if not buf:
         return
     text = buf[0]
@@ -402,7 +407,7 @@ def _flush(buf: list[str], blocks: list[Block], seq: int, font: dict, page: int)
         text = _append_line(text, nxt)
     text = text.strip()
     if text:
-        blocks.append(Block(id=f"b{seq + 1}", type="paragraph", text=text,
+        blocks.append(Block(id="", type="paragraph", text=text,
                             font=font or {}, page=page))
 
 
@@ -433,11 +438,6 @@ def _join_line(a: str, b: str) -> str:
     if _CJK_HEAD.match(b) or ord(last) > 0x2E80 or ord(first) > 0x2E80:
         return b
     return (" " + b) if (last.isalnum() and first.isalnum()) else b
-
-
-def _append(b: Block, blocks: list[Block], seq: int) -> int:
-    blocks.append(b)
-    return seq
 
 
 def _fix_levels(ir: IR) -> None:

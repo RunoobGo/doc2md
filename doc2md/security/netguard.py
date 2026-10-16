@@ -40,6 +40,10 @@ ALLOWED_HOSTS = ("127.0.0.1", "::1", "localhost")   # 公开清单（向后兼�
 
 _LOCK = threading.RLock()
 _STATE = {"depth": 0, "allowed": set(), "resolvers": {}}   # allowed 在每次装桩时重算
+# CH-473（R5-Q-2）：解析结果缓存帽。未知主机名的解析结果只增不减（仅装/摘桩时清），
+# 长跑 serve + 反复武装场景下缓慢泄漏（每项仅若干字符串，量级很小，但无界即缺陷）。
+# 封顶后新主机名不再入缓存——每次重新解析，正确性不变、只多付一次 getaddrinfo。
+_RESOLVER_CACHE_CAP = 256
 _ORIG = {}
 
 
@@ -79,7 +83,8 @@ def _allowed(host: str, allow: set[str]) -> bool:
             infos = {ai[4][0] for ai in socket.getaddrinfo(host, None)}
         except OSError:
             infos = frozenset()                # 解析失败 = 不可判定 = 拒绝
-        cache[host] = infos
+        if len(cache) < _RESOLVER_CACHE_CAP:   # CH-473（R5-Q-2）：封顶后不入缓存
+            cache[host] = infos
     return bool(infos) and all(_is_loopback_literal(ip) for ip in infos)
 
 

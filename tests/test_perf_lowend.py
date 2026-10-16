@@ -134,10 +134,13 @@ def test_batch_reports_gate_reject_per_file(tmp_path, cfg):
     assert by["bad.pdf"]["code"] in ("E4221", "E4131", "E4151", "E5000", "E5031")
 
 
+_HANG_S = 6
+
+
 def _hanging_convert(path, cfg, mode, out):
     """模块级 worker：进程池按引用 pickle，闭包传不过去。模拟损坏 PDF 让解析栈永挂。"""
     import time
-    time.sleep(6)
+    time.sleep(_HANG_S)
     return {"file": str(path), "status": "ok"}
 
 
@@ -153,9 +156,23 @@ def test_batch_file_timeout_accounts_hung_files(tmp_path, cfg, monkeypatch):
 
     from doc2md.pipeline import batch
     monkeypatch.setattr(batch, "_convert_one", _hanging_convert)
+    files = _paths()[:2]
+
+    # CH-473（TEST-4，LOW）：原 `assert dt < 5` 是绝对墙上时钟阈值——结论随宿主
+    # 负载漂移（CI 抢核时进程池启动 alone 可吃掉数秒：慢机器误报、快机器失去
+    # 分辨力）。改为**同机相对口径**：先跑一档关闭超时记账的参考批次（两件都睡满
+    # _HANG_S 才返回），它与守卫档承担完全相同的池启动开销；守卫生效时
+    # dt≈超时值(1s)+开销，参考档 dt≈_HANG_S+开销，二者之比与宿主负载无关。
+    # 记账正确性由下方功能不变量覆盖，此比值只兜「批次整体在傻等」这一种退化。
+    ref_cfg = copy.deepcopy(cfg)
+    ref_cfg["perf"]["batch_file_timeout_s"] = 0
+    t0 = time.monotonic()
+    ref = batch.run_batch(files, cfg=ref_cfg, out_dir=tmp_path / "ref", workers=2)
+    dt_ref = time.monotonic() - t0
+    assert len(ref) == 2 and all(r["status"] == "ok" for r in ref), ref
+
     c = copy.deepcopy(cfg)
     c["perf"]["batch_file_timeout_s"] = 1
-    files = _paths()[:2]
     t0 = time.monotonic()
     res = batch.run_batch(files, cfg=c, out_dir=tmp_path / "out", workers=2)
     dt = time.monotonic() - t0
@@ -164,10 +181,8 @@ def test_batch_file_timeout_accounts_hung_files(tmp_path, cfg, monkeypatch):
     for r in res:
         assert r["status"] == "error" and r["code"] == "E5000"
         assert "timeout after 1s" in r["message"]        # 只带时长，不带任何正文（NFR-20）
-    # CH-471（TEST-4）：空窗生效时 dt≈超时(1s)+进程池开销；若守卫回归失效，两件会等
-    # 满 _hanging_convert 的 6s 睡眠才返回。阈值取 5s——远高于正常值、又低于 6s 的失败
-    # 特征，慢 runner 上的池启动抖动不会误报，真回归仍会触发。
-    assert dt < 5, f"空窗未生效，批次仍在等挂死的件：{dt:.1f}s"
+    # 守卫档必须远快于参考档；若守卫回归成「等挂死件自己回来」，dt 会逼近 dt_ref。
+    assert dt * 2 < dt_ref, f"空窗未生效，批次仍在等挂死的件：{dt:.1f}s vs 参考 {dt_ref:.1f}s"
 
 
 def test_cli_convert_dir_uses_pool(tmp_path, cfg, monkeypatch):

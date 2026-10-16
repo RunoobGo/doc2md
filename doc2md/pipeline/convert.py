@@ -119,7 +119,7 @@ def _convert(path: str | Path, *, cfg: dict, mode: str | None,
             # CH-469：reason 只取异常类名，不带 str(exc)。pdfminer 的异常消息常夹带
             # 页正文片段，而这里落进 IR extra_meta → 产物 front-matter 与报告，
             # 违反 NFR-20（s1_parse._open_source 同口径）。
-            ir, stats = _fallback_single(pages_all, shard_irs[0], doc_id, source_key,
+            ir, stats = _fallback_single(pages_all, doc_id, source_key,
                                          safe, raw, fmt, total, base_size=base_size,
                                          reason=type(exc).__name__)
     else:
@@ -165,8 +165,10 @@ def _convert(path: str | Path, *, cfg: dict, mode: str | None,
                   zip_path=zip_path)
 
 
-def _fallback_single(pages, head, doc_id, source_key, safe, raw, fmt, total,
+def _fallback_single(pages, doc_id, source_key, safe, raw, fmt, total,
                      base_size=None, reason=""):
+    # CH-473（R5-PIPE-10）：删去 `head` 形参——CH-469 移除 mark_shard_edges 后
+    # 它已无任何使用方（死参），调用点实参 shard_irs[0] 同删。
     ir = analyze(pages, base_size=base_size)
     ir.doc_id, ir.source_key = doc_id, source_key
     ir.source_name, ir.source_name_raw = safe, raw

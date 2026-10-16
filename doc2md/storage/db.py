@@ -335,10 +335,28 @@ class _Tx:
         return self
 
     def __exit__(self, exc_type, exc, tb):
-        if exc_type is None:
-            self.conn.execute("COMMIT")
-        else:
-            self.conn.execute("ROLLBACK")
+        try:
+            if exc_type is None:
+                self.conn.execute("COMMIT")
+            else:
+                self.conn.execute("ROLLBACK")
+        except sqlite3.Error:
+            # CH-473（R5-STOR-3）：COMMIT 自身失败（ENOSPC——本项目 headline 场景）
+            # 时 sqlite3 的行为是**连接仍处于事务内**（失败提交不自动回滚）：
+            # 残留写锁阻塞他进程，下次 BEGIN IMMEDIATE 直接报 "cannot start a
+            # transaction within a transaction"。长驻进程（doc2md work 的主连接）
+            # 被污染后循环必崩。失败即显式 ROLLBACK 再抛；回滚路径自身出错时
+            # （连接已断）让原始异常优先，不掩盖真实病因。
+            if exc_type is None:
+                try:
+                    self.conn.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
+                raise               # COMMIT 失败：sqlite 错误就是最优先的病因
+            # exc_type 非 None = with 体已抛：回滚再失败的 sqlite 错误不得
+            # 顶替原始异常（裸 raise 会把它变成传播中的异常）。吞掉回滚错误、
+            # 落回 return False，让 body 的异常原样上抛——连接已断的善后
+            # 交给 GC 与进程退出，此处不制造第二次病因。
         return False
 
     def execute(self, sql, params=()):

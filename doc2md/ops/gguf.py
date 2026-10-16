@@ -84,7 +84,10 @@ def _rd_string(f) -> str:
 
 def _rd_value(f, vtype: int):
     if vtype == T_BOOL:
-        return struct.unpack("<B", f.read(1))[0] != 0
+        # CH-473（R5-OPS-2）：走 _rd_exact——裸 `f.read(1)` 短读时 struct.unpack 抛
+        # struct.error（非 ValueError 子类），绕过调用方的 GgufError 收敛面；截断于
+        # BOOL 值的坏文件应报 GgufError 而不是裸栈（其余路径均已收敛）。
+        return struct.unpack("<B", _rd_exact(f, 1, "bool value"))[0] != 0
     if vtype == T_STRING:
         return _rd_string(f)
     if vtype == T_ARRAY:

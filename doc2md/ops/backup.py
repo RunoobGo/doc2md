@@ -265,9 +265,20 @@ class BackupPlan:
             assert_free_space(self.external_dir, snapshot.stat().st_size,
                               cfg=self.cfg, what="external_backup")
         out = self.external_dir / (snapshot.name + ".enc")
-        with snapshot.open("rb") as src, out.open("wb") as dst:
-            encrypt_stream(src, dst, passphrase)
-            _fsync(dst)                          # O-14：外置卷掉电不留半截容器
+        # CH-473（R5-OPS-1）：写 `.part` 完成后原子 rename——原实现直接以最终名
+        # `open("wb")`，encrypt_stream 中途失败（ENOSPC / IO 错误）留下**名字合法
+        # 的半截 .enc**：rotate() 的 _SNAPSHOT_RE 不清它，后续恢复演练可能选中
+        # 必然认证失败的容器。本地 snapshot（O-11）与 restore 早已是 tmp+rename
+        # 口径，外置侧漏修——这里补齐，失败路径 unlink 半截件。
+        part = out.with_name(out.name + ".part")
+        try:
+            with snapshot.open("rb") as src, part.open("wb") as dst:
+                encrypt_stream(src, dst, passphrase)
+                _fsync(dst)                      # O-14：外置卷掉电不留半截容器
+            part.replace(out)
+        except Exception:
+            part.unlink(missing_ok=True)
+            raise
         _fsync_dir(self.external_dir)            # OPS-4：新文件目录项抗掉电
         _chmod600(out, self.mode_warnings)
         return out

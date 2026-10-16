@@ -38,6 +38,13 @@ FROZEN_KEYS: dict[str, tuple[Any, ...]] = {
 # 合法 cfg 也会拦，破坏既有契约）。值 → 允许集合；PUT 命中即 400。
 RUNTIME_IMMUTABLE_KEYS: dict[str, tuple[Any, ...]] = {
     "run.offline_assert": (True,),
+    # CH-473（R5-SEC-1 / D4 闭环）：opt-in 键本身也不许在线改。原集合只冻结
+    # offline_assert，于是两步 PUT 即可掏空 D4——先 `PUT {"api":{"allow_remote_bind":true}}`
+    # （单步合法），再 `PUT {"api":{"bind":"0.0.0.0"}}`（candidate 里 opt-in 已为真，
+    # validate 的 loopback 检查不再触发），且覆写落盘跨重启生效。现将 opt-in 收敛为
+    # 「改配置文件 + 重启」这一条 deliberate 路径；配置文件里本就 true 的部署，
+    # PUT 改回 false 同样被拒（缩小暴露面与扩大暴露面同为红线变更）。
+    "api.allow_remote_bind": (False,),
 }
 
 
@@ -250,7 +257,7 @@ def validate(cfg: dict) -> None:
     if not get(cfg, "api.allow_remote_bind"):
         for dotted in ("api.bind", "llm.bind"):
             v = get(cfg, dotted)
-            if v is not None and not _is_loopback_bind(str(v)):
+            if v is not None and not is_loopback_bind(str(v)):
                 raise ConfigError(
                     f"{dotted}={v!r} 非本机回环：默认只允许 loopback 绑定，"
                     f"如需对外暴露请显式设 api.allow_remote_bind = true")
@@ -291,8 +298,8 @@ def _fmt(v: Any) -> str:
     return f"{v!r}（{type(v).__name__}）"
 
 
-def _is_loopback_bind(value: str) -> bool:
-    """判断 bind 值是否只监听本机回环（CH-471 SVC-5）。
+def is_loopback_bind(value: str) -> bool:
+    """判断 bind 值是否只监听本机回环（CH-471 SVC-5；CH-473 公开供 CLI --host 复用）。
 
     口径：`localhost` 或 IP `is_loopback`（127.0.0.0/8、::1）为真；
     `0.0.0.0` / `::`（unspecified，全部接口）与局域网 IP 或无法解析的主机名一律为假
@@ -309,6 +316,10 @@ def _is_loopback_bind(value: str) -> bool:
         return ipaddress.ip_address(host).is_loopback
     except ValueError:
         return False
+
+
+# 内部旧引用的兼容别名（CH-473 公开化时保留，避免遗漏调用点静默换语义）
+_is_loopback_bind = is_loopback_bind
 
 
 def _check(dotted: str, spec: tuple[str, Any], val: Any) -> None:
@@ -335,8 +346,18 @@ def _check(dotted: str, spec: tuple[str, Any], val: Any) -> None:
         if not isinstance(val, list) or not all(isinstance(x, str) for x in val):
             raise ConfigError(f"{dotted} 必须是字符串数组，当前为 {_fmt(val)}")
     elif kind == "octal":
-        if not isinstance(val, str) or not _OCTAL_RE.fullmatch(val):
-            raise ConfigError(f"{dotted} 必须是三位八进制权限（如 \"700\"），当前为 {_fmt(val)}")
+        # CH-473（R5-Q-1）：三位八进制字符串（如 "700"）**或** TOML 八进制字面量
+        # （`work_dir_mode = 0o700` 经 tomllib 解析为 int 448）都收。原实现只认
+        # 字符串，而 ops/backup._parse_mode 的 docstring 声称两种形态均可——运维按
+        # docstring 写法直接启动即被 validate 拒（口径分裂，拒绝侧无安全后果）。
+        # 两种形态等价收敛到 0..0o777。
+        if isinstance(val, str) and _OCTAL_RE.fullmatch(val):
+            pass
+        elif isinstance(val, int) and not isinstance(val, bool) and 0 <= val <= 0o777:
+            pass
+        else:
+            raise ConfigError(
+                f"{dotted} 必须是八进制权限（\"700\" 或 0o700），当前为 {_fmt(val)}")
     else:                                  # pragma: no cover — SPEC 自身的缺陷
         raise ConfigError(f"{dotted} 的校验规则未知：{kind!r}")
 

@@ -22,6 +22,7 @@ CH-456（T8 门禁时长裁剪）：`test_shard_fallback_is_honest` 与
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -207,7 +208,14 @@ def test_dirguard_symlink_loop_bounded(golden_dir):
     from doc2md.security.dirguard import WalkLimits, guard_walk
     root = golden_dir / "dirs" / "symlink_loop"
     if not root.is_dir():
-        pytest.skip("dirs/symlink_loop missing")
+        # CH-473（TEST-1，MED）：gate 层缺失必须硬失败，不得静默 skip——
+        # 否则未生成语料的机器上 gate 假绿。口径同 conftest._missing。
+        msg = ("golden sample missing: dirs/symlink_loop — run "
+               "`.venv/bin/python tests/make_golden.py` (或设 "
+               "DOC2MD_ALLOW_MISSING_GOLDEN=1 降级为 skip)")
+        if os.environ.get("DOC2MD_ALLOW_MISSING_GOLDEN") == "1":
+            pytest.skip(msg)
+        pytest.fail(msg)
     t0 = time.monotonic()
     res = guard_walk(root, WalkLimits(follow_symlinks=False))
     assert time.monotonic() - t0 < 10
@@ -219,7 +227,13 @@ def test_dirguard_too_many_files_raises(golden_dir):
     from doc2md.security.dirguard import WalkLimits, guard_walk
     root = golden_dir / "dirs" / "many"
     if not root.is_dir():
-        pytest.skip("dirs/many missing")
+        # CH-473（TEST-1，MED）：同 symlink_loop——gate 层硬失败
+        msg = ("golden sample missing: dirs/many — run "
+               "`.venv/bin/python tests/make_golden.py` (或设 "
+               "DOC2MD_ALLOW_MISSING_GOLDEN=1 降级为 skip)")
+        if os.environ.get("DOC2MD_ALLOW_MISSING_GOLDEN") == "1":
+            pytest.skip(msg)
+        pytest.fail(msg)
     with pytest.raises(E4133_DirTooWide):
         guard_walk(root, WalkLimits(max_files_per_dir=10, deadline_seconds=30))
 
@@ -440,11 +454,21 @@ def test_service_business_events_land_in_logs(tmp_path, tmp_cfg, small_pdf):
 
 
 def test_service_start_sweeps_work_tmp(tmp_path, tmp_cfg):
-    """方案 6.5：服务启动时清理 work/tmp 残留（此前只有 cron 做，服务面从未执行）。"""
+    """方案 6.5：服务启动时清理 work/tmp 残留（此前只有 cron 做，服务面从未执行）。
+
+    CH-473（STOR-4）：sweep_tmp 加在途保护窗——mtime 在 perf.stale_job_minutes
+    （默认 30）内的条目按在途处理、跳过。残留物模拟「上个进程崩掉留下的」：
+    把 mtime 推到窗口外（进程已死、不会再写入），启动清扫照清。
+    """
+    import os
+    import time
     tmp = Path(tmp_cfg["paths"]["tmp"])
     (tmp / "stale").mkdir(parents=True)
     (tmp / "stale" / "x.bin").write_bytes(b"old")
     (tmp / "leftover.tmp").write_bytes(b"old")
+    old = time.time() - 3600
+    os.utime(tmp / "stale", (old, old))
+    os.utime(tmp / "leftover.tmp", (old, old))
     app, _, _ = _svc(tmp_path, tmp_cfg)
     assert not tmp.exists() or list(tmp.iterdir()) == [], "work/tmp 残留未被启动清理"
     app.config["doc2md"]["writer"].close()

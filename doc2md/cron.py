@@ -49,16 +49,37 @@ def _db_bytes(state: Path) -> int:
 
 
 def sweep_tmp(cfg: dict, root: Path) -> int:
-    """清理 work/tmp 残留（方案 6.5：服务启动与 cron --daily 共用同一路径口径）。"""
+    """清理 work/tmp 残留（方案 6.5：服务启动与 cron --daily 共用同一路径口径）。
+
+    CH-473（R5-STOR-4）：加**在途保护窗**。原实现无条件清空 tmp，与并发
+    `doc2md work`（同一 root、tmp 落在 paths.tmp）无互斥——服务启动清扫 /
+    cron --daily 会把在途转换的中间产物删掉，该文件转换失败（可重试，但无人值守
+    时段周期性误伤，且失败原因与「磁盘已满」等不可区分）。现在 mtime 在
+    `perf.stale_job_minutes`（默认 30）内的条目跳过（在途件随写入持续更新 mtime；
+    目录取自身 mtime，内容增删即刷新）；该键 <= 0 = 关闭保护、维持旧行为全清。
+    返回值仍是「已清条数」——被跳过的在途件不计数，下轮（或 cron 每日）再清。
+    """
     tmp = config.path_setting(cfg, "paths.tmp", root, str(root / "tmp"))
     cleaned = 0
-    if tmp.exists():
-        for p in tmp.iterdir():
+    if not tmp.exists():
+        return cleaned
+    try:
+        window_s = float(config.get(cfg, "perf.stale_job_minutes", 30) or 0) * 60.0
+    except (TypeError, ValueError):
+        window_s = 30 * 60.0
+    cutoff = time.time() - window_s if window_s > 0 else 0.0
+    for p in tmp.iterdir():
+        if cutoff:
             try:
-                shutil.rmtree(p) if p.is_dir() else p.unlink()
-                cleaned += 1
+                if p.stat().st_mtime >= cutoff:
+                    continue          # 保护窗内的在途件：跳过
             except OSError:
-                pass
+                continue              # 取不到 mtime（竞态删除中）——按在途处理
+        try:
+            shutil.rmtree(p) if p.is_dir() else p.unlink()
+            cleaned += 1
+        except OSError:
+            pass
     return cleaned
 
 
@@ -188,6 +209,10 @@ def run(cfg: dict | None = None, root: Path | None = None, mode: str = "daily",
         writer.write({"code": "CRON_SEARCH_RECONCILE", **rec})
 
     writer.close()
+    # CH-473（R5-SVC-8）：cron 的 Store 与原实现一样从不 close——`PRAGMA optimize`
+    # （CH-471 STOR-1 关闭前维护索引）因此不执行。进程即退、影响极小，但既然
+    # close 是 no-op 安全操作，正常路径补上；异常路径由解释器退出时收尾。
+    store.close()
     rep.finished_at = now_iso()
     reports = config.path_setting(cfg, "paths.reports", root, str(root / "reports"))
     reports.mkdir(parents=True, exist_ok=True)

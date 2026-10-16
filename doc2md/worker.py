@@ -99,6 +99,19 @@ def reclaim_stale(store: Store, cfg: dict) -> int:
     return len(rows)
 
 
+def _startup_reconcile(store: Store) -> dict:
+    """启动时 FTS 对账（CH-473 / R5-STOR-2）：失败不阻断启动，只回异常类名。
+
+    与 api.create_app 的同名逻辑同口径——work 与 serve 都可能在「迁移中途崩溃 /
+    历史缺陷留下空索引」的库上启动，每日 cron 对账之前最长有 24h 检索静默失效窗口。
+    """
+    from .storage.repo import reconcile_search
+    try:
+        return reconcile_search(store)
+    except Exception as exc:                    # noqa: BLE001 — 启动不得被对账炸掉
+        return {"error": type(exc).__name__}
+
+
 def drain_once(store: Store, cfg: dict, root, *, workers: int | None = None,
                writer=None) -> WorkReport:
     """认领一批 → 进程池转换 → 逐条落库。队列空时返回 drained=0。"""
@@ -293,6 +306,10 @@ def run_work(cfg: dict, root, *, once: bool = False, max_jobs: int = 0,
     writer.write({"code": "WORK_START", "root": str(root),
                   "once": bool(once), "max_jobs": int(max_jobs or 0),
                   "reclaimed_stale": reclaimed,
+                  # CH-473（R5-STOR-2 / STOR-3 的 work 对账半）：与 create_app 同口径，
+                  # 启动时先修一次 FTS 一致性（迁移中途崩溃 / 历史缺陷的空索引无告警），
+                  # 只回传统计、不读正文（NFR-20）；失败不阻断启动，类名进日志。
+                  "search_reconcile": _startup_reconcile(store),
                   "workers": workers if workers is not None else default_workers(cfg)})
     writer.flush()
     last_reclaim = time.monotonic()

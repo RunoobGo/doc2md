@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import threading
 from pathlib import Path
 
@@ -37,11 +38,18 @@ from .storage.repo import (
     delete_source,
     get_doc,
     list_blocks,
+    reconcile_search,
     save_ir,
     search,
 )
 
 SCRIPT_UA_HINTS = ("python-requests", "curl/", "doc2md-cli", "httpx", "go-http-client")
+
+# CH-473（R5-SVC-7）：同步路径的进程池全局只允许一个在途。Flask threaded 下两个
+# 并发大批量 POST /jobs 会各建一个 workers 进程池（8GB 目标机上 pdfplumber 子进程
+# 内存随池数翻倍）；单池已用满 perf.workers 的 CPU 并行度，双池不让单请求更快，
+# 只是放大内存峰值——用信号量把并行收敛在单请求内，请求间排队（admin/submit 低频）。
+_SYNC_POOL_GATE = threading.BoundedSemaphore(1)
 
 
 def create_app(cfg: dict | None = None, root: Path | None = None):
@@ -67,7 +75,17 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
         rotate_mb=float(config.get(cfg, "logs.rotate_mb", 50)),
         rotate_keep=int(config.get(cfg, "logs.rotate_keep", 5)))
     tmp_cleaned = sweep_tmp(cfg, root)
+    # CH-473（R5-STOR-2 / STOR-3 的启动对账半）：FTS 与 blocks 的一致性只在写入路径
+    # 维护，_migrate_fts 中途崩溃或历史缺陷会留下空/缺索引且无告警（原方案写了
+    # 「启动/cron 对账」，cron 侧已落地、启动侧缺失——serve 实例最长 24h 用空索引
+    # 检索）。启动时先对账一次：只回传统计、不读正文（NFR-20）；对账失败不阻断
+    # 启动（旧库面问题留给 cron 下轮），异常类名进 SERVICE_START 日志。
+    try:
+        search_reconcile = reconcile_search(store)
+    except Exception as exc:                    # noqa: BLE001 — 启动不得被对账炸掉
+        search_reconcile = {"error": type(exc).__name__}
     writer.write({"code": "SERVICE_START", "root": str(root), "tmp_cleaned": tmp_cleaned,
+                  "search_reconcile": search_reconcile,
                   "rotate_mb": writer.rotate_mb, "keep": writer.rotate_keep})
     writer.flush()
     app = Flask("doc2md")
@@ -160,7 +178,12 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
         path = b.get("path", "")
         idem = request.headers.get("Idempotency-Key") or b.get("idempotency_key")
         # CH-471（STOR-5）：重复转换默认护编辑，force=true 才允许覆盖已有编辑
-        force = bool(b.get("force"))
+        # CH-473（R5-SVC-6）：`bool(b.get("force"))` 把 JSON 字符串 "false"/"no"/"0"
+        # 都判真——字符串形态的假值会意外放行「覆盖用户编辑」。只认布尔 true 与
+        # 显式真值字符串（"true"/"1"/"yes"），其余（含缺省）一律不 force。
+        force = b.get("force")
+        force = force is True or (
+            isinstance(force, str) and force.strip().lower() in ("true", "1", "yes"))
         if not path:
             raise E4001_BadRequest("path required")
         p = Path(path)
@@ -258,27 +281,30 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
         if len(files) >= parallel_min:
             from .pipeline.batch import default_workers, run_batch
             from .worker import _read_ir
-            by_file = {r["file"]: r for r in run_batch(
-                files, cfg=cur(), out_dir=root / "out",
-                workers=default_workers(cfg))}
-            for f in files:
-                r = by_file.get(str(f)) or {"status": "error", "code": "E5000"}
-                if r["status"] == "rejected":
-                    j = sched.submit_rejected(f.name, r.get("code", "E4221"),
-                                              {"reason": r.get("message", "")},
-                                              idem_key=_idem_for(f))
-                    out.append({"file": f.name, "job_id": j.job_id,
-                                "status": "rejected", "code": r.get("code", "E4221")})
-                elif r["status"] != "ok":
-                    out.append({"file": f.name, "status": "error",
-                                "code": r.get("code", "E5000")})
-                else:
-                    ir = _read_ir(r.get("zip", ""))
-                    if ir is None:
-                        out.append({"file": f.name, "doc_id": r.get("doc_id", ""),
-                                    "status": "error", "code": "E5031"})
-                        continue
-                    _finish_one(f, ir, r.get("doc_id", ""), r.get("source_key", ""))
+            # CH-473（R5-SVC-7）：进程池全局信号量——见 _SYNC_POOL_GATE 注释。
+            # 池的整个生命周期（建池 → 转换 → 读产物）都在临界区内，退出即释放。
+            with _SYNC_POOL_GATE:
+                by_file = {r["file"]: r for r in run_batch(
+                    files, cfg=cur(), out_dir=root / "out",
+                    workers=default_workers(cfg))}
+                for f in files:
+                    r = by_file.get(str(f)) or {"status": "error", "code": "E5000"}
+                    if r["status"] == "rejected":
+                        j = sched.submit_rejected(f.name, r.get("code", "E4221"),
+                                                  {"reason": r.get("message", "")},
+                                                  idem_key=_idem_for(f))
+                        out.append({"file": f.name, "job_id": j.job_id,
+                                    "status": "rejected", "code": r.get("code", "E4221")})
+                    elif r["status"] != "ok":
+                        out.append({"file": f.name, "status": "error",
+                                    "code": r.get("code", "E5000")})
+                    else:
+                        ir = _read_ir(r.get("zip", ""))
+                        if ir is None:
+                            out.append({"file": f.name, "doc_id": r.get("doc_id", ""),
+                                        "status": "error", "code": "E5031"})
+                            continue
+                        _finish_one(f, ir, r.get("doc_id", ""), r.get("source_key", ""))
             return jsonify({"jobs": out}), 202
 
         for f in files:
@@ -464,8 +490,13 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
     @app.get("/search")
     def _search():
         need("read")
-        return jsonify(search(store, request.args.get("q", ""),
-                              _int_arg("limit", 20)))
+        # CH-473（R5-SVC-3）：负值 limit 拼进 SQL 得 `LIMIT -1`（SQLite 语义 = 无界），
+        # reader 单请求即可拉全库检索结果（每条带 snippet）——SVC-8 只修了 /jobs，
+        # 这里补同口径拒负。
+        limit = _int_arg("limit", 20)
+        if limit < 0:
+            raise E4001_BadRequest("limit must be >= 0")
+        return jsonify(search(store, request.args.get("q", ""), limit))
 
     @app.get("/events")
     def events():
@@ -514,18 +545,24 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
         # 后续每个请求都会按它行为（workers="8" 让批量直接崩），而 400 只是当场报错。
         # 未知键在这里是硬错误（装载期只警告）：PUT 是显式写入，拼错的键进了
         # override 文件就会在每次重启时静默失效。
-        candidate = copy.deepcopy(app.config["doc2md"]["cfg"])
-        baseline = app.config["doc2md"]["cfg"]
-        _deep(candidate, b)
-        try:
-            config.validate(candidate)
-            # CH-471 SVC-6（D4）：红线键（run.offline_assert）禁止经运行期 PUT 修改——
-            # 一次 PUT 关掉断网守护 = 进程静默可出站。convert(cfg) 仍可显式带该键（合法 profile），
-            # 拦的是「在线途中改」，故只在此处比对基线，不改 config.validate 的通用口径。
-            config.check_runtime_immutable(candidate, baseline)
-        except config.ConfigError as exc:
-            raise E4001_BadRequest(f"invalid configuration: {exc}") from None
+        # CH-473（R5-SVC-4）：candidate 构造与校验整体挪进 cfg_lock——原实现
+        # deepcopy 在锁外，两个并发 PUT 各持旧副本、后应用者把先应用者的键从内存态
+        # 抹掉（override 文件不丢、重启/reload 可自愈，但窗口内两请求所见不一致）。
+        # admin-only 低频端点，锁内校验的串行化成本可忽略。
         with app.config["doc2md"]["cfg_lock"]:
+            candidate = copy.deepcopy(app.config["doc2md"]["cfg"])
+            baseline = app.config["doc2md"]["cfg"]
+            _deep(candidate, b)
+            try:
+                config.validate(candidate)
+                # CH-471 SVC-6（D4）：红线键（run.offline_assert、CH-473 起含
+                # api.allow_remote_bind）禁止经运行期 PUT 修改——一次 PUT 关掉断网
+                # 守护 / 两步 PUT 掏空 loopback 默认 = 进程静默可出站。convert(cfg)
+                # 仍可显式带该键（合法 profile），拦的是「在线途中改」，故只在此处
+                # 比对基线，不改 config.validate 的通用口径。
+                config.check_runtime_immutable(candidate, baseline)
+            except config.ConfigError as exc:
+                raise E4001_BadRequest(f"invalid configuration: {exc}") from None
             app.config["doc2md"]["cfg"] = candidate
             write_override(override, candidate, app.config["doc2md"]["cfg_baseline"])
         _emit(store, "settings_updated", None, None, {"keys": sorted(b.keys())}, logw())
@@ -614,20 +651,46 @@ def _sparse(base: dict, merged: dict) -> dict:
     return out
 
 
+def _fsync_dir(path: Path) -> None:
+    """目录项落盘（CH-473 / R5-SVC-5，与 ops/backup._fsync_dir 同口径）。
+
+    rename/replace 只保证看得到目录项，不保证它已离开页缓存——掉电时替换可能丢。
+    override 是「设置静默回退默认值」的数据安全面，值得与备份容器同等级的落盘纪律。
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
 def write_override(path: Path, merged: dict, baseline: dict) -> dict:
     """settings_override.json 的原子写入口（差量口径，CH-469）。
 
     全量落盘会把当时的默认值冻结进 override，升级后新默认值被旧值压住；
     只落差量则 reload / 重启仍按「默认 → 文件 → override」叠加。
+
+    CH-473（R5-SVC-5）：补落盘纪律——原实现 tmp.write_text + replace 无 fsync，
+    replace 后崩溃可丢 override（用户的 PUT 静默回退默认值）。现为「内容 fsync →
+    rename → 目录 fsync」三段式（ops/backup 容器同口径）。
     """
     diff = _sparse(baseline, merged)
     tmp = path.with_suffix(path.suffix + ".part")
-    tmp.write_text(json.dumps(diff, ensure_ascii=False, indent=2), encoding="utf-8")
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps(diff, ensure_ascii=False, indent=2))
+        fh.flush()
+        os.fsync(fh.fileno())                   # R5-SVC-5：内容先落盘再 rename
     try:
         tmp.chmod(0o600)
     except OSError:
         pass                      # 非 POSIX 平台 chmod 近似 no-op（见 ops/backup 同口径）
     tmp.replace(path)
+    _fsync_dir(path.parent)                     # R5-SVC-5：目录项抗掉电
     return diff
 
 

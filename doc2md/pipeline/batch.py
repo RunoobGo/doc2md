@@ -106,7 +106,21 @@ def run_batch(paths: Sequence[str | Path], *, cfg: dict | None = None,
     n = workers if workers is not None else default_workers(cfg)
     n = max(1, min(int(n), len(files)))
     results: list[dict] = []
-    if n == 1 or len(files) == 1:
+    # CH-469：单文件墙钟上限（完整口径见并行分支注释）。先算 window——串行分支共用。
+    per_file_s = 0
+    if cfg is not None:
+        try:
+            per_file_s = int(config.get(cfg, "perf.batch_file_timeout_s", 0) or 0)
+        except (TypeError, ValueError):
+            per_file_s = 0
+    window = per_file_s if per_file_s > 0 else None
+    # CH-473（R5-PIPE-7）：串行快路径仅在**未配空窗上限**时走进程内 for 循环。
+    # 原实现无条件进程内直跑——损坏 PDF 让 pdfplumber 无限挂起时，CLI `--workers 1`、
+    # 单文件投递、API 同步小批（默认阈值内）全部永等，与并行路径「空窗记账 + terminate」
+    # 语义不一致（dev-plan 亦未声明此例外）。配了上限（>0）时落到下方单 worker
+    # 进程池：同一 wait 空窗判定、同一 E5000 记账、同一 terminate 收尾；默认 0
+    # （不设限）保持进程内零开销、零行为变化（G6 不受影响）。
+    if (n == 1 or len(files) == 1) and window is None:
         for f in files:
             r = _convert_one(f, cfg, mode, out)
             results.append(r)
@@ -126,13 +140,6 @@ def run_batch(paths: Sequence[str | Path], *, cfg: dict | None = None,
     # 没有任何文件完成，就把仍在排队的件全部记超时。
     # （不能用 `fut.result(timeout=…)`：件是先完成才轮得到读结果，
     #   那条 timeout 在 as_completed 循环里永不触发，挂死时依旧卡在等下一件完成。）
-    per_file_s = 0
-    if cfg is not None:
-        try:
-            per_file_s = int(config.get(cfg, "perf.batch_file_timeout_s", 0) or 0)
-        except (TypeError, ValueError):
-            per_file_s = 0
-    window = per_file_s if per_file_s > 0 else None
     pool = ProcessPoolExecutor(**kw)
     # CH-469：先建好完整映射再进循环——`wait()` 每轮把 pending 收敛成「未完成集」，
     # 若只留收敛后的集合，异常分支就再也取不到该件对应的文件名（记账会丢件）。
