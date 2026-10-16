@@ -19,6 +19,7 @@ import importlib
 import socket
 
 import pytest
+from conftest import _missing
 
 from doc2md import auth, config
 from doc2md.errors import WARN_SHARD_NOT_MERGED, E4221_GateReject
@@ -134,7 +135,7 @@ def test_reject_on_any_bad_page_false_tolerates_sampled_bad_page(tmp_path, golde
     # badtail_scan：20 页、坏区 15–17 页；even5 采样 [0,5,10,15,19] 命中 index 15
     sample = golden_dir / "badtail_scan.pdf"
     if not sample.is_file():
-        pytest.skip("golden sample missing: badtail_scan.pdf")
+        _missing("golden sample missing: badtail_scan.pdf")
     c = copy.deepcopy(tmp_cfg)
     c["s1_5"]["sample_pages"] = "even5"
     c["s1_5"]["reject_on_any_bad_page"] = False

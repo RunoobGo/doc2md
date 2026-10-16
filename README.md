@@ -132,14 +132,15 @@ rename 轮转只能有一个属主，三类进程三份文件。
 | `ops/backup.md` | 备份介质与恢复演练细则 |
 | `ops/windows/install-doc2md-tasks.ps1` | Windows 任务计划安装 / 校验 / 卸载（与 launchd 同等能力） |
 
-跟踪约定：契约变更、缺陷、更优做法一律按登记流写入方案 第十一章（当前编号至 `CH-471`，下一条 `CH-472`），实测数字进第十二章并标注语料与测量方法；规格发生变化时同步主题篇章节与本文相应小节，并递增 `doc2md.PLAN_VERSION`（管线契约变化另递增 `PIPELINE_VERSION`；状态库结构变化另递增 `DB_VERSION`，CH-469 起为 `5`）。
+跟踪约定：契约变更、缺陷、更优做法一律按登记流写入方案 第十一章（当前编号至 `CH-473`，下一条 `CH-474`），实测数字进第十二章并标注语料与测量方法；规格发生变化时同步主题篇章节与本文相应小节，并递增 `doc2md.PLAN_VERSION`（管线契约变化另递增 `PIPELINE_VERSION`；状态库结构变化另递增 `DB_VERSION`，CH-469 起为 `5`）。
 
 ## 验收与测试
 
 六条 merge-gate 的 CI 定义见 `.github/workflows/ci.yml`：`merge-gate` job 跑
 `pytest -m gate`（Python 3.11/3.12/3.13 矩阵，失败即 CI 红并在 CI 内阻断 `full-suite`），
 `full-suite` job 依赖它跑全量 + 黄金样本可复现性 + `doc2md doctor`；`lint`（ruff）为
-无人依赖的信息作业，不阻断。两个作业都带 `timeout-minutes`（15 / 10 / 30）且测试步骤用
+无人依赖的信息作业，不阻断。三个作业都带 `timeout-minutes`（**6** / 10 / 30，merge-gate 原 15 分钟
+按 6 轮成功 CI 的 18 条 leg 实测——中位 ~83s、最慢 2m40s——右调到 6，仍留 >2 倍余量）且测试步骤用
 `-vv`（CH-471）：没有上界时一次挂死会占满 6 小时默认限，红线在那几小时里既非绿也非红；
 `-vv` 才打得出逐用例行（`pytest.ini` 的 `addopts` 已含 `-q`，单 `-v` 会被抵成 0 档），
 挂死时能直接指认到用例。
@@ -151,9 +152,9 @@ rename 轮转只能有一个属主，三类进程三份文件。
 > 也成立，需为 `main` 打开「Require a pull request before merging」，那是改变日常工作流的决策项。
 
 ```bash
-pytest -m gate            # 红线层：六条 merge-gate + 低配机专项 + CH-469 两批安全/契约专项（全绿方可合并）
-                          # 当前 132 项 = 40（契约红线）+ 29（低配机）+ 10（服务/存储）+ 53（安全/配置/运维）
-                          # 耗时历史记录：Linux 沙箱轮次 72–110s、T8 优化后 53.0s、CH-469 本机（macOS arm64 / Py 3.15）28.7s——项数是硬口径，耗时只作历史
+pytest -m gate            # 红线层：六条 merge-gate + 低配机专项 + CH-469 两批安全/契约专项 + CH-473 第五轮 12 项（全绿方可合并）
+                          # 当前 145 项 = 40（契约红线）+ 29（低配机）+ 10（服务/存储）+ 54（安全/配置/运维）+ 12（CH-473）
+                          # 耗时历史记录：Linux 沙箱轮次 72–110s、T8 优化后 53.0s、CH-469 本机（macOS arm64 / Py 3.15）28.7s、CH-473 62.7s——项数是硬口径，耗时只作历史
 pytest tests/             # 全量（marker 实际取值：M0+M2 / M3 / M5 / M6c / M8 / M9a / DoD / PERF，见 pytest.ini）
 python3 tests/make_golden.py            # 重建黄金样本（输出目录随脚本位置，--golden 可覆盖）
 python3 tests/make_golden.py --force    # 强制重生成

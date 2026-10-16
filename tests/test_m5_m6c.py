@@ -10,6 +10,7 @@ import sqlite3
 import threading
 
 import pytest
+from conftest import _missing
 
 from doc2md.ir import IR, Block
 from doc2md.pipeline.s4_render import assert_render_contract, is_external, render
@@ -108,7 +109,7 @@ def test_default_pipeline_output_honors_contract(golden_dir, cfg):
     for name in ("docx/sample_links.docx", "small_3p.pdf", "links_pdf.pdf"):
         p = golden_dir / name
         if not p.is_file():
-            pytest.skip(f"missing {name}")
+            _missing(f"missing {name}")
         res = convert(p, cfg=cfg, mode="single")
         assert "~~" not in res.markdown, name
         assert "](#" not in res.markdown and "#page-" not in res.markdown, name

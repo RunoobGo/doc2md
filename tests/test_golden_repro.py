@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 
 import pytest
+from conftest import _missing
 
 pytestmark = [pytest.mark.milestone("DoD")]
 
@@ -77,7 +78,7 @@ def test_shipped_symlink_loop_is_relative(golden_dir):
     """循环链接必须用相对目标：绝对路径写死本机安装位置，分发后成断链 → 防护用例被 skip。"""
     loop = golden_dir / "dirs" / "symlink_loop"
     if not loop.is_dir():
-        pytest.skip("dirs/symlink_loop missing")
+        _missing("dirs/symlink_loop missing")
     names = {p.name for p in loop.iterdir()}
     assert {"A", "B"} <= names, "循环链接样本缺失"
     for n in ("A", "B"):
