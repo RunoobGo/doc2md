@@ -145,14 +145,12 @@ def run_batch(paths: Sequence[str | Path], *, cfg: dict | None = None,
     # 若只留收敛后的集合，异常分支就再也取不到该件对应的文件名（记账会丢件）。
     futs = {pool.submit(_convert_one, f, cfg, mode, out): f for f in files}
     pending = set(futs)
-    abandoned = False          # 是否走了「空窗超时」分支（留下仍在跑的 worker）
     try:
         while pending:
             done, pending_now = wait(pending, timeout=window, return_when=FIRST_COMPLETED)
             if not done and window is not None:
                 # 空窗：仍在跑的件无法安全中止（强杀 worker 会连带砍掉别的在途件），
                 # 但批次必须给出结论——逐个记超时并取消排队件。
-                abandoned = True
                 for fut in pending:
                     fut.cancel()
                     r = Summary(file=str(futs[fut]), status="error", code="E5000",
@@ -181,16 +179,47 @@ def run_batch(paths: Sequence[str | Path], *, cfg: dict | None = None,
         # 先抓本池 worker 句柄——shutdown 会把 `_processes` 置 None，之后再取就没了。
         workers = list((getattr(pool, "_processes", None) or {}).values())
         pool.shutdown(wait=False, cancel_futures=True)
-        # CH-471（CI 收口 / 登记 X-16）：仅空窗超时（abandoned）后主动终止**本池**残留
-        # worker。concurrent.futures 会在解释器退出时 join 管理线程/子进程；3.12.x 上
-        # 「已 cancel 却仍在跑」的 worker 让这条 join 死锁——父进程打完 `132 passed` 报告
-        # 后卡在退出、一直占着 CI 作业直到被 timeout-minutes 杀掉（3.11/3.13 与本机 3.15
-        # 不复现）。这里按 pid 只终止本 executor 自己的 worker（非全局 active_children，
-        # 绝不触碰别处的池）；成功批次走不到这里，正常路径零改动，产物逐字节等价（G6）。
-        if abandoned:
-            for proc in workers:
-                try:
-                    proc.terminate()
-                except (OSError, ValueError, RuntimeError):
-                    pass
+        # CH-474（X-16 根治 / 登记 X-17）：**无条件**终止本池残留 worker 并回收，
+        # 不再限于空窗超时（abandoned）分支。X-16 的原修复只在该分支 terminate，
+        # 本次 full-suite 暴露出**正常完成路径同样挂死**：`_ExecutorManagerThread.
+        # join_processes`（CPython 3.12）对不响应的 worker 只 join 不 terminate，
+        # 而多线程父进程 fork 出的 worker 可能持有继承锁、永不响应退出哨兵
+        # （CI 日志的 `This process (pid=…) is multi-threaded, use of fork() may
+        # lead to deadlocks in the child` 即此形态）——manager 线程永不结束，
+        # 解释器退出时 `_python_exit` join manager 死锁：run 38901173280 在
+        # 「605 passed」全部打印完毕后卡退出 27 分钟直至作业超时被取消
+        # （同代码的 4151515 干净退出——竞态，runner 负载越高窗口越大）。
+        # 本批 future 此时已全部有结论（正常路径=已完成、异常路径=已记账），
+        # terminate 空闲 worker 不影响 results，产物逐字节等价（G6）；异常路径
+        # 下在途件被终止亦优于留到解释器退出死锁。仍按 pid 只动本 executor
+        # 自己的 worker（非全局 active_children，绝不触碰别处的池）。
+        for proc in workers:
+            try:
+                proc.terminate()
+            except (OSError, ValueError, RuntimeError):
+                pass
+        # terminate 后必须 join 回收僵尸，否则 manager 的 join_processes 仍会
+        # 等到它们——给单个 worker 5s 上限，防「连 SIGTERM 都不响应」的极端
+        # 情形把这里本身变成新的阻塞点。
+        for proc in workers:
+            try:
+                proc.join(timeout=5)
+            except (OSError, ValueError, RuntimeError):
+                pass
+        # SIGKILL 兜底：**无条件**发出（对已死进程 `os.kill` 抛 ProcessLookupError、
+        # 已在 `_send_signal` 内部吞掉）。不要用 `if proc.is_alive()` 做前置——
+        # CPython 的 `Popen.poll()` 把 waitpid 的 ECHILD（已被回收）也返回 None
+        # （process.py #1731717 怪癖），`is_alive()` 会误报 True/False；SIGKILL
+        # 在内核层面不可阻挡，发出即保证 manager 的 join_processes 必然返回、
+        # 解释器退出不死锁。本批 future 已全部有结论，强杀无数据面影响。
+        for proc in workers:
+            try:
+                proc.kill()
+            except (OSError, ValueError, RuntimeError):
+                pass
+        for proc in workers:
+            try:
+                proc.join(timeout=1)
+            except (OSError, ValueError, RuntimeError):
+                pass
     return results

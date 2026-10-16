@@ -6,6 +6,8 @@
 - PIPE-6：seam 截断替换加**片级锚定**——同页同片的真实短块（列表项「注意：」+
   后续更长块）不得被「完整版」替换；
 - PIPE-7：配了空窗上限时，串行快路径也落到单 worker 进程池（挂起件可被记账）；
+- X-17：run_batch 返回前本池 worker 全部终止并回收（X-16 的 abandoned-only
+  修复不完整——正常完成路径同样在解释器退出阶段死锁，见下）；
 - PIPE-10：`_fallback_single` 死参 `head` 删除（签名面回归）；
 - STOR-1：force 覆盖时同事务清 `edit_audit`——rollback 不得把覆盖前旧文本复活；
 - STOR-2：work/serve 启动 FTS 对账（含失败不阻断启动）；
@@ -1178,3 +1180,78 @@ def test_test5_v22_legacy_rebuilds_fts_and_backfills_columns(tmp_path):
     # 明文 token 同路哈希
     assert store.q1("SELECT token FROM tokens")["token"] == token_hash(_V3_TOKEN)
     store.close()
+
+
+# ------------------------------------------------------------------ X-17
+
+@pytest.mark.gate
+def test_x17_batch_returns_with_all_pool_workers_reaped(monkeypatch):
+    """CH-474（X-17，HIGH）：run_batch 返回前本池 worker 必须已全部终止并回收。
+
+    X-16（`3f7f9f2`）的修复只在 abandoned（空窗超时）分支 terminate 本池 worker；
+    run `38901173280` 证明**正常完成路径同样挂死**：3.12 上多线程父进程 fork 出的
+    worker 可能持有继承锁、永不响应退出哨兵（CI 日志 `This process (pid=…) is
+    multi-threaded, use of fork() may lead to deadlocks in the child` 即此形态），
+    `_ExecutorManagerThread.join_processes` 对该 worker 只 join 不 terminate →
+    manager 线程永不结束 → 解释器退出时 `_python_exit` join manager 死锁：
+    「605 passed」全部打印完毕后卡退出 27 分钟直至作业超时被取消（同代码的
+    4151515 干净退出——竞态，runner 负载越高窗口越大）。修复为 finally 无条件
+    terminate + join 本池 worker。本测试钉住可观测契约：**batch 返回时**（而非
+    解释器退出时）本池 worker 已全部退出。修复前正常路径无 terminate，worker 由
+    manager 异步优雅关闭，返回瞬间几乎必然仍存活 → 本测试红；修复后 terminate +
+    join 同步完成 → 确定绿（3.12 死锁场景本机 3.11 不复现，不在此断言）。
+    """
+    import concurrent.futures as cf
+
+    from doc2md.pipeline import batch
+    pools = []
+    worker_snapshots = []
+
+    class Recording(cf.ProcessPoolExecutor):
+        def __init__(self, **kw):
+            super().__init__(**kw)
+            pools.append(self)
+
+        def shutdown(self, wait=True, **kw):
+            # CPython 的 `ProcessPoolExecutor.shutdown()` 无论 wait 真假都会
+            # 同步把 `_processes` 置 None（stdlib 源码末三行），事后从池上取
+            # 不到 worker——必须在调用前抓快照，与产品代码同一时序。
+            worker_snapshots.append(
+                list((getattr(self, "_processes", None) or {}).values()))
+            super().shutdown(wait, **kw)
+
+    # run_batch 函数内 `from concurrent.futures import ProcessPoolExecutor` 在
+    # 调用时解析模块属性 → patch `cf.ProcessPoolExecutor` 即可拦截（同 PIPE-7）。
+    monkeypatch.setattr(cf, "ProcessPoolExecutor", Recording)
+    # workers=2 且两个文件 → 走真实进程池；文件不存在使每个 future 都有结论
+    # （worker 内转换失败），即正常完成路径（非空窗超时）。
+    out = batch.run_batch(["x1_none.pdf", "x2_none.pdf"], cfg={"perf": {}}, workers=2)
+    assert len(out) == 2 and all(r["status"] == "error" for r in out), out
+    assert pools, "未创建进程池——测试前提失效"
+    assert worker_snapshots and worker_snapshots[0], \
+        "shutdown 时本池无 worker——与 PIPE-8 哨兵冲突，清理已失效"
+    # 契约：batch 返回后每个 worker 至少收到过 SIGTERM+SIGKILL → 内核必终止，
+    # 宽限窗口内必然可回收。**不用 `Process.is_alive()` 判定**：CPython 的
+    # `Popen.poll()` 把 waitpid 的 ECHILD（已被回收）也返回 None（process.py
+    # 对 #1731717 的处理），is_alive 会把「已回收」误报成「仍存活」；直接用
+    # waitpid 语义判定——返回 pid = 本次回收、ECHILD = 已被回收（主线程或
+    # manager 线程抢先回收都算达成）、WNOHANG=0 = 仍活着（继续等）。
+    import errno
+    import time as _time
+
+    def _reaped(pid: int) -> bool:
+        try:
+            wpid, _ = os.waitpid(pid, os.WNOHANG)
+        except OSError as e:
+            if e.errno == errno.ECHILD:
+                return True
+            raise
+        return wpid == pid
+
+    deadline = _time.monotonic() + 10
+    while _time.monotonic() < deadline:
+        if all(_reaped(p.pid) for s in worker_snapshots for p in s):
+            break
+        _time.sleep(0.1)
+    stuck = [p.pid for s in worker_snapshots for p in s if not _reaped(p.pid)]
+    assert not stuck, f"batch 返回后 10s 内本池 worker 未被回收：{stuck}（X-16 回归）"
