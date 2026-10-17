@@ -3,6 +3,8 @@
 执行语义（方案 6.5 与 附录 E 步骤表为准，逐条失败语义见后者）：
   --daily  = daily_report → local_snapshot（磁盘门禁是其前置检查）→〔快照成功且 chmod 有告警时 work_dir_mode〕
              → rotation → tmp_clean → log_rotation → events_purge → tasks_purge → search_reconcile
+  log_rotation 一步治理两条通道：自持 jsonl 走阈值轮转（writer.check），launchd 输出捕获
+  走就地截断保尾（bound_capture_files，CH-481）——后者的句柄属 launchd，改名式轮转会失效。
   --weekly = 同一序列，只在 `local_snapshot` 成功之后、`rotation` **之前**插入 external_backup（NFR-18），
              故新副本当轮即受轮出保护——不是「跑完日流程再追加备份」
 不装 cron、不在 serve 内起常驻线程；由 launchd StartCalendarInterval 触发。
@@ -20,7 +22,7 @@ from pathlib import Path
 from . import PIPELINE_VERSION, config
 from .ops.backup import BackupPlan
 from .ops.drill import DRILL_DIR_NAME
-from .ops.logging import RotatingJsonlWriter
+from .ops.logging import RotatingJsonlWriter, bound_capture_files, capture_budget
 from .storage.db import Store, now_iso
 
 
@@ -184,9 +186,19 @@ def run(cfg: dict | None = None, root: Path | None = None, mode: str = "daily",
     cleaned = sweep_tmp(cfg, root)
     rep.add("tmp_clean", removed=cleaned)
 
-    # 5) 日志轮转检查
+    # 5) 日志轮转检查（含任务计划捕获文件的就地截断，CH-481 / NFR-19 补全）
     rotated = writer.check()
-    rep.add("log_rotation", rotated=rotated)
+    cap_bytes, tail_bytes = capture_budget(
+        float(config.get(cfg, "logs.rotate_mb", 50)),
+        int(config.get(cfg, "logs.rotate_keep", 5)))
+    clipped = bound_capture_files(logs, cap_bytes, tail_bytes)
+    clip_errors = sum(1 for c in clipped if "error" in c)
+    # 步骤名不变：捕获界定属本步语义（「日志空间治理」）的自然扩展，不是新增契约。
+    # 截断失败只意味着继续占盘，不是数据丢失，故记数字进 payload 而不翻转 rep.ok——
+    # 与 work_dir_mode 的 chmod 告警同口径（O-12）。
+    rep.add("log_rotation", rotated=rotated, captures=clipped,
+            capture_cap_bytes=cap_bytes, capture_tail_bytes=tail_bytes,
+            capture_errors=clip_errors)
 
     # 6) 事件保留期清理（[ops].events_retention_days）
     days = int(config.get(cfg, "ops.events_retention_days", 30))

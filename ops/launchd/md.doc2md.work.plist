@@ -15,7 +15,8 @@
      日志：运行期真相源是 work/logs/work.jsonl（worker 自身轮转，NFR-19，与 app.jsonl /
            cron.jsonl 分属三个进程——rename 式轮转只能有一个属主，CH-444）。常驻循环不向
            stdout 逐行输出，只在退出时打一份 JSON 报告，故 StandardOutPath 天然有界；
-           StandardErrorPath 承接崩溃回溯。
+           StandardErrorPath 承接崩溃回溯。这两份捕获档同样由日流程的 log_rotation 一步
+           就地截断保尾（CH-481，阈值与份数取 logs.rotate_mb / rotate_keep），不会无限占盘。
      注：XML 注释内不得出现连续两个连字符（XML 1.0 注释非法令牌），故注释里以文字描述开关；
          ProgramArguments 里的开关不受影响。 -->
 <plist version="1.0"><dict>

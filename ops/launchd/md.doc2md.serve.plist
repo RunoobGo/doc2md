@@ -17,8 +17,10 @@
            默认 cwd 为 /，缺此二者时相对根名 work 会被解析成 /work。
      日志：运行期真相源是 work/logs/app.jsonl（服务自身轮转，NFR-19）。StandardOutPath /
            StandardErrorPath 只承接启动横幅与崩溃回溯；但 Werkzeug 的访问行同样落 stderr，
-           长期常驻会无界增长，而日流程不清理这两份捕获文件——处置口径见方案 12.7 的
-           「常驻 stderr 捕获无界」待裁定项。
+           长期常驻会持续增长。这两份捕获文件的句柄握在 launchd 手里（O_APPEND），改名式
+           轮转会失效，故由日流程的 log_rotation 一步**就地截断保尾**（CH-481）：超过
+           logs.rotate_mb 即削到 rotate_mb / rotate_keep，保留 inode、不产生兄弟文件，
+           开头留一行 E_LOG_CLIP 标记。阈值与份数都取配置，本文件不另设旋钮。
      注：XML 注释内不得出现连续两个连字符（XML 1.0 注释非法令牌），故注释里以「host 参数」
          之类的说法代替命令行开关；ProgramArguments 里的开关不受影响。 -->
 <plist version="1.0"><dict>

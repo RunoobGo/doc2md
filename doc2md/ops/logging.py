@@ -3,10 +3,16 @@
 关键纪律：轮转大小口径必须用内存字节计数器，不能用 `stat().st_size` ——
 文件句柄默认缓冲使磁盘大小滞后（源文档实测 2KB 阈值在 ~8.2KB 才触发，放大 4 倍）。
 计数器在打开时以既有文件大小初始化，崩溃重启后口径连续。
+
+NFR-19 的覆盖面对 CH-481 做了补全：改名式轮转只适用于**写入进程自己持有的文件**
+（app / cron / work 三份 jsonl）。launchd 捕获通道（`launchd-<档>.{out,err}`）的句柄
+握在 launchd 手里、改名会让它继续往旧 inode 追加，故另有一条**就地截断保尾**口径
+（`bound_capture_files`），预算沿用 `logs.rotate_mb` / `rotate_keep`，不新增配置键。
 """
 from __future__ import annotations
 
 import json
+import os
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -104,6 +110,83 @@ class RotatingJsonlWriter:
                 self._rotate()
                 return True
             return False
+
+
+# ---------------------------------------------------------------------------
+# NFR-19 补全（CH-481）：任务计划的输出捕获文件纳入同一预算口径
+# ---------------------------------------------------------------------------
+
+CAPTURE_GLOBS = ("launchd-*.out", "launchd-*.err")
+
+
+def capture_budget(rotate_mb: float, rotate_keep: int) -> tuple[int, int]:
+    """捕获文件的预算：上限沿用 `logs.rotate_mb`，保尾 = 上限 / rotate_keep。
+
+    不新增配置键——捕获通道与 jsonl 属同一条 NFR-19 预算，两个旋钮已经够表达意图。
+    `rotate_keep` 的合法下限是 1，此时 `cap // keep == cap`（截断后尺寸不变，等于不做事），
+    故保尾的分母取 `max(2, keep)`：任何配置下保尾都 ≤ 上限的一半，判定必然收缩。
+    """
+    cap = max(1, int(float(rotate_mb) * 1024 * 1024))
+    return cap, cap // max(2, int(rotate_keep))
+
+
+def bound_capture_files(directory, cap_bytes: int, tail_bytes: int) -> list[dict]:
+    """把超过 `cap_bytes` 的捕获文件**就地**截到 `tail_bytes`，返回逐档证据。
+
+    为什么只能就地截断、不能轮转：这两份文件的句柄握在 launchd 手里（O_APPEND），
+    `RotatingJsonlWriter._rotate()` 那套「改名 + 重开」会让 launchd 继续往已改名的
+    旧文件里追加——新文件永远是空的，增长只是换了个地方。截断（保留 inode）不碰
+    属主，O_APPEND 的下一笔写入自然落在截断后的新末尾。
+    因此本函数**不做 rename、不建 `.1` 兄弟文件**，这是 `tests/test_ch481_capture_clip.py`
+    钉住的第一条红线。
+
+    逐档证据只含档名与字节数（NFR-20：不采信捕获内容）。
+    """
+    out: list[dict] = []
+    d = Path(directory)
+    if not d.is_dir():
+        return out
+    for pat in CAPTURE_GLOBS:
+        for p in sorted(d.glob(pat)):
+            try:
+                before = p.stat().st_size
+                if before < cap_bytes:
+                    continue
+                after = _clip_to_tail(p, tail_bytes)
+                out.append({"name": p.name, "before": before, "after": after,
+                            "dropped": before - after})
+            except OSError as exc:
+                # 截断失败不构成日流程失败：后果只是「继续占盘」，不是数据丢失。
+                # 但必须让日报看得见（记 error 字段 + capture_errors 计数）。
+                out.append({"name": p.name, "error": str(exc)[:200]})
+    return out
+
+
+def _clip_to_tail(path: Path, tail_bytes: int) -> int:
+    """保留尾部 `tail_bytes` 并**从整行起头**，返回截断后字节数。
+
+    并发追加的取舍：读尾与写回之间若有新行落盘，那几行会随 `truncate` 一起消失。
+    捕获面是 stderr 噪声（访问行 / 回溯），最坏丢几行最新输出——不承诺逐行保全，
+    只承诺「有界」与「尾部可读」，这两条都在下面的断言里。
+    """
+    marker = (json.dumps({"code": "E_LOG_CLIP", "ts": _now_iso(),
+                          "kept": tail_bytes}, ensure_ascii=False) + "\n"
+              ).encode("utf-8", errors="replace")
+    with open(path, "rb+") as fh:
+        fh.seek(0, os.SEEK_END)
+        size = fh.tell()
+        if size <= tail_bytes:
+            return size
+        fh.seek(size - tail_bytes)
+        tail = fh.read(tail_bytes)
+        nl = tail.find(b"\n")        # 首行残半截不可读；找不到换行则原样保留（超长单行）
+        if nl != -1:
+            tail = tail[nl + 1:]
+        fh.seek(0)
+        fh.write(marker + tail)
+        fh.truncate(len(marker) + len(tail))
+        fh.flush()
+        return len(marker) + len(tail)
 
 
 SCRUB_MAX_LEN = 64
