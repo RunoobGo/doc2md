@@ -17,6 +17,51 @@ from .db import Store, now_iso
 SEARCH_INDEX_WINDOW = 8000
 
 
+def _fts_replace_doc(t, doc_id: str, rows) -> None:
+    """整篇替换 FTS 行，删除走 `search_map` rowid 映射（CH-476 / R7-STOR-1，决策 D1）。
+
+    FTS5 的 doc_id/block_id 均 UNINDEXED：原 `DELETE FROM search_blocks WHERE
+    doc_id=?` 是对全内容表的线性扫描，且发生在 BEGIN IMMEDIATE 写锁内——
+    10 万块级库上 worker 批量落库 100 文档 = 100 次全库扫（检索面库龄税）。
+    映射表把删除收敛为 O(本文档块数)，插入显式赋 rowid 并同步映射。
+    rows = [(block_id, text_window, aux), ...]。
+    """
+    t.execute("DELETE FROM search_blocks WHERE rowid IN"
+              " (SELECT fts_rowid FROM search_map WHERE doc_id=?)", (doc_id,))
+    t.execute("DELETE FROM search_map WHERE doc_id=?", (doc_id,))
+    if not rows:
+        return
+    t.executemany("INSERT OR IGNORE INTO search_map(doc_id, block_id) VALUES (?,?)",
+                  [(doc_id, bid) for bid, _x, _a in rows])
+    ids = {r[0]: r[1] for r in t.execute(
+        "SELECT block_id, fts_rowid FROM search_map WHERE doc_id=?",
+        (doc_id,)).fetchall()}
+    # 同篇重号块（坏 IR 理论形态）只索引首现——映射唯一，重复行对检索无增量意义
+    t.executemany("INSERT INTO search_blocks(rowid, doc_id, block_id, text, aux)"
+                  " VALUES (?,?,?,?,?)",
+                  [(ids[bid], doc_id, bid, x, a) for bid, x, a in rows if bid in ids])
+
+
+def _fts_replace_block(t, doc_id: str, block_id: str, text_aux) -> None:
+    """单块 FTS 替换（CH-476 / R7-STOR-1）：经唯一索引 (doc_id, block_id) O(1) 定位。
+
+    原每次 PATCH 编辑都 `DELETE ... WHERE doc_id=? AND block_id=?` 全库扫——
+    单块保存的写锁时长随库龄增长。`text_aux=None` 时只删不插。
+    """
+    t.execute("DELETE FROM search_blocks WHERE rowid IN"
+              " (SELECT fts_rowid FROM search_map WHERE doc_id=? AND block_id=?)",
+              (doc_id, block_id))
+    t.execute("DELETE FROM search_map WHERE doc_id=? AND block_id=?",
+              (doc_id, block_id))
+    if text_aux is None:
+        return
+    cur = t.execute("INSERT INTO search_map(doc_id, block_id) VALUES (?,?)",
+                    (doc_id, block_id))
+    t.execute("INSERT INTO search_blocks(rowid, doc_id, block_id, text, aux)"
+              " VALUES (?,?,?,?,?)",
+              (cur.lastrowid, doc_id, block_id, text_aux[0], text_aux[1]))
+
+
 
 def save_ir(store: Store, ir: IR, profile: str = "standard", tx=None,
             force: bool = False) -> None:
@@ -80,12 +125,10 @@ def save_ir(store: Store, ir: IR, profile: str = "standard", tx=None,
             [(ir.doc_id, b.id, b.type, b.text, b.level, b.page,
               json.dumps(b.flags, ensure_ascii=False), json.dumps(b.marks, ensure_ascii=False),
               int(b.immutable), b.revision) for b in ir.blocks])
-        t.execute("DELETE FROM search_blocks WHERE doc_id=?", (ir.doc_id,))
-        t.executemany(
-            "INSERT INTO search_blocks(doc_id, block_id, text, aux) VALUES (?,?,?,?)",
-            [(ir.doc_id, b.id, b.text[:SEARCH_INDEX_WINDOW],
-              cjk_aux(b.text[:SEARCH_INDEX_WINDOW]))
-             for b in ir.blocks if b.text])
+        _fts_replace_doc(t, ir.doc_id, [
+            (b.id, b.text[:SEARCH_INDEX_WINDOW],
+             cjk_aux(b.text[:SEARCH_INDEX_WINDOW]))
+            for b in ir.blocks if b.text])
         if existed:
             # 覆盖留痕只记计数与来源，不记正文（NFR-20）
             t.execute("INSERT INTO events(ts, code, doc_id, job_id, payload_json)"
@@ -111,12 +154,10 @@ def reindex(store: Store, doc_id: str, blocks) -> int:
     """
     from .fts import cjk_aux
     with store.tx() as tx:
-        tx.execute("DELETE FROM search_blocks WHERE doc_id=?", (doc_id,))
-        tx.executemany(
-            "INSERT INTO search_blocks(doc_id, block_id, text, aux) VALUES (?,?,?,?)",
-            [(doc_id, b.id, b.text[:SEARCH_INDEX_WINDOW],
-              cjk_aux(b.text[:SEARCH_INDEX_WINDOW]))
-             for b in blocks if b.text])
+        _fts_replace_doc(tx, doc_id, [
+            (b.id, b.text[:SEARCH_INDEX_WINDOW],
+             cjk_aux(b.text[:SEARCH_INDEX_WINDOW]))
+            for b in blocks if b.text])
     return len(blocks)
 
 
@@ -132,7 +173,13 @@ def reconcile_search(store: Store) -> dict:
     divergent = store.q(
         "SELECT b.doc_id AS doc_id, b.nb AS nb FROM"
         " (SELECT doc_id, COUNT(*) nb FROM blocks WHERE text<>'' GROUP BY doc_id) b"
-        " LEFT JOIN (SELECT doc_id, COUNT(*) ns FROM search_blocks GROUP BY doc_id) s"
+        # CH-476（R7-STOR-1）：索引侧计数经 search_map **联查真实 FTS 行**——
+        # 直接数映射行会有盲区：FTS 行被单独抹掉（历史缺陷/手工库操作）而映射
+        # 行还在时，`_fts_replace_doc` 的 `INSERT OR IGNORE` 会跳过该 block_id，
+        # 缺失的索引行永不补回。联 FTS 才是「检索真的少了这行」的口径。
+        # FTS5 的 rowid 是主键，联接不走 UNINDEXED 列，无全库内容扫描之扰。
+        " LEFT JOIN (SELECT m.doc_id AS doc_id, COUNT(*) ns FROM search_map m"
+        "  JOIN search_blocks sb ON sb.rowid=m.fts_rowid GROUP BY m.doc_id) s"
         " ON s.doc_id=b.doc_id"
         " WHERE b.nb <> COALESCE(s.ns, 0)")
     docs_repaired = blocks_reindexed = 0
@@ -145,6 +192,8 @@ def reconcile_search(store: Store) -> dict:
         orphans = tx.execute(
             "DELETE FROM search_blocks WHERE doc_id NOT IN (SELECT doc_id FROM blocks)"
         ).rowcount or 0
+        # CH-476（R7-STOR-1）：映射同清，否则孤儿 doc 的 fts_rowid 永占位
+        tx.execute("DELETE FROM search_map WHERE doc_id NOT IN (SELECT doc_id FROM blocks)")
     return {"docs_scanned": len(divergent), "docs_repaired": docs_repaired,
             "blocks_reindexed": blocks_reindexed, "orphans_removed": orphans}
 
@@ -161,13 +210,11 @@ def reindex_block(store: Store, doc_id: str, block, tx=None) -> None:
     from .fts import cjk_aux
 
     def _do(t):
-        t.execute("DELETE FROM search_blocks WHERE doc_id=? AND block_id=?",
-                  (doc_id, block.id))
-        if block.text:
-            t.execute(
-                "INSERT INTO search_blocks(doc_id, block_id, text, aux) VALUES (?,?,?,?)",
-                (doc_id, block.id, block.text[:SEARCH_INDEX_WINDOW],
-                 cjk_aux(block.text[:SEARCH_INDEX_WINDOW])))
+        # CH-476（R7-STOR-1）：单块删除经 search_map 唯一索引 O(1)（原
+        # `WHERE doc_id=? AND block_id=?` 在 UNINDEXED 列上全库扫）。
+        win = block.text[:SEARCH_INDEX_WINDOW] if block.text else ""
+        _fts_replace_block(t, doc_id, block.id,
+                           (win, cjk_aux(win)) if win else None)
 
     if tx is not None:
         _do(tx)
@@ -312,8 +359,12 @@ def delete_doc(store: Store, doc_id: str, actor: str, root: Path | None = None, 
             "events": tx.execute("SELECT COUNT(*) c FROM events WHERE doc_id=?",
                                  (doc_id,)).fetchone()["c"],
         }
-        for sql in ("DELETE FROM search_blocks WHERE doc_id=?",
-                    "DELETE FROM blocks WHERE doc_id=?",
+        # CH-476（R7-STOR-1）：FTS 删除经 search_map rowid 映射（O(本文档块数)），
+        # 原 `WHERE doc_id=?` 是全库线性扫描且同在写锁事务内。
+        tx.execute("DELETE FROM search_blocks WHERE rowid IN"
+                   " (SELECT fts_rowid FROM search_map WHERE doc_id=?)", (doc_id,))
+        tx.execute("DELETE FROM search_map WHERE doc_id=?", (doc_id,))
+        for sql in ("DELETE FROM blocks WHERE doc_id=?",
                     "DELETE FROM edit_audit WHERE doc_id=?",
                     "DELETE FROM events WHERE doc_id=?",
                     "DELETE FROM tasks WHERE doc_id=?",
@@ -339,9 +390,10 @@ def delete_source(store: Store, source_key: str, actor: str, root: Path | None =
     每个文档都把 out/ir/tmp 三棵树各 rglob 一遍——N 个版本 = 3N 次全树扫描，
     目录里文档越多越慢（同一批文件被反复匹配）。
     """
-    with store.tx() as tx:
-        ids = [r["doc_id"] for r in
-               tx.execute("SELECT doc_id FROM docs WHERE source_key=?", (source_key,))]
+    # CH-476（R7-PERF-i）：只读查询走 `store.q`——原实现用 `store.tx()` 起了一个
+    # BEGIN IMMEDIATE + COMMIT（拿写锁、写 journal header），只为跑一条 SELECT。
+    ids = [r["doc_id"] for r in
+           store.q("SELECT doc_id FROM docs WHERE source_key=?", (source_key,))]
     if not ids:
         raise E4041_NotFound(f"source {source_key} not found")
     removed, failed = purge_many(ids, root)

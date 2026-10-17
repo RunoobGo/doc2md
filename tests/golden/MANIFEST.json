@@ -21,13 +21,6 @@
     "description": "后段坏页样本（15-17 页无文本）"
   },
   {
-    "path": "bigfile.bin",
-    "sha256": "0fac0148877f9a5df10b80901152374fb923360acbf9c921397572406946901b",
-    "bytes": 125829120,
-    "pages": null,
-    "description": "120MB 随机文件"
-  },
-  {
     "path": "clean/cln_01.pdf",
     "sha256": "381ce66d939e979a5ad6d11abfd3a296e0bf2c9b609a798b778456f674f71e45",
     "bytes": 4579,
@@ -35826,11 +35819,18 @@
     "description": "DOCX 链接测试"
   },
   {
-    "path": "docx/sample_revisions.docx",
-    "sha256": "919ba19ad82101f32a285b6872abc6d1de82ef30403ff569b798ac0c22a0f839",
-    "bytes": 36735,
+    "path": "docx/sample_notes.docx",
+    "sha256": "00a3acf97eb057e52b117dcead5ab0e78f245262ae2b2c921042004093f5acf2",
+    "bytes": 37693,
     "pages": null,
-    "description": "DOCX 修订测试（基础版）"
+    "description": "DOCX 脚注/尾注 part + 单元格内多段落"
+  },
+  {
+    "path": "docx/sample_revisions.docx",
+    "sha256": "9d66924f45b1ca0957faf9653d6b85791caef69bc55ebecc9c2fb98155e0aedb",
+    "bytes": 37111,
+    "pages": null,
+    "description": "DOCX 修订测试（真实 w:ins/w:del 痕迹）"
   },
   {
     "path": "docx/sample_simple.docx",

@@ -42,7 +42,12 @@ link_internal = "plain"                # CH-416：PDF goto / DOCX 书签链接�
 [perf]
 workers = 0                            # CH-448：批量转换进程数；0 = 自动 min(4, CPU)
                                        # 8GB 内存机器别调到 8：驻留 ≈ workers × chunk_pages
+queue_batch_factor = 4                 # CH-476（R7-PERF-1）：每轮领取量 = workers × 该系数
+                                       # 摊薄「每轮新建进程池 + worker 重导」的固定开销；
+                                       # 1 = 旧口径（按池取件）。并发仍受 workers 约束
 queue_async = false                    # CH-449：true → POST /jobs 只入队，由 `doc2md work` 消费
+enqueue_hash_threads = 8               # CH-476（R7-PERF-3）：异步入队的「预检+内容哈希」线程上限
+                                       # 1 = 逐个串行；写库始终单线程按序提交，附着/幂等口径不变
 sync_min_parallel = 8                  # CH-471（SVC-3）：同步目录达此文件数才走进程池；否则串行
                                        # false = 同步转换（方案 5.4 既有契约）
 min_free_mb = 512                      # CH-450（NFR-6）：写产物/备份前的剩余空间下限；本项与 disk_safety_factor 同时为 0 才关闭门禁

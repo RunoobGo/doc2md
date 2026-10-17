@@ -69,25 +69,37 @@ def _merge_text(a: Block, b: Block) -> str:
     return ta + joiner + tb
 
 
+# R7-PIPE-1（D3）：结构块——离散结构节点，缝合续接一律禁止吸收
+_STRUCTURAL = frozenset({"heading", "table", "code", "quote", "page_break"})
+
+
 def _continuation(a: Block, b: Block) -> bool:
     """判定相邻分片边界块 a→b 是否可续接：R-04 编号续接 或 字体/字号一致且 a 非句末。
 
     CH-469：正文续接分支不得命中标题块——标题是离散结构节点，"3.1 前置条件"
     无句末标点 + 同字号即被误判成"a 未说完"，导致前一片标题被吸收。
-    编号续接分支（R-04）仍按原口径工作。
+
+    R7-PIPE-1（D3）两条收紧，CH-469 口径推广到**全部**结构块：
+    - 编号续接比较原为**方向反置**（`kb[-1] == ka[-1] + 1`；`ka` 是后块头编号、
+      `kb` 是前块尾编号，续接必须要求 b = a + 1）：自然递增 5→6 永不命中
+      （该分支对真实语料是死代码），递减 6→5 反而命中并错误缝合。修正为
+      `ka[-1] == kb[-1] + 1`；
+    - 结构块守卫（heading/table/code/quote/page_break）**前移到编号分支之前**：
+      原编号分支在 heading 守卫之前 return，"4.2 部署要点"标题可被吸收进前片
+      段落；code/quote/page_break 在 `font={}` 时 family/size 恒匹配，经字体分支
+      被吸收（page_break 吸收 code 后渲染空串 = 整块代码静默消失）。
+      两分支现仅对 paragraph / list_item 生效。
     """
     ta = (a.text or "").rstrip()
     tb = (b.text or "").lstrip()
-    if a.type == "table" or b.type == "table":
+    if a.type in _STRUCTURAL or b.type in _STRUCTURAL:
         return False
     ma, mb = _NUM_HEAD.match(tb), _NUM_TAIL.search(ta)
     if ma and mb:
         ka, kb = _num_key(ma.group(1)), _num_key(mb.group(1))
-        if ka[:-1] == kb[:-1] and kb[-1] == ka[-1] + 1:
+        if ka[:-1] == kb[:-1] and ka[-1] == kb[-1] + 1:
             return True
     if not ta:
-        return False
-    if a.type == "heading" or b.type == "heading":
         return False
     ends = ta.endswith(_SENT_END)
     fa, fb = a.font or {}, b.font or {}
@@ -117,10 +129,12 @@ def overlap_dedupe(blocks: list[Block], spans: list[tuple[int, int]],
     用完整版替换截断版。两条都只在「最近 64 个已保留块」这一常量比对面内查找。
 
     CH-473（R5-PIPE-5 / R5-PIPE-6，G1「分片≡单片」）两条收紧：
-    - `_seam_suffix` 加**相邻页约束**（`b.page == a.page + 1`）：跨页续写段落的尾缀
-      块恒为「起始页的下一页」；缺此约束时文档里重复出现的独立短句（法律/公文的
-      重复条款、「特此说明。」恰是前一片某长段的结尾）页不相邻也会被判成尾缀而
-      **整块误删**——它不是任何段落的尾缀，是真实内容（静默丢字 + 分片≠单片）。
+    - `_seam_suffix` 加**页差约束**（CH-476 / R7-PIPE-2 把原「恰为相邻页」放宽为
+      `0 < b.page - a.page <= 最宽重叠窗口 + 1`）：跨页续写段落的尾缀块来自后一片
+      的窗口首页，其完整版起始页可早若干页；无约束时文档里重复出现的独立短句（法律/
+      公文的重复条款、「特此说明。」恰是前一片某长段的结尾）页不相邻也会被判成尾缀而
+      **整块误删**——它不是任何段落的尾缀，是真实内容（静默丢字 + 分片≠单片）；
+      约束过窄则跨 ≥3 页长块的尾缀漏判、重叠内容在产物里留两份。
     - `_seam_truncated` 加**片级锚定**：被替换的截断版必须是「某一片的最后一块」
       且完整版来自后一片（`shard_bounds` 由 `stitch_shards` 按片序传入）。块层
       文本无法区分「片界截断版 + 后片完整版」与「同页两个真实块构成前缀关系」
@@ -132,11 +146,16 @@ def overlap_dedupe(blocks: list[Block], spans: list[tuple[int, int]],
     if len(spans) < 2:
         return blocks
     boundaries: set[int] = set()
+    widest = 0
     for i in range(1, len(spans)):
         overlap_pages = {p for p in range(spans[i][0], min(spans[i - 1][1], spans[i][1]))}
         boundaries |= overlap_pages
+        widest = max(widest, len(overlap_pages))
     if not boundaries:
         return blocks
+    # 缝合尾缀允许的最大页差（CH-476 / R7-PIPE-2）：尾缀块落在后一片的窗口首页，
+    # 其完整版的起始页最早可早到前一片窗口首页之前一页，故界 = 最宽窗口 + 1
+    seam_gap = widest + 1
     # 片级锚定表：每片最后一块的全局索引（CH-473 / R5-PIPE-6；未提供 = 退化为纯文本判定）
     last_idx = {e - 1 for e in shard_bounds} if shard_bounds else set()
     seen: set[str] = set()
@@ -153,7 +172,7 @@ def overlap_dedupe(blocks: list[Block], spans: list[tuple[int, int]],
             if fp in seen:
                 b.flags.setdefault("dropped_dup_of", fp)
                 continue
-            src = _seam_suffix(tail, b)
+            src = _seam_suffix(tail, b, seam_gap)
             if src is not None:
                 b.flags.setdefault("dropped_dup_of", fingerprint(src))
                 continue
@@ -177,19 +196,27 @@ def _same_face(a: Block, b: Block) -> bool:
     return abs(float(fa.get("size", 0) or 0) - float(fb.get("size", 0) or 0)) < 0.5
 
 
-def _seam_suffix(tail: list[tuple[int, Block]], b: Block) -> Block | None:
+def _seam_suffix(tail: list[tuple[int, Block]], b: Block,
+                 max_gap: int = 1) -> Block | None:
     """在 tail 里找「b 是其真后缀」的前一片块，找不到返回 None。
 
-    CH-473（R5-PIPE-5）：加**相邻页约束**——跨页续写段落从起始页的下一页才开始
-    产出尾缀块，故命中必满足 `b.page == a.page + 1`。缺此约束时，文档中重复出现的
-    独立短句（「特此说明。」恰是前一片某长段的结尾、且落在后一片的重叠窗口页）
-    页不相邻也会被删——那不是任何段落的尾缀，是真实内容。
+    CH-473（R5-PIPE-5）：加**页差约束**——跨页续写段落从起始页的下一页才开始
+    产出尾缀块。缺此约束时，文档中重复出现的独立短句（「特此说明。」恰是前一片
+    某长段的结尾、且落在后一片的重叠窗口页）页不相邻也会被删——那不是任何段落的
+    尾缀，是真实内容。
+
+    CH-476（R7-PIPE-2）：约束由「恰为相邻页」放宽为 `0 < b.page - a.page <= max_gap`
+    （max_gap = 最宽重叠窗口 + 1，由 `overlap_dedupe` 按 spans 算出）。原 `== +1`
+    只对「完整块起始页 = 窗口首页 − 1」成立：跨 ≥3 页的长块（长段/代码清单/表格）
+    起始页更早，页差 ≥2 时尾缀漏判、重叠内容在产物里留两份。上限仍由窗口宽度界定，
+    远处的重复短句照旧不误删。
     """
     tb = (b.text or "").strip()
     if not tb:
         return None
     for _idx, a in reversed(tail):
-        if a.page >= b.page or b.page != a.page + 1 or not _same_face(a, b):
+        gap = b.page - a.page if a.page is not None and b.page is not None else -1
+        if not 0 < gap <= max_gap or not _same_face(a, b):
             continue
         ta = (a.text or "").strip()
         if len(ta) > len(tb) and ta.endswith(tb):

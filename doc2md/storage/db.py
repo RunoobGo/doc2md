@@ -8,6 +8,7 @@ schema 覆盖本期全部落点：
 - tasks（+ 部分唯一索引，CH-412 并发投递防护）
 - events（全局总线持久化，保留期由 cron 清理）
 - search_blocks（FTS5，编辑后 ≤5s 刷新，CH-418；文档级检索走它按 doc_id 聚合，无独立 search_docs 表）
+- search_map（CH-476 / R7-STOR-1：FTS 行号 → (doc_id, block_id) 映射，检索删除走 rowid 子查询）
 """
 from __future__ import annotations
 
@@ -18,7 +19,11 @@ import weakref
 from datetime import datetime, timezone
 from pathlib import Path
 
-DB_VERSION = 5   # state.sqlite 结构版本（user_version）；与 IR 的 SCHEMA_VERSION=14 是两套口径
+DB_VERSION = 6   # state.sqlite 结构版本（user_version）；与 IR 的 SCHEMA_VERSION=14 是两套口径
+# v6（CH-476 / R7-STOR-1，决策 D1）：新增 search_map（FTS 删除 rowid 映射）。
+# v5 及更早的存量库由 _migrate 无条件幂等 DDL + 版本门控回填补齐（R7-STOR-2：
+# CH-469 补 ix_events_*/ix_tasks_doc 时未 bump 版本，`if cur_ver < DB_VERSION`
+# 让这类存量库永远缺索引——现改为 DDL 每次都执行）。
 
 DDL = f"""
 PRAGMA journal_mode=WAL;
@@ -121,6 +126,24 @@ CREATE VIRTUAL TABLE IF NOT EXISTS search_blocks USING fts5(
   doc_id UNINDEXED, block_id UNINDEXED, text, aux, tokenize='unicode61'
 );
 
+-- CH-476（R7-STOR-1，决策 D1）：FTS5 的 doc_id/block_id 均 UNINDEXED，
+-- `DELETE ... WHERE doc_id=?`（save_ir / reindex / delete_doc）与单块编辑的
+-- `WHERE doc_id=? AND block_id=?` 都退化为对全内容表的线性扫描，且发生在
+-- BEGIN IMMEDIATE 写锁内（检索面「库龄税」）。删除路径改走 rowid 映射：
+-- 本表行号显式赋给 search_blocks.rowid，删则 `WHERE rowid IN (SELECT fts_rowid
+-- FROM search_map WHERE doc_id=?)`，单块定位 O(1)。
+CREATE TABLE IF NOT EXISTS search_map (
+  fts_rowid INTEGER PRIMARY KEY AUTOINCREMENT,
+  doc_id TEXT NOT NULL,
+  block_id TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_search_map_blk ON search_map(doc_id, block_id);
+CREATE INDEX IF NOT EXISTS ix_search_map_doc ON search_map(doc_id);
+
+-- CH-476（R7-STOR-2 / D1 收编）：审计取回按 `WHERE doc_id=? ORDER BY id`
+-- （ix_audit_doc 是 (doc_id, block_id) 列序，过滤能走、排序不能）。
+CREATE INDEX IF NOT EXISTS ix_audit_doc_id ON edit_audit(doc_id, id);
+
 PRAGMA user_version={DB_VERSION};
 """
 
@@ -212,8 +235,18 @@ class Store:
 
     def _migrate(self) -> None:
         cur_ver = int(self._conn.execute("PRAGMA user_version").fetchone()[0])
+        # CH-476（R7-STOR-2，决策 D1）：DDL 改为**无条件**执行。原 `if cur_ver <
+        # DB_VERSION` 把「加 schema 必须 bump user_version」当作纪律，而 CH-469 补
+        # ix_events_*/ix_tasks_doc 恰恰没 bump——user_version=5 的存量库永远缺这些
+        # 索引。DDL 全部是 IF NOT EXISTS 幂等语句，每次开连接重跑只是几十次字典
+        # 查找；脚本尾部 PRAGMA 回写版本号（与 cur_ver 判定无冲突：判定先行）。
+        self._conn.executescript(DDL)
         if cur_ver < DB_VERSION:
-            self._conn.executescript(DDL)
+            # CH-476（R7-STOR-1）：数据迁移只在版本不足时跑——存量 FTS 行一次性
+            # 回填删除映射（此后由写路径增量维护；v6 起每次开连接不再全扫）。
+            self._conn.execute(
+                "INSERT OR IGNORE INTO search_map(fts_rowid, doc_id, block_id)"
+                " SELECT rowid, doc_id, block_id FROM search_blocks")
         # 幂等补列（schema 迁移，v2.2 遗留能力）
         cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(blocks)")}
         if "revision" not in cols:
@@ -282,6 +315,11 @@ class Store:
         with self.tx() as tx:
             tx.execute("DROP TABLE search_blocks")
             tx.execute("ALTER TABLE search_blocks_new RENAME TO search_blocks")
+            # CH-476（R7-STOR-1）：换表即换 rowid——映射整表按新 rowid 重建，
+            # 否则旧 rowid 残留会让删除路径漏删（该 doc 的 FTS 行永不消失）。
+            tx.execute("DELETE FROM search_map")
+            tx.execute("INSERT INTO search_map(fts_rowid, doc_id, block_id)"
+                       " SELECT rowid, doc_id, block_id FROM search_blocks")
 
     # --- 事务 ---------------------------------------------------------------
     def tx(self):

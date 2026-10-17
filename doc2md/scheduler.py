@@ -39,30 +39,54 @@ class Scheduler:
         （`detail_json` 是结果/失败明细的契约面，不混入管道数据）。
         """
         with self.store.tx() as tx:
-            if idem_key:
-                row = tx.execute("SELECT job_id, doc_id FROM tasks WHERE idem_key=? LIMIT 1",
-                                 (idem_key,)).fetchone()
-                if row:
-                    return Job(row["job_id"], row["doc_id"], "queued",
-                               attached=True, idem_hit=True)
+            return self._submit_tx(tx, doc_id, source_key, idem_key,
+                                   source_path=source_path, mode=mode)
+
+    def submit_many(self, items) -> list[Job]:
+        """批量投递（CH-476 / R7-PERF-h）：整批只开一个 `BEGIN IMMEDIATE`。
+
+        `items` 为 `(doc_id, source_key, idem_key, source_path, mode)` 五元组序列，
+        逐条判定与产出顺序和 `submit` 完全一致（含批内重复 doc_id / idem_key 的
+        附着语义：前一条插入的行在本事务内对后一条可见）。收益是把 N 次提交
+        压成 1 次——WAL 下每次 COMMIT 都要写一条 journal header 并 fsync，
+        万件级目录的入队成本几乎全在这 N 次上。
+        原子性由此**强于**逐条 `submit`：任一条失败即整批回滚，不留半批队列行。
+        """
+        jobs: list[Job] = []
+        with self.store.tx() as tx:
+            for doc_id, source_key, idem_key, source_path, mode in items:
+                jobs.append(self._submit_tx(tx, doc_id, source_key, idem_key,
+                                            source_path=source_path, mode=mode))
+        return jobs
+
+    def _submit_tx(self, tx, doc_id: str, source_key: str = "",
+                   idem_key: str | None = None, *, source_path: str | None = None,
+                   mode: str | None = None) -> Job:
+        """`submit` 的语句序列（运行在调用方事务里）。"""
+        if idem_key:
+            row = tx.execute("SELECT job_id, doc_id FROM tasks WHERE idem_key=? LIMIT 1",
+                             (idem_key,)).fetchone()
+            if row:
+                return Job(row["job_id"], row["doc_id"], "queued",
+                           attached=True, idem_hit=True)
+        row = tx.execute(
+            f"SELECT job_id FROM tasks WHERE doc_id=? AND status IN {ACTIVE} LIMIT 1",
+            (doc_id,)).fetchone()
+        if row:
+            return Job(row["job_id"], doc_id, "queued", attached=True)
+        job_id = "job-" + uuid.uuid4().hex[:12]
+        try:
+            tx.execute(
+                "INSERT INTO tasks(job_id, doc_id, source_key, status, idem_key,"
+                " created_at, source_path, mode) VALUES (?,?,?,?,?,?,?,?)",
+                (job_id, doc_id, source_key, "queued", idem_key, now_iso(),
+                 source_path, mode))
+        except sqlite3.IntegrityError:
+            # 并发窗口：唯一索引挡住第二份进行中作业 → 附着
             row = tx.execute(
                 f"SELECT job_id FROM tasks WHERE doc_id=? AND status IN {ACTIVE} LIMIT 1",
                 (doc_id,)).fetchone()
-            if row:
-                return Job(row["job_id"], doc_id, "queued", attached=True)
-            job_id = "job-" + uuid.uuid4().hex[:12]
-            try:
-                tx.execute(
-                    "INSERT INTO tasks(job_id, doc_id, source_key, status, idem_key,"
-                    " created_at, source_path, mode) VALUES (?,?,?,?,?,?,?,?)",
-                    (job_id, doc_id, source_key, "queued", idem_key, now_iso(),
-                     source_path, mode))
-            except sqlite3.IntegrityError:
-                # 并发窗口：唯一索引挡住第二份进行中作业 → 附着
-                row = tx.execute(
-                    f"SELECT job_id FROM tasks WHERE doc_id=? AND status IN {ACTIVE} LIMIT 1",
-                    (doc_id,)).fetchone()
-                return Job(row["job_id"], doc_id, "queued", attached=True)
+            return Job(row["job_id"], doc_id, "queued", attached=True)
         return Job(job_id, doc_id, "queued")
 
     def submit_rejected(self, name: str, code: str, detail: dict | None = None,
@@ -79,10 +103,17 @@ class Scheduler:
 
 
     def mark(self, job_id: str, status: str, error_code: str = "", detail: dict | None = None,
-             tx=None):
-        """状态推进。CH-459（A-4）：`tx` 形参允许并入调用方事务——
+             tx=None) -> bool:
+        """状态推进，返回本次推进是否真正落到该行（False = 行不存在或已是终态）。
+
+        CH-459（A-4）：`tx` 形参允许并入调用方事务——
         worker._finish_ok 与同步 /jobs 路径把 mark 与入库/事件合为单次提交
         （WAL + synchronous=FULL 下每次提交都 fsync，是每任务固定开销主因）。
+
+        CH-476（R7-SVC-1，决策 D6）：返回值供调用方做「行还在不在」判定——
+        delete_doc 级联 `DELETE FROM tasks WHERE doc_id=?` 会收走在途 running 行，
+        落库前先 mark 并查 rowcount==0 即可识别「文档已被删除」，回滚不写 docs，
+        杜绝半复活态（正文回来了、任务行没了）。
         """
         if status not in ACTIVE + TERMINAL:
             raise ValueError(f"bad status {status}")
@@ -105,12 +136,14 @@ class Scheduler:
             else:
                 t.execute("UPDATE tasks SET status=? WHERE job_id=?"
                           " AND status NOT IN ('done','rejected')", (status, job_id))
+            # CH-476（R7-SVC-1）：紧随 UPDATE 取游标 rowcount（_Tx.rowcount 优先
+            # 最近语句游标）——0 = 行已被 delete_doc 级联收走或已是终态。
+            return t.rowcount > 0
 
         if tx is not None:
-            _do(tx)
-        else:
-            with self.store.tx() as t:
-                _do(t)
+            return _do(tx)
+        with self.store.tx() as t:
+            return _do(t)
 
     def get(self, job_id: str) -> dict | None:
         r = self.store.q1("SELECT * FROM tasks WHERE job_id=?", (job_id,))

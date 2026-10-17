@@ -13,7 +13,7 @@ from __future__ import annotations
 import pytest
 
 from doc2md.ir import IR, Block
-from doc2md.pipeline.sharding import fingerprint, overlap_dedupe, shard_plan, stitch_shards
+from doc2md.pipeline.sharding import _continuation, fingerprint, overlap_dedupe, shard_plan, stitch_shards
 
 pytestmark = [pytest.mark.milestone("DoD")]
 
@@ -214,3 +214,59 @@ def test_stitch_never_merges_across_tables():
     merged, _stats = stitch_shards([left, right], max_pages=300, dedupe=False)
     assert [b.type for b in merged.blocks] == ["table", "table"]
     assert merged.blocks[0].text == "| a | b |"     # 表格不续接，原文保持
+
+
+# --- CH-476（R7-PIPE-1，D3）：编号方向 + 结构块守卫前移 ---------------------------
+
+
+@pytest.mark.gate
+def test_continuation_number_direction_is_increment():
+    """编号续接必须命中**递增**（前块尾 4.2 → 后块头 4.3）。
+
+    原比较 `kb[-1] == ka[-1] + 1` 方向反置：自然递增永不命中（分支死代码），
+    递减反而命中并缝合语义无关内容。字号取不同值以隔离字体分支干扰。
+    """
+    assert _continuation(_blk("b1", "本方案共分 4.2", 0, size=10.0),
+                         _blk("b2", "4.3 部署要点", 1, size=14.0)) is True
+    assert _continuation(_blk("b1", "详见第 5", 0, size=10.0),
+                         _blk("b2", "6 项内容", 1, size=14.0)) is True
+
+
+@pytest.mark.gate
+def test_continuation_number_decrement_not_stitched():
+    """递减（4.3 → 4.2）不得续接：编号分支与字体分支都不成立。"""
+    assert _continuation(_blk("b1", "本方案共分 4.3", 0, size=10.0),
+                         _blk("b2", "4.2 部署要点", 1, size=14.0)) is False
+
+
+@pytest.mark.gate
+@pytest.mark.parametrize("btype", ["heading", "table", "code", "quote", "page_break"])
+def test_continuation_never_stitches_structural_blocks(btype):
+    """结构块守卫前移到编号分支之前——code/quote/page_break 在 `font={}` 时
+    family/size 恒匹配，原字体分支照收（原端到端复现：page_break 吸收 code
+    后渲染空串 = 整块代码静默消失）。"""
+    a = Block(id="b1", type="code", text="尾部内容", page=0, font={})
+    b = Block(id="b2", type=btype, text="头部内容", page=1, font={})
+    assert _continuation(a, b) is False
+    assert _continuation(b, a) is False
+
+
+@pytest.mark.gate
+def test_stitch_heading_after_increment_number_not_absorbed():
+    """守卫顺序钉死：编号递增命中的**后块标题**也不得被吸收（CH-469 口径推广）。"""
+    left = _ir([_blk("b1", "本方案共分 4.3", 1)], 0, 2)
+    right = _ir([_blk("b1", "4.4 部署要点", 2, btype="heading", size=10.0)], 2, 3)
+    merged, stats = stitch_shards([left, right], max_pages=300, dedupe=False)
+    assert stats["stitched"] == 0
+    assert [b.type for b in merged.blocks] == ["paragraph", "heading"]
+    assert merged.blocks[-1].text == "4.4 部署要点"
+
+
+def test_stitch_numbered_paragraph_increment_absorbs():
+    """正向对照：paragraph↔paragraph 的递增续接口径生效（原死分支修复后活过来）。"""
+    left = _ir([_blk("b1", "本方案共分 4.2", 1)], 0, 2)
+    right = _ir([_blk("b1", "4.3 部署要点", 2, size=14.0)], 2, 3)
+    merged, stats = stitch_shards([left, right], max_pages=300, dedupe=False)
+    assert stats["stitched"] == 1
+    assert len(merged.blocks) == 1
+    assert merged.blocks[-1].text == "本方案共分 4.2 4.3 部署要点"

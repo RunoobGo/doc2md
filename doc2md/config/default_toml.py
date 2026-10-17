@@ -46,8 +46,22 @@ link_internal = "plain"                # P-64 / CH-416：goto 内部链接 → �
 workers = 0                            # CH-448：批量转换进程数上限；0 = 自动 min(4, cpu_count())
                                        # 内存纪律：并发数 × [s1].chunk_pages 决定驻留峰值，
                                        # 低配机（8GB Win11）保持 workers ≤ 4 + chunk ≤ 32
+queue_batch_factor = 4                 # CH-476（R7-PERF-1 / 决策 D2）：每轮领取量 =
+                                       # workers × 该系数（按批取件，而非按池取件）。
+                                       # 原实现 claim=workers → 单页语料的固定开销
+                                       # （每轮新建进程池 + 每个新 worker 重导 pdfplumber
+                                       # ≈0.17s）摊薄不足，是 12.3 T6「4 进程仅快 4.5%」
+                                       # 的主因。1 = 回到旧口径。
+                                       # 代价：work 进程若在批中途被 OOM 干掉，本批 running
+                                       # 行要等 [perf].stale_job_minutes 才回收（默认 30min）。
+                                       # 内存纪律不变：同时在跑的转换仍受 workers 约束。
 queue_async = false                    # CH-449：POST /jobs 只入队、由 `doc2md work` 消费
                                        # 默认 false = 保持同步返回既有契约（方案 8.1 红线不变）
+enqueue_hash_threads = 8               # CH-476（R7-PERF-3）：异步入队时「magic 预检 + 内容哈希」
+                                       # 的线程上限。hashlib 对 1MB 块释放 GIL，多文件读可并行；
+                                       # 写库仍按入参顺序单线程提交，队列行序与附着/幂等口径不变。
+                                       # 1 = 旧口径（逐个串行哈希）。GB 级目录按 ~300-500MB/s
+                                       # 单线程需数秒，G5「秒级返回」在大批量下靠本项兑现。
 sync_min_parallel = 8                  # CH-471（SVC-3）：同步 POST /jobs 走 run_batch 进程池的
                                        # 文件数阈值；低于它仍进程内串行（小批次建池成本>收益，
                                        # 且保留错误按 HTTP 码传播契约）。大批量据此并行。

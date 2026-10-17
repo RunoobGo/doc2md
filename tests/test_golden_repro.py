@@ -55,7 +55,8 @@ def test_docx_sample_is_byte_reproducible(tmp_path, gen):
         gen.GOLDEN_DIR = d
         gen.make_docx_samples()
         dirs.append(d / "docx")
-    for f in ("sample_simple.docx", "sample_links.docx", "sample_revisions.docx"):
+    for f in ("sample_simple.docx", "sample_links.docx", "sample_revisions.docx",
+              "sample_notes.docx"):
         assert (dirs[0] / f).read_bytes() == (dirs[1] / f).read_bytes(), f"{f} 不可复现"
 
 

@@ -108,7 +108,9 @@ SPEC: dict[str, tuple[str, Any]] = {
     "s4.link_internal": _enum("plain", "anchor"),
     # [perf]
     "perf.workers": _int(0, 64),
+    "perf.queue_batch_factor": _int(1, 64),
     "perf.queue_async": BOOL,
+    "perf.enqueue_hash_threads": _int(1, 32),
     "perf.sync_min_parallel": _int(1, 100_000),
     "perf.min_free_mb": _int(0, 10_000_000),
     "perf.disk_safety_factor": _int(0, 100),

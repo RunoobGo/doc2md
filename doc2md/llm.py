@@ -68,6 +68,35 @@ _INJECT_HINT = re.compile(
     re.I)
 
 
+# CH-476（R7-PERF-a）：`_INJECT_HINT` 的字面量预检表——按顶层分支逐个列出「该分支
+# 任一命中串都必然完整包含」的子串（ASCII 一律小写存，配合 re.I 的 `.lower()` 预检）。
+# 分支 → 必需字面量：
+#   忽略…规则/指令   → 忽略      无视…            → 无视
+#   忘记…（两条）     → 忘记      扮演…越狱语境      → 扮演
+#   把所有表格改成    → 表格改成   改写成人话         → 改写成人话
+#   改成人话          → 改成人话   输出你的提示词      → 输出
+#   (display|extract|output|输出|返回|显示|执行).{0,20}… → 这 7 个任一
+#   (章节标题|所有标题)… → 章节标题 / 所有标题   指令已过期 → 指令已过期
+#   ignore…  → ignore     forget…    → forget   disregard… → disregard
+#   new\s+(system\s+)?instructions?: → instruction（单复数两形都必然含该片段；
+#                        写 `instructions:` 会漏掉 `new instruction:`）
+#   you are now (in )?<tail> → tail 的 6 个取值任一（developer/dan/jailbroken/
+#                        jailbreak/unrestricted/unfiltered——`you`/`are`/`now` 之间
+#                        是 `\s+`，不保证连续，不能当预检锚）
+#   system…|override: → system / override   reveal… → reveal
+# 预检是**超集过滤器**：漏列只会少省时间（照常跑正则），错列才会漏检——所以
+# 新增分支时必须同步在此登记一个必需字面量，并由 test_perf_prescan 的分支覆盖用例把守。
+# 另：ASCII 字面量按小写登记，配合 `.lower()`；`.lower()` 的长度变化例外由
+# `scan_injection` 里的 U+0130 守卫兜住。
+_INJECT_PREFILTER = (
+    "忽略", "无视", "忘记", "扮演", "输出", "返回", "显示", "执行",
+    "表格改成", "改写成人话", "改成人话", "章节标题", "所有标题", "指令已过期",
+    "ignore", "forget", "disregard", "instruction", "developer", "dan",
+    "jailbroken", "jailbreak", "unrestricted", "unfiltered", "system",
+    "override", "reveal", "display", "extract", "output",
+)
+
+
 # R6-LLM-1（CH-475，决策 D2）：算子参数值白名单。文档正文不可信，模型可被诱导产出
 # 畸形参数——`level:"3"`（字符串）/`level:99`（越界）会让 apply_ops 把非法值写进
 # b.level，渲染期（s4_render）抛 TypeError；`marker:"\1"` 作为 re.sub 替换串触发
@@ -99,6 +128,22 @@ def valid_marker(v) -> str | None:
     控制字符等进入 re.sub 替换串。apply_ops 另用函数式替换二次设防（见下）。
     """
     return v if isinstance(v, str) and _MARKER_OK.match(v) else None
+
+
+def _op_targets(op: dict) -> list[str]:
+    """R7-LLM-1（CH-476）：target 归一的唯一入口。
+
+    server 模式下 op 是不可信 JSON——畸形形态（int/bool/dict）不得逃逸成
+    `list(5)` TypeError 或 `index.get(["b1"])` unhashable（单字段崩整篇转换，
+    违反「拒绝而非崩溃」口径）：非 str 归空列表（validator 计 no_target 拒绝），
+    list/tuple 元素逐个验 str；apply_ops 与校验写集共用本函数，杜绝两处口径漂移。
+    """
+    t = op.get("target") or op.get("block_id")
+    if isinstance(t, str):
+        return [t]
+    if isinstance(t, (list, tuple)):
+        return [x for x in t if isinstance(x, str)]
+    return []
 
 
 class OpValidator:
@@ -164,8 +209,8 @@ class OpValidator:
         一个指向非 immutable 块的 merge 可以悄悄重写 immutable 前驱。把前驱 id
         并入写集，immutable/占用校验才覆盖真正的落笔处。
         """
-        t = op.get("target") or op.get("block_id")
-        targets = [t] if isinstance(t, str) else list(t or [])
+        # R7-LLM-1（CH-476）：形态归一收进 `_op_targets`（与 apply_ops 同一入口）。
+        targets = _op_targets(op)
         if op.get("op") == "merge_block" and len(targets) == 1:
             i = self._index.get(targets[0])
             if i is not None and i > 0:
@@ -175,12 +220,31 @@ class OpValidator:
     @staticmethod
     def _attribute(op: dict) -> str:
         """拒绝归因：injection_candidate（文档内容试图改规则）vs model_hallucination。"""
-        blob = json.dumps(op, ensure_ascii=False)
+        blob = json.dumps(op, ensure_ascii=False, default=str)  # R7-LLM-1：非 JSON 值不得崩归因
         return "injection_candidate" if _INJECT_HINT.search(blob) else "model_hallucination"
 
 
 def scan_injection(text: str) -> bool:
-    return bool(_INJECT_HINT.search(text or ""))
+    """注入话术探测（可观测 + 探针触发用，**不作为防线**——防线是白名单与 5 道校验）。
+
+    CH-476（R7-PERF-a）：`_INJECT_HINT` 是 20 个顶层分支的大正则，逐块全文扫在长
+    文档上成本可观（large_320p：5696 块 / 59 万字实测 65ms）。先跑
+    `_INJECT_PREFILTER` 的字面量预检：**每个分支都必然完整包含其中至少一个字面量**
+    （见表内分支映射），未命中即正则必不命中，直接判 False。实测同一文档降到
+    18ms，判定结果与预检前逐文本等价（等价性由 tests/test_ch476_fixes.py 的
+    分支覆盖用例 + 全语料双跑断言把守）。改 `_INJECT_HINT` 必须同步改预检表。
+    """
+    if not text:
+        return False
+    low = text.lower()
+    # 预检只在「折叠不改变长度」时才是可靠的超集过滤器：`str.lower()` 全域唯一会
+    # 改变长度的码点是 U+0130（İ → i + 组合点），ASCII 字面量会在折叠串里断链，
+    # 而 `re.I` 仍把 İ 当 i。长度一变就退回精确正则，宁可少省时间也不漏检。
+    if len(low) != len(text):
+        return bool(_INJECT_HINT.search(text))
+    if not any(lit in low for lit in _INJECT_PREFILTER):
+        return False
+    return bool(_INJECT_HINT.search(text))
 
 
 def offline_llm(ir, whitelist: list[str] | None = None, *, injected_probe: list[dict] | None = None):
@@ -433,36 +497,41 @@ def apply_ops(ir, accepted: list[dict]) -> int:
     index = {x.id: x for x in ir.blocks}
     n = 0
     for op in accepted:
-        b = index.get(op.get("target"))
-        if b is None:
-            continue
+        # R7-LLM-1（CH-476）：目标经 `_op_targets` 归一（与 validator 写集同口径）——
+        # 畸形形态归空、合法列表目标**逐块落笔**（validator 本就把它们全算进写集，
+        # 只落其一就是「计数成功、产物没变」）；任何情况下非 str 不进 dict 取键
+        # （unhashable → 整篇 E5000）。
         name = op.get("op")
-        if name == "fix_heading_level":
-            # R6-LLM-1（CH-475）：纵深防御——即使绕过 OpValidator 直接调用 apply_ops，
-            # 非法 level 也规约回原值（绝不把 str/越界写进 b.level 致渲染期 TypeError）。
-            lv = valid_level(op.get("level"))
-            b.level = lv if lv is not None else b.level
-            b.provenance.setdefault("modified_by", []).append("llm:fix_heading_level")
-            n += 1
-        elif name == "fix_list_marker":
-            # R6-LLM-1（CH-475）：marker 经白名单规约；替换用**函数式** repl，返回值
-            # 不被 re 解释为组引用——即便 marker 含 `\1` 也只做字面拼接，杜绝 re.error。
-            marker = valid_marker(op.get("marker")) or "-"
-            new = re.sub(r"^\s*[·•‣∙○●■□\-\*]\s+", lambda _: marker + " ", b.text or "")
-            if new != b.text:
-                b.text = new
-                b.provenance.setdefault("modified_by", []).append("llm:fix_list_marker")
+        for tid in _op_targets(op):
+            b = index.get(tid)
+            if b is None:
+                continue
+            if name == "fix_heading_level":
+                # R6-LLM-1（CH-475）：纵深防御——即使绕过 OpValidator 直接调用 apply_ops，
+                # 非法 level 也规约回原值（绝不把 str/越界写进 b.level 致渲染期 TypeError）。
+                lv = valid_level(op.get("level"))
+                b.level = lv if lv is not None else b.level
+                b.provenance.setdefault("modified_by", []).append("llm:fix_heading_level")
                 n += 1
-        elif name == "mark_table_boundary":
-            b.flags["table_boundary"] = True
-            b.provenance.setdefault("modified_by", []).append("llm:mark_table_boundary")
-            n += 1
-        elif name == "split_block":
-            if _split_block(ir, b, op, index):
+            elif name == "fix_list_marker":
+                # R6-LLM-1（CH-475）：marker 经白名单规约；替换用**函数式** repl，返回值
+                # 不被 re 解释为组引用——即便 marker 含 `\1` 也只做字面拼接，杜绝 re.error。
+                marker = valid_marker(op.get("marker")) or "-"
+                new = re.sub(r"^\s*[·•‣∙○●■□\-\*]\s+", lambda _: marker + " ", b.text or "")
+                if new != b.text:
+                    b.text = new
+                    b.provenance.setdefault("modified_by", []).append("llm:fix_list_marker")
+                    n += 1
+            elif name == "mark_table_boundary":
+                b.flags["table_boundary"] = True
+                b.provenance.setdefault("modified_by", []).append("llm:mark_table_boundary")
                 n += 1
-        elif name == "merge_block":
-            if _merge_block(ir, b):
-                n += 1
+            elif name == "split_block":
+                if _split_block(ir, b, op, index):
+                    n += 1
+            elif name == "merge_block":
+                if _merge_block(ir, b):
+                    n += 1
     return n
 
 

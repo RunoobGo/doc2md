@@ -14,8 +14,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import config
+from . import PIPELINE_VERSION, config
 from .ops.backup import BackupPlan
+from .ops.drill import DRILL_DIR_NAME
 from .ops.logging import RotatingJsonlWriter
 from .storage.db import Store, now_iso
 
@@ -58,6 +59,8 @@ def sweep_tmp(cfg: dict, root: Path) -> int:
     `perf.stale_job_minutes`（默认 30）内的条目跳过（在途件随写入持续更新 mtime；
     目录取自身 mtime，内容增删即刷新）；该键 <= 0 = 关闭保护、维持旧行为全清。
     返回值仍是「已清条数」——被跳过的在途件不计数，下轮（或 cron 每日）再清。
+    CH-476（R7-OPS-1）：`drill-*` 前缀（`backup drill --keep` 的取证沙箱）**永久豁免**，
+    不受 mtime 窗口约束——取证目录必须在下一次每日作业之后仍然存在。
     """
     tmp = config.path_setting(cfg, "paths.tmp", root, str(root / "tmp"))
     cleaned = 0
@@ -69,6 +72,12 @@ def sweep_tmp(cfg: dict, root: Path) -> int:
         window_s = 30 * 60.0
     cutoff = time.time() - window_s if window_s > 0 else 0.0
     for p in tmp.iterdir():
+        # CH-476（R7-OPS-1）：`backup drill --keep` 的取证沙箱（`drill-<ts>/`）就在
+        # 同一个 tmp 下，「保留演练沙箱目录（取证用）」不得被下一次 cron/serve 清扫
+        # 兑现成删除——`drill-*` 前缀永久豁免。不带 --keep 时 drill 收尾自删，
+        # 故这里被保护的只有用户明确要求留存的目录（不会无限堆积）。
+        if p.name.startswith(f"{DRILL_DIR_NAME}-"):
+            continue
         if cutoff:
             try:
                 if p.stat().st_mtime >= cutoff:
@@ -216,7 +225,10 @@ def run(cfg: dict | None = None, root: Path | None = None, mode: str = "daily",
     rep.finished_at = now_iso()
     reports = config.path_setting(cfg, "paths.reports", root, str(root / "reports"))
     reports.mkdir(parents=True, exist_ok=True)
-    (reports / f"cron-{mode}-{time.strftime('%Y%m%d')}.json").write_text(
+    # CH-476（R7-OPS-2）：文件名日期与日报体的 `date` 统一到 UTC 口径——原用本地
+    # `time.strftime`，跨零点的作业会写出 `cron-daily-<昨天>.json` 而内容记今天。
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
+    (reports / f"cron-{mode}-{stamp}.json").write_text(
         rep.to_json(), encoding="utf-8")
     return rep
 
@@ -240,7 +252,7 @@ def _daily_report(store: Store, root: Path, cfg: dict) -> Daily:
     del_events = store.q1("SELECT MAX(ts) m FROM deletions")["m"]
     body = {
         "date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-        "pipeline": "2.4.0",
+        "pipeline": PIPELINE_VERSION,
         "docs_total": docs,
         "docs_sharded": shards,
         "tasks": tasks,

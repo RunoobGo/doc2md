@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import config
-from .errors import E4091_DocOverwrite
+from .errors import E4041_NotFound, E4091_DocOverwrite
 from .pipeline.batch import default_workers, run_batch
 from .scheduler import Scheduler
 from .storage.db import Store, now_iso
@@ -112,13 +112,30 @@ def _startup_reconcile(store: Store) -> dict:
         return {"error": type(exc).__name__}
 
 
+def queue_claim_size(cfg: dict | None, workers: int) -> int:
+    """每轮领取量（CH-476 / R7-PERF-1，决策 D2）：workers × [perf].queue_batch_factor。
+
+    按批取件而非按池取件——原 `claim(store, workers)` 让每轮固定开销（新建进程池 +
+    每个新 worker 重导 pdfplumber ≈0.17s）只摊到 workers 件单页转换上，并发增益被
+    池重建吃掉（12.3 T6「4 进程仅快 4.5%」）。系数=1 即旧口径。
+    同时在跑的转换件数仍受 workers 约束（run_batch 池大小不变），X-17 收尾语义不动。
+    """
+    factor = 4
+    if cfg is not None:
+        try:
+            factor = int(config.get(cfg, "perf.queue_batch_factor", 4) or 4)
+        except (TypeError, ValueError):
+            factor = 4
+    return max(1, int(workers)) * max(1, factor)
+
+
 def drain_once(store: Store, cfg: dict, root, *, workers: int | None = None,
                writer=None) -> WorkReport:
     """认领一批 → 进程池转换 → 逐条落库。队列空时返回 drained=0。"""
     rep = WorkReport()
     n = workers if workers is not None else default_workers(cfg)
     n = max(1, int(n))
-    jobs = claim(store, n)
+    jobs = claim(store, queue_claim_size(cfg, n))
     if not jobs:
         return rep
     rep.drained = len(jobs)
@@ -162,6 +179,17 @@ def drain_once(store: Store, cfg: dict, root, *, workers: int | None = None,
                     continue
                 try:
                     drift = _finish_ok(store, sched, job, res, ir, writer=writer)
+                except E4041_NotFound:
+                    # CH-476（R7-SVC-1）：删除×在途转换竞争——任务行已被 delete_doc
+                    # 级联收走，_finish_ok 已回滚（docs/blocks/search 未写回）。
+                    # 记 rejected 并补一条留痕事件（events 无 FK，行本身可达；
+                    # 正文不复活是主目标，可观测性是次目标）。
+                    sched.mark(job["job_id"], "rejected", "E4041",
+                               {"reason": "doc_deleted_during_conversion"})
+                    _event(store, job, res, "job_rejected", writer)
+                    rep.rejected += 1
+                    rep.notes.append(f"{job['job_id']}: doc deleted during conversion")
+                    continue
                 except E4091_DocOverwrite as e:
                     # CH-471（STOR-5）：库内已有编辑 → 拒绝覆盖（编辑原样保留）。
                     # 无人值守的 work/watch 路径默认不 force：宁可显式 rejected
@@ -200,23 +228,32 @@ def _finish_ok(store: Store, sched: Scheduler, job: dict, res: dict, ir,
 
     `ir` 由调用方（drain_once）回读后传入：CH-469 起「读不到 IR」必须在
     **决定终态之前**判定，否则会把拿不到正文的作业标成 done。
+
+    CH-476（R7-SVC-1，决策 D6）：mark 提前到 save_ir 之前（先定行、后落库）——
+    delete_doc 级联会收走在途 running 行，mark rowcount=0 即识别竞争，抛
+    E4041 回滚整笔事务，正文不再写回（原序先写 docs 再无条件 UPDATE，
+    删除×转换竞争会留下「内容有、任务无」的半复活态）。
+
+    CH-476（R7-PERF-2）：漂移判定用子进程回报的 `doc_id`，父进程不再对源文件做
+    第三次全量流式读（入队 / 子进程 / 此处各一遍，20MB+ 文档每任务白读两遍）。
     """
     from .api import _emit
-    from .ir import hash_of_path
-    try:
-        actual, _ = hash_of_path(res["file"])
-    except OSError:
-        actual = ""
     detail = {"path": job["path"], "zip": res["zip"], "blocks": res["blocks"]}
-    drift = bool(actual and res.get("doc_id") and actual != job["doc_id"])
+    # `res["doc_id"]` 是产物所依据那份内容的哈希（子进程转换前取）。比「转换结束后
+    # 再哈希一次」更贴合物理事实：源文件在转换**期间**被改写时，旧口径会把
+    # 「磁盘新内容 ≠ 产物」误报成漂移，而留痕里的 consumed 又写的是转换前的哈希，
+    # 自相矛盾；新口径只声明「入队后、转换前被改写」这一真实可归因窗口。
+    consumed = res.get("doc_id") or ""
+    enqueued = job.get("doc_id") or ""
+    drift = bool(consumed and enqueued and consumed != enqueued)
     if drift:
         # 产物按消费时内容入库；任务留痕，不偷偷改 task.doc_id 主键语义
-        detail["content_drift"] = {"enqueued": job["doc_id"], "consumed": res["doc_id"]}
+        detail["content_drift"] = {"enqueued": enqueued, "consumed": consumed}
     with store.tx() as tx:
+        if not sched.mark(job["job_id"], "done", detail=detail, tx=tx):
+            raise E4041_NotFound(
+                f"task row gone (doc deleted during conversion): {job['job_id']}")
         save_ir(store, ir, tx=tx)
-        tx.execute("UPDATE tasks SET status='done', error_code='', detail_json=?,"
-                   " finished_at=? WHERE job_id=?",
-                   (json.dumps(detail, ensure_ascii=False), now_iso(), job["job_id"]))
         _emit(store, "job_done", res.get("doc_id") or job.get("doc_id"), job["job_id"],
               {"blocks": int(res.get("blocks", 0) or 0), "source": "work",
                "file": str(job.get("path", ""))[-64:]}, writer, tx=tx)
@@ -259,28 +296,83 @@ def queue_stats(store: Store) -> dict:
         "SELECT status, COUNT(*) c FROM tasks GROUP BY status")}
 
 
+def _enqueue_hash_threads(cfg: dict | None) -> int:
+    """[perf].enqueue_hash_threads：入队预检/哈希的线程上限（CH-476 / R7-PERF-3）。
+
+    1 = 旧口径（单线程逐个哈希）。默认 8：GB 级目录按 ~300-500MB/s 单线程要数秒，
+    `hashlib` 对 1MB 块释放 GIL，线程池近线性；8 个并发读的驻留 ≈ 8×1MB，可忽略。
+    """
+    n = 8
+    if cfg is not None:
+        try:
+            n = int(config.get(cfg, "perf.enqueue_hash_threads", 8) or 8)
+        except (TypeError, ValueError):
+            n = 8
+    return max(1, n)
+
+
+def _sniff_and_hash(p: Path) -> tuple[str, str]:
+    """单个源的入队预检（只读、无库副作用）：存在性 → magic → 内容哈希。"""
+    from .ir import hash_of_path
+    from .pipeline.s1_parse import sniff
+    if not p.is_file():
+        raise E4041_NotFound(f"path not found: {p}")
+    sniff(p)                                   # → E4151（magic 不合法）
+    return hash_of_path(p)
+
+
+def enqueue_many(sched: Scheduler, paths, *, mode: str | None = None,
+                 idem_keys=None, cfg: dict | None = None,
+                 threads: int | None = None) -> list[dict]:
+    """批量入队（CH-476 / R7-PERF-3）：**哈希并行、提交单事务**。
+
+    并行只放在预检/哈希（纯文件读，`hashlib` 大缓冲释放 GIL）；写库按入参顺序
+    一次 `sched.submit_many`（R7-PERF-h），逐条判定与队列行序、
+    `uq_tasks_doc_active` 附着口径同旧串行实现完全一致，只是 N 次提交并成 1 次。
+    原子性沿用 CH-449 的「要么全入队、要么零副作用」：任一文件不可读或 magic
+    不合法，在写库之前就抛出（E4041 / E4151）——旧实现靠「先整体 sniff 再逐个
+    enqueue」达成，现同一判定收在本函数的预检阶段，顺带省掉每个文件多开一次。
+    """
+    items = [Path(p) for p in paths]
+    if idem_keys is not None and len(idem_keys) != len(items):
+        raise ValueError("idem_keys must align with paths")
+    if not items:
+        return []
+    k = int(threads) if threads is not None else _enqueue_hash_threads(cfg)
+    k = max(1, min(k, len(items)))
+    if k == 1:
+        hashed = [_sniff_and_hash(p) for p in items]
+    else:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=k) as ex:
+            # `ex.map` 按入参顺序产出，异常在迭代到该位时抛出 → 首个失败即整体失败，
+            # 且 list() 抽干后仍未触碰 state.sqlite。
+            hashed = list(ex.map(_sniff_and_hash, items))
+    out = []
+    jobs = sched.submit_many([(hashed[i][0], hashed[i][1],
+                               idem_keys[i] if idem_keys is not None else None,
+                               str(p), mode)
+                              for i, p in enumerate(items)])
+    for i, p in enumerate(items):
+        doc_id = hashed[i][0]
+        job = jobs[i]
+        out.append({"file": p.name, "job_id": job.job_id, "doc_id": doc_id,
+                    "status": "queued", "attached": job.attached,
+                    "idempotency_hit": job.idem_hit})
+    return out
+
+
 def enqueue(sched: Scheduler, path: str | Path, *, mode: str | None = None,
-            idem_key: str | None = None) -> dict:
+            idem_key: str | None = None, cfg: dict | None = None) -> dict:
     """只入队不算（CH-449 异步路径）。doc_id 仍按内容寻址（约定 14），
     因此 `uq_tasks_doc_active` 的附着去重在入队阶段就已生效。
 
     入队面把「类型 / 存在性」判定做掉，口径与同步路径一致（E4041 / E4151），
     否则垃圾文件要等到消费进程才失败，HTTP 面等于放弃了输入安全判定。
     消费参数（source_path / mode）走 tasks 独立列，附着到既有作业时不改对端行。
+    单文件即 `enqueue_many` 的一元素特例（CH-476 / R7-PERF-3 收敛为一条代码路径）。
     """
-    from .errors import E4041_NotFound
-    from .ir import hash_of_path
-    from .pipeline.s1_parse import sniff
-    p = Path(path)
-    if not p.is_file():
-        raise E4041_NotFound(f"path not found: {p}")
-    sniff(p)                                   # → E4151（magic 不合法）
-    doc_id, source_key = hash_of_path(p)
-    job = sched.submit(doc_id, source_key, idem_key=idem_key,
-                       source_path=str(p), mode=mode)
-    return {"file": p.name, "job_id": job.job_id, "doc_id": doc_id,
-            "status": "queued", "attached": job.attached,
-            "idempotency_hit": job.idem_hit}
+    return enqueue_many(sched, [path], mode=mode, idem_keys=[idem_key], cfg=cfg)[0]
 
 
 def run_work(cfg: dict, root, *, once: bool = False, max_jobs: int = 0,

@@ -15,11 +15,15 @@ from __future__ import annotations
 
 import secrets
 
-from .errors import E4011_Unauthorized, E4031_Forbidden
+from .errors import E4001_BadRequest, E4011_Unauthorized, E4031_Forbidden
 from .storage.db import Store, now_iso, token_hash
 
 ROLES = ("admin", "editor", "reader")
 RANK = {"reader": 1, "editor": 2, "admin": 3}
+
+# CH-476（R7-SVC-4）：`tokens.label` 的字符上限，与 `edit_audit.reason`（`edits.py`
+# 的 `_AUDIT_TEXT_MAX`）同口径——两处都是人写的备注、不是被写回的内容。
+_LABEL_MAX = 256
 
 # 端点权限矩阵：action -> 所需最低角色
 MATRIX = {
@@ -44,6 +48,15 @@ def issue(store: Store, role: str = "admin", label: str = "",
     """
     if role not in ROLES or role not in tuple(allowed):
         raise ValueError(f"bad role {role}（可签发：{list(allowed)}）")
+    # CH-476（R7-SVC-4）：`label` 是调用方自报的备注串，此前原样进 `tokens.label`——
+    # 传对象/数组 → sqlite3 InterfaceError → E5000（本该 400，且 `POST /tokens` 是
+    # admin 面，500 会把「自己写错了 body」伪装成服务端故障）；超长串则无界占库。
+    # 判据与 `edits.patch_block` 的 reason 同一条：非 str 拒（不猜意图），str 截到 256
+    # （备注写长了不该签不出 token）。收口放在本函数而非 api.py：CLI 侧
+    # `doc2md serve token` 走同一入口，两个面一次覆盖。
+    if not isinstance(label, str):
+        raise E4001_BadRequest("label must be a string", detail={"field": "label"})
+    label = label[:_LABEL_MAX]
     token = "d2m_" + secrets.token_urlsafe(24)
     with store.tx() as tx:
         tx.execute("INSERT INTO tokens(token, role, label, created_at) VALUES (?,?,?,?)",

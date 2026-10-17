@@ -70,10 +70,12 @@ def test_drill_full_loop_succeeds(drill_env):
     assert rep.match is True
     assert [s.name for s in rep.steps] == STEP_ORDER
     assert all(s.ok for s in rep.steps)
-    # 12 张表口径：FTS5 虚拟表本身被 _tables 过滤，但其影子表在列
-    for t in ("docs", "blocks", "events", "tokens", "search_blocks_data"):
+    # 13 张表口径：FTS5 虚拟表本身被 _tables 过滤，但其影子表在列。
+    # CH-476（R7-STOR-1）新增 search_map → 备份/恢复演练动态枚举表，新表自动纳入。
+    for t in ("docs", "blocks", "events", "tokens", "search_blocks_data", "search_map"):
         assert t in rep.tables
-    assert len(rep.tables) == 12
+    assert len(rep.tables) == 13
+    assert rep.tables["search_map"]["rows"] == 3   # 3 个有正文块 → 3 行删除映射
     assert rep.tables["docs"]["rows"] == 1
     assert rep.tables["blocks"]["rows"] == 3
     assert rep.tables["events"]["rows"] == 3

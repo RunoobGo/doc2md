@@ -13,6 +13,11 @@ CH-459（FR-104 收口）：`BLOCK_TYPES` 声明七类，本模块原只产三�
 - page_break：行内 form-feed（DOCX 分页符由 S1 合成该信号）。
 全部检测遵循「宁漏勿误」：漏判只退化为段落（原行为），误判会污染正文。
 另落 FR-107/108 的块级链接附着（`Line.link` → `Block.links`，每块至多一条）。
+CH-476（R7-GAP-1）：FR-102 的修订痕迹块级留痕——S1 已按「接受后」口径把 `w:ins`
+插入并入正文，本层把行级 `Line.has_revision` 透传到落块的 `flags.has_revision`，
+只打旗标不改正文（PDF 行恒 False，产物不变）。
+CH-476（R7-GAP-2）：脚注 / 尾注行（`Line.note_kind`）不参与续句/续段启发式，一律
+自成段落块并带 `flags.note_kind`——注边界在 OOXML 里是显式 `w:p`，不能猜。
 """
 from __future__ import annotations
 
@@ -108,6 +113,22 @@ def _attach_link(b: Block, ln) -> None:
         b.links = [{"url": "", "text": (b.text or "").strip(), "dest": ln.link_dest or ""}]
 
 
+def _mark_provenance(b: Block, lines) -> None:
+    """CH-476（R7-GAP-1 / R7-GAP-2，决策 D4/D7）：来源行上的 DOCX 特征 → 块级留痕。
+
+    - `has_revision`：正文已由 S1 按「接受后」口径提取（`w:ins` 并入、`w:del` 不入），
+      这里的 flag 只服务审阅定位——让人看出「哪些块来自修订痕迹」，不再改动正文；
+    - `note_kind`：该块来自脚注 / 尾注（S1 把注文追加到文档末尾，flag 让审阅页区分
+      「尾部这些段落是注，不是正文」）。
+    PDF 行两个信号恒为空，故 PDF 语料产物不变。
+    """
+    if any(ln.has_revision for ln in lines):
+        b.flags.setdefault("has_revision", True)
+    kinds = [ln.note_kind for ln in lines if ln.note_kind]
+    if kinds:
+        b.flags.setdefault("note_kind", kinds[0])
+
+
 def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
     """页级行 → 块序列（段落合并 / 标题判定 / 列表判定 / 表格代码引用分页）。
 
@@ -124,7 +145,9 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
     # CH-459：跨页存续的聚集状态
     code_buf: list[str] | None = None          # None = 不在代码块内
     code_mode = ""                             # fence（显式围栏）| indent | mono
+    code_lines: list = []                      # CH-476（R7-GAP-1）：与 code_buf 同步的 Line
     quote_buf: list[str] = []
+    quote_lines: list = []                     # CH-476：与 quote_buf 同步的 Line
     row_buf: list[list[str]] = []
     row_x0: list[float] = []
     row_lines: list = []                       # 行缓冲（组不成表时退回段落用）
@@ -139,7 +162,7 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
     para_page = 0
 
     def emit_code(page: int) -> None:
-        nonlocal code_buf
+        nonlocal code_buf, code_lines
         buf = list(code_buf or [])
         while buf and not buf[-1]:
             buf.pop()
@@ -148,7 +171,9 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
         if buf:
             blocks.append(Block(id="", type="code",
                                 text="\n".join(buf), page=page))
+            _mark_provenance(blocks[-1], code_lines)
         code_buf = None
+        code_lines = []
 
     def flush_para() -> None:
         nonlocal para_buf, para_font, para_page, para_lines
@@ -159,15 +184,18 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
                 if ln.link or ln.link_internal:
                     _attach_link(blocks[-1], ln)
                     break
+            _mark_provenance(blocks[-1], para_lines)   # CH-476（R7-GAP-1）
         para_buf = []
         para_lines = []
 
     def flush_quote() -> None:
-        nonlocal quote_buf
+        nonlocal quote_buf, quote_lines
         if quote_buf:
             blocks.append(Block(id="", type="quote",
                                 text="\n".join(quote_buf), page=quote_page))
+            _mark_provenance(blocks[-1], quote_lines)
         quote_buf = []
+        quote_lines = []
 
     def flush_rows(as_table: bool) -> None:
         nonlocal row_buf, row_x0, row_lines
@@ -176,6 +204,7 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
         if as_table and len(row_buf) >= _ROW_MIN:
             blocks.append(Block(id="", type="table",
                                 text=_gfm_table(row_buf), page=row_page))
+            _mark_provenance(blocks[-1], row_lines)     # CH-476（R7-GAP-1）
         else:                                   # 组不成表：逐行退回段落（漏判不误判）
             for i, ln in enumerate(row_lines):
                 blocks.append(Block(id="", type="paragraph",
@@ -183,6 +212,7 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
                                     page=row_page))
                 if i == 0 and (ln.link or ln.link_internal):
                     _attach_link(blocks[-1], ln)
+                _mark_provenance(blocks[-1], (ln,))
         row_buf, row_x0, row_lines = [], [], []
 
     for page in pages:
@@ -209,6 +239,7 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
             if not text.strip():
                 if code_buf is not None:
                     code_buf.append("")
+                    code_lines.append(ln)
                     continue
                 flush_para()
                 flush_quote()
@@ -225,6 +256,7 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
                     emit_code(page.index)
                 else:                           # 缩进/等宽块内的围栏行是普通内容
                     code_buf.append(text)
+                    code_lines.append(ln)
                 continue
             # --- 代码块累积中（CH-459：三种模式各自的关闭条件）---
             if code_buf is not None:
@@ -236,12 +268,14 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
                 else:
                     code_buf.append(re.sub(r"^(    |\t)", "", text)
                                     if code_mode == "indent" else text)
+                    code_lines.append(ln)
                     continue
             # --- 缩进代码（Markdown 语义：4 空格 / 制表符，仅空段起算）---
             if (text.startswith("    ") or text.startswith("\t")) and not para_buf:
                 flush_quote()
                 flush_rows(True)             # 行组被结构行终止：按事实判定
                 code_buf, code_mode = [re.sub(r"^(    |\t)", "", text)], "indent"
+                code_lines = [ln]
                 code_page = page.index
                 continue
             # --- 标题（CH-459：DOCX Heading 样式提示优先于启发式）---
@@ -253,7 +287,11 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
                 flush_rows(True)             # 行组被结构行终止：按事实判定
                 blocks.append(Block(id="", type="heading", text=text.strip(),
                                     level=lvl, font=_font(ln), page=page.index))
+                if ln.level_hint:
+                    # CH-476（R7-PIPE-4）：显式样式层级留痕，`_fix_levels` 依此不改写
+                    blocks[-1].flags["level_from_hint"] = True
                 _attach_link(blocks[-1], ln)
+                _mark_provenance(blocks[-1], (ln,))
                 continue
             # --- 列表（既有口径不变）---
             if _BULLET.match(text):
@@ -263,6 +301,7 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
                 blocks.append(Block(id="", type="list_item", text=text.strip(),
                                     font=_font(ln), page=page.index))
                 _attach_link(blocks[-1], ln)
+                _mark_provenance(blocks[-1], (ln,))
                 continue
             # --- 表格行候选（CH-459：S1 已聚出单元格）---
             row_ok = bool(ln.row) and len(ln.row) >= 2 and (
@@ -286,13 +325,25 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
                 if not quote_buf:
                     quote_page = page.index
                 quote_buf.append(_quote_text(text))
+                quote_lines.append(ln)
                 continue
             flush_quote()   # CH-464：非引用行到达 → 引用缓冲立即落块（原实现推迟到
                             # 下一个空行/结构行，quote 块会排进其后的段落之间，乱序）
             # --- 等宽字体连续段 → 代码块（CH-459）---
             if ln.mono and not para_buf:
                 code_buf, code_mode = [text], "mono"
+                code_lines = [ln]
                 code_page = page.index
+                continue
+            # --- 脚注 / 尾注行（CH-476 / R7-GAP-2，决策 D7）：自成一块 ---
+            # DOCX 的注边界是显式 `w:p`，不能被 CH-430 的续句启发式并进前一个正文块
+            # （末句无标点时真会发生：注文被当作正文的续行 = 内容与来源双错）。
+            if ln.note_kind:
+                flush_para()
+                blocks.append(Block(id="", type="paragraph", text=text.strip(),
+                                    font=_font(ln), page=page.index))
+                _attach_link(blocks[-1], ln)
+                _mark_provenance(blocks[-1], (ln,))
                 continue
             # CH-430：续句标点起头 → 无条件并回上一个内容块（可跨标题/空行打断）
             if _continuation_led(text) and not para_buf:
@@ -300,6 +351,7 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
                 if back is not None:
                     if (ln.link or ln.link_internal) and not back.links:
                         _attach_link(back, ln)
+                    _mark_provenance(back, (ln,))
                     continue
             # 普通正文行：句子未结束则续接同段
             if para_buf and _can_continue(para_buf[-1]):
@@ -357,6 +409,8 @@ def _heading_level(text: str, size: float, base: float, bold: bool,
 
     CH-459：`hint` 为 DOCX 段落样式显式声明的层级（"Heading N"）——
     显式声明优先于任何启发式（原实现对无编号的 DOCX 标题全部漏判成段落）。
+    CH-476（R7-PIPE-4）：hint 命中时调用方打 `flags.level_from_hint`，
+    `_fix_levels` 据该标记跳过——「优先」口径从此贯穿到收尾的层级校正。
     """
     if hint:
         return hint
@@ -450,20 +504,19 @@ def _join_line(a: str, b: str) -> str:
 
 
 def _fix_levels(ir: IR) -> None:
-    """R-04 编号连续性 → 层级校正：同前缀的编号必须同级。"""
-    seen: dict[str, int] = {}
+    """R-04 编号连续性 → 层级校正：编号标题的层级按「点数 + 1」归一。
+
+    CH-476（R7-PIPE-4）：DOCX `Heading N` 样式显式声明的层级（`flags.level_from_hint`）
+    不参与改写——显式声明是文档作者的意图，样式层与编号深度本就独立（"Heading 2"
+    写「3.2.1 实施细则」是合法排版），原实现无条件覆盖把 `_heading_level` 的
+    「hint 优先」口径架空。同时删除 `seen` 兄弟机制：同一前缀的 key 点数恒相同，
+    sibling 在数学上必等于 lvl（`rule_notes` 永不触发），那段是死逻辑。
+    """
     for b in ir.blocks:
-        if b.type != "heading":
+        if b.type != "heading" or b.flags.get("level_from_hint"):
             continue
         m = _NUM.match(b.text)
         if not m:
             continue
-        key = m.group(1)
-        prefix = key.rsplit(".", 1)[0] if "." in key else ""
-        lvl = min(6, key.count(".") + 1)
-        sibling = seen.get(prefix, lvl)
-        b.level = sibling
+        b.level = min(6, m.group(1).count(".") + 1)
         b.font.setdefault("rule", "R-04")
-        if lvl != sibling:
-            b.flags.setdefault("rule_notes", []).append("R-04:level_from_sibling")
-        seen[prefix] = sibling

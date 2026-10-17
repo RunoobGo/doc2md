@@ -20,9 +20,16 @@ from dataclasses import dataclass, field
 from ..errors import Doc2mdError, E4221_GateReject
 from .s1_parse import RawPage
 
-_CJK = re.compile(r"[\u4e00-\u9fff]")
-_LATIN = re.compile(r"[A-Za-z]")
 _NOISE = re.compile(r"^[\s\d\W_]+$")
+_WS = re.compile(r"\s")
+# CH-476（R7-PERF-b）：字符计数用 translate 表，不用 `re.findall`——后者会把每个
+# 命中的单字符都装进列表（千页级文档 = 数十万次 append）。`len(text) -
+# len(text.translate(表))` 即命中数，字符集与口径正则逐码点相同：
+# `_CJK_DEL` ⇔ `[\u4e00-\u9fff]`，`_LATIN_DEL` ⇔ `[A-Za-z]`。实测 320 页 / 60 万字
+# `_page_metrics` 52ms → 23ms，判定值逐页等价（等价性由 tests/test_ch476_fixes.py
+# 用同码点正则独立重算校验）。
+_CJK_DEL = {c: None for c in range(0x4E00, 0x9FFF + 1)}
+_LATIN_DEL = {ord(c): None for c in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"}
 
 
 def even5_indices(total_pages: int, k: int = 5) -> list[int]:
@@ -80,23 +87,33 @@ class GateResult:
 
 
 def _page_metrics(page: RawPage) -> tuple[int, float, int, float]:
-    text = "\n".join(ln.text for ln in page.lines)
-    chars = len(re.sub(r"\s", "", text))
-    letters = len(_CJK.findall(text)) + len(_LATIN.findall(text))
-    cjk_ratio = (len(_CJK.findall(text)) / letters) if letters else 0.0
-    lines = [ln.text.strip() for ln in page.lines if ln.text.strip()]
-    noise = sum(1 for ln in lines if _NOISE.match(ln))
+    """页指标四元组（字符数 / CJK 占比 / 文本行数 / 噪声行占比）。
+
+    CH-476（R7-PERF-b）：单趟取数——原实现对同一段全文跑 4 个正则（其中 CJK
+    `findall` 还被调了两次）并对每行 `strip()` 两遍；现在 `page.lines`
+    只遍历一次、文本只 join 一次、计数走 translate 表。判定值逐字段不变。
+    """
+    raw_lines = [ln.text for ln in page.lines]
+    text = "\n".join(raw_lines)
+    chars = len(_WS.sub("", text))
+    cjk = len(text) - len(text.translate(_CJK_DEL))
+    latin = len(text) - len(text.translate(_LATIN_DEL))
+    letters = cjk + latin
+    cjk_ratio = (cjk / letters) if letters else 0.0
+    stripped = [x.strip() for x in raw_lines]
+    lines = [x for x in stripped if x]
+    noise = sum(1 for x in lines if _NOISE.match(x))
     noise_ratio = (noise / len(lines)) if lines else 1.0
     return chars, cjk_ratio, len(lines), noise_ratio
 
 
 def _page_chars(page: RawPage) -> int:
-    """只要字符数（与 `_page_metrics` 的第 0 项同口径），跳过其余三项正则。
+    """只要字符数（与 `_page_metrics` 的第 0 项同口径），跳过其余三项计数。
 
     CH-459（A-5）：门禁统计 `avg_chars` 原本对全文档再跑一遍完整 `_page_metrics`
     （4 个正则 × 全页数）。非采样页只需要字符数这一项，用本函数付 1 个正则的代价。
     """
-    return len(re.sub(r"\s", "", "\n".join(ln.text for ln in page.lines)))
+    return len(_WS.sub("", "\n".join(ln.text for ln in page.lines)))
 
 
 def _longest_run(flags: list[bool]) -> tuple[int, int]:

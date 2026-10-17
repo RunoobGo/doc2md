@@ -9,10 +9,27 @@ CH-459（FR-104 / FR-107 收口）：本层补三组结构化信号，供 S3 产
   DOCX 取 `w:hyperlink` 的关系目标或书签锚点）。
 另补 `Line.level_hint`：DOCX 段落样式名显式声明的标题层级（"Heading N"），
 S3 据此判定标题——原实现只看字号/粗体/编号，DOCX 的 Heading 样式全部落成段落。
+
+CH-476（R7-GAP-1，决策 D4「提取而非拒收」）：`Line.has_revision` + 修订痕迹的
+「接受后」口径——DOCX 段落 / 表格行含 `w:ins`（插入）或 `w:del`（删除）时，正文按
+「全部接受修订」的样子提取（插入并入、删除不入），并给该行打旗标。原实现只走
+`p.text` / `p.runs`，而 python-docx 不读 `w:ins` 内的 run，修订插入的正文整段静默丢失。
+
+CH-476（R7-GAP-2/3，决策 D7）：`read_docx` 补两处内容保真——
+- 脚注 / 尾注（`word/footnotes.xml`、`word/endnotes.xml`）正文抽为尾部段落行，
+  `Line.note_kind` 标来源；原实现只遍历 document.xml 的 body，注文整块丢失；
+- 表格单元格内多段落以单空格相连（原 `"".join(tc.iter(w:t))` 直接粘连 = 吃掉段落边界）。
+
+CH-476（R7-PERF-d/g）：DOCX 解析两处热点（口径不变，产物逐字节等价）——
+- 段落样式按 `w:pStyle/@w:val` 记忆化（`_DocxCtx.styles`）：python-docx 的
+  `paragraph.style` 每次访问都重扫整张 styles part，实测 185µs/段、10k 段文档
+  仅样式解析即 3.7s（占 `read_docx` 九成）；样式只有几十种，记忆化后同样式段落直取；
+- `w:hyperlink` 改为文档级预检（`_DocxCtx.has_links`）：无链接的文档不再逐段跑
+  `.//w:hyperlink`（实测 1.6µs/段，10 万段 ≈ 160ms）。
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 MAGIC_PDF = b"%PDF-"
@@ -39,6 +56,11 @@ class Line:
     row_explicit: bool = False              # CH-459：行来自真实表格对象（DOCX w:tbl），
                                             # 而非 PDF 几何推断——S3 的防误判守卫只对后者生效
     level_hint: int | None = None           # CH-459：DOCX Heading 样式显式层级
+    has_revision: bool = False              # CH-476（R7-GAP-1）：DOCX 段落/表格行含
+                                            # `w:ins` / `w:del` 修订痕迹（正文已按
+                                            # 「接受后」口径提取，此信号供块级留痕）
+    note_kind: str = ""                     # CH-476（R7-GAP-2）：该行来自 DOCX 注
+                                            # （"footnote" / "endnote"），空串=正文
     x0: float = 0.0
 
 
@@ -310,49 +332,132 @@ _W_NS = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 _R_NS = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
 
 
-def _docx_para_line(p, d) -> Line | None:
-    """段落 → Line（含 CH-459 的等宽 / 超链接 / 标题层级提示 / 分页符信号）。"""
-    text = (p.text or "").strip()
+@dataclass
+class _DocxCtx:
+    """一次 `read_docx` 的文档级预检 / 记忆化状态（CH-476 / R7-PERF-d、g）。
+
+    `styles`：`w:pStyle/@w:val` → 样式名。python-docx 的 `paragraph.style` 每次访问
+    都调 `Styles.get_by_id` → 未命中显式样式时 `default_for()` 重扫整张 styles part
+    （对每个 `w:style` 做 enum 解析），实测 185µs/段。样式种类只有几十，按 style_id
+    记忆化即把 O(段 × 样式) 降为 O(样式)。缓存的是**样式名字符串**（本层只用
+    `style.name`），不缓存 python-docx 样式对象，避免跨段共享可变代理。
+    `has_links`：该容器子树内是否存在 `w:hyperlink`。无则整篇跳过逐段 XPath——
+    预检覆盖 body 全集，跳过条件与「该段 findall 返回空」严格等价。
+    """
+    styles: dict = field(default_factory=dict)
+    has_links: bool = True
+
+
+def _docx_ctx(root) -> _DocxCtx:
+    """按遍历容器建预检上下文（body 与各 notes part 各一份，样式缓存由调用方共享）。"""
+    return _DocxCtx(has_links=root.find(f".//{_W_NS}hyperlink") is not None)
+
+
+def _docx_style_name(el, d, ctx: _DocxCtx) -> str:
+    """段落样式名（记忆化）。与 `p.style.name` 同口径：无显式样式 / 样式不存在时
+    python-docx 回落到默认段落样式，本函数走同一 `Styles.get_by_id`，只是每个
+    style_id 只解析一次；样式缺失（返回 None）时同样得到空串。
+    """
+    sid = el.style                                  # CT_P.style：读 w:pStyle/@w:val，无全表扫
+    if sid not in ctx.styles:
+        from docx.enum.style import WD_STYLE_TYPE
+        st = d.styles.get_by_id(sid, WD_STYLE_TYPE.PARAGRAPH)
+        ctx.styles[sid] = (st.name or "") if st is not None else ""
+    return ctx.styles[sid]
+
+
+
+def _docx_para_line(p, d, rels=None, ctx: _DocxCtx | None = None) -> Line | None:
+    """段落 → Line（含 CH-459 的等宽 / 超链接 / 标题层级提示 / 分页符信号）。
+
+    CH-476（R7-GAP-1，决策 D4「提取而非拒收」）：含修订痕迹的段落改走「接受后」口径。
+    python-docx 的 `p.text` / `p.runs` 只认 `w:p` 直接子级里的 `w:r`，被 `w:ins`
+    包裹的插入 run 不在其中（实测 `p.text` 里 "inserted" 消失）——修订插入的正文
+    会整段静默丢失。无修订的段落走原路径，产物字节不变（G6）。
+
+    `rels`（CH-476 / R7-GAP-2）：超链接关系集合，默认取 document part 的 rels；
+    脚注 / 尾注 part 调用时必须传自己的 rels——rId 只在所属 part 的关系表内有意义，
+    拿错关系表会把链接指到别的 target（制造错误数据）。
+    `ctx`（CH-476 / R7-PERF-d、g）：文档级预检与样式记忆化；缺省新建（等价于
+    「不跳过任何段、不共享缓存」，即原行为），供独立调用与测试使用。
+    """
+    el = p._element
+    if ctx is None:
+        ctx = _DocxCtx()
+    rev = _docx_has_revision(el)
+    if rev:
+        runs = _docx_all_runs(p)
+        # `w:del` 里的文本是 `w:delText`，`Run.text` 本就不取 → 拼出来即「接受后」正文
+        text = "".join(r.text or "" for r in runs).strip()
+    else:
+        runs = p.runs
+        text = (p.text or "").strip()
     if not text:
         return None
     size = 0.0
     bold = italic = strike = mono = False
-    for r in p.runs:
+    for r in runs:
         if r.font.size is not None:
             size = float(r.font.size.pt)
         bold = bold or bool(r.bold)
         italic = italic or bool(r.italic)
         strike = strike or bool(r.font.strike)
         mono = mono or _name_is_mono(r.font.name)
-    style = (p.style.name or "") if p.style is not None else ""
+    style = _docx_style_name(el, d, ctx)
     level = None
     if style.lower().startswith("heading"):
         try:
             level = max(1, min(6, int(style.split()[-1])))
         except Exception:
             level = 1
-    link, link_internal, link_dest = _docx_para_link(p, d, text)
+    link, link_internal, link_dest = _docx_para_link(p, d, text, rels, ctx.has_links)
     return Line(text=text, size=size or _style_size(style),
                 bold=bold or style.lower().startswith("heading"),
                 italic=italic, strike=strike, mono=mono,
                 link=link, link_internal=link_internal, link_dest=link_dest,
-                level_hint=level)
+                level_hint=level, has_revision=rev)
+
+
+def _docx_has_revision(el) -> bool:
+    """子树内是否有 `w:ins` / `w:del`（单次 `iter` 短路，不做两遍 xpath）。"""
+    marks = (_W_NS + "ins", _W_NS + "del")
+    return any(e.tag in marks for e in el.iter())
+
+
+def _docx_all_runs(p) -> list:
+    """段落内**全部** run（含 `w:ins` / `w:hyperlink` 包裹者），包装成 python-docx Run。
+
+    只在 `_docx_has_revision` 命中时调用；`Run.text` 沿用 python-docx 口径
+    （`w:tab`→\\t、`w:br`/`w:cr`→\\n、`w:delText` 不取），故与 `p.text` 同形。
+    """
+    from docx.text.run import Run
+    return [Run(r, p) for r in p._element.iter(f"{_W_NS}r")]
 
 
 def _name_is_mono(name: str | None) -> bool:
     return bool(name) and any(h in name.lower() for h in _MONO_HINTS)
 
 
-def _docx_para_link(p, d, para_text: str) -> tuple[str | None, bool, str]:
+def _docx_para_link(p, d, para_text: str, rels=None,
+                    has_links: bool = True) -> tuple[str | None, bool, str]:
     """CH-459（FR-107/108）：段落内 `w:hyperlink` → (外部 URL, 是否内部, 锚点)。
 
     保守口径：只有超链接文字**完整覆盖**段落文本时才附着——行内局部链接
     （链接文字只是段落的一部分）本轮不抽：块级 links 模型无法表达「哪一段文字」
     是链接，硬附会把整块文本包成 `[整块](url)`，属于制造错误数据。
+
+    `rels`：关系表；缺省用 `d.part.rels`（正文段落）。脚注 / 尾注传各自 part 的
+    rels（CH-476 / R7-GAP-2），否则 rId 会撞进正文关系表指向错的 target。
+    `has_links`（CH-476 / R7-PERF-d）：调用方已确认整个容器子树无 `w:hyperlink`
+    时直传 False——该段 findall 必为空，跳过与否逐字节等价，省掉每段一次 XPath。
     """
+    if not has_links:
+        return None, False, ""
     links = p._element.findall(f".//{_W_NS}hyperlink")
     if not links:
         return None, False, ""
+    if rels is None:
+        rels = d.part.rels
     for h in links:
         texts = "".join(t.text or "" for t in h.iter(f"{_W_NS}t")).strip()
         if not texts or texts != para_text:
@@ -360,7 +465,7 @@ def _docx_para_link(p, d, para_text: str) -> tuple[str | None, bool, str]:
         rid = h.get(f"{_R_NS}id")
         if rid:
             try:
-                rel = d.part.rels[rid]
+                rel = rels[rid]
                 if rel.is_external:
                     return rel.target_ref, False, ""
             except KeyError:
@@ -371,15 +476,79 @@ def _docx_para_link(p, d, para_text: str) -> tuple[str | None, bool, str]:
     return None, False, ""
 
 
-def _docx_table_rows(tbl) -> list[list[str]]:
-    """`w:tbl` → 行列表（单元格文本已 strip）；空单元格保留空串以对齐列数。"""
-    rows: list[list[str]] = []
+_NOTE_TAGS = {"footnote": f"{_W_NS}footnote", "endnote": f"{_W_NS}endnote"}
+# Word 在 footnotes.xml / endnotes.xml 里放的分隔符占位注（页面底部的横线本体），
+# 带 w:type="separator" / "continuationSeparator"——不是注文，抽进来即制造噪声行
+_NOTE_SEPARATORS = ("separator", "continuationSeparator")
+
+
+def _docx_notes_lines(d, ctx: _DocxCtx) -> list[Line]:
+    """CH-476（R7-GAP-2，决策 D7）：脚注 / 尾注正文补抽为文档末尾的段落行。
+
+    原实现只遍历 document.xml 的 body，`word/footnotes.xml` / `word/endnotes.xml`
+    完全不读 → 学术、法律文档的注文整块静默丢失，而非目标清单从未排除它们。
+    口径：
+    - 一条注 = 一行；注内多段落以单空格相连（与表格单元格段落口径一致，R7-GAP-3）；
+    - 分隔符占位注跳过；
+    - 不伪造 `[^1]` 行内脚注标记：GFM 无脚注语法，正文处没有可指的锚点，硬造即死链
+      （与 FR-107 内部链接一律纯文本的口径同理）。注文来源由 `Line.note_kind`
+      带到块级 `flags.note_kind`，供审阅区分「尾部段落是注不是正文」。
+    - 无注的文档（现有全部语料）返回空列表 → 产物字节不变（G6）。
+    `ctx`：与正文共享样式记忆化；`has_links` 按注 part 自己的子树单独预检。
+    """
+    import docx.text.paragraph as _dp
+    from docx.opc.constants import RELATIONSHIP_TYPE as RT
+    from docx.oxml import parse_xml
+
+    lines: list[Line] = []
+    for reltype, kind in ((RT.FOOTNOTES, "footnote"), (RT.ENDNOTES, "endnote")):
+        try:
+            part = d.part.part_related_by(reltype)
+        except KeyError:
+            continue
+        root = parse_xml(part.blob)
+        local = _DocxCtx(styles=ctx.styles,
+                         has_links=root.find(f".//{_W_NS}hyperlink") is not None)
+        for note in root.findall(_NOTE_TAGS[kind]):
+            if note.get(f"{_W_NS}type") in _NOTE_SEPARATORS:
+                continue
+            got = [_docx_para_line(_dp.Paragraph(el, d), d, part.rels, local)
+                   for el in note.findall(f"{_W_NS}p")]
+            got = [ln for ln in got if ln is not None]
+            if not got:
+                continue
+            head, *rest = got
+            text = head.text if not rest else " ".join(
+                [head.text] + [ln.text for ln in rest])
+            lines.append(replace(head, text=text, note_kind=kind))
+    return lines
+
+
+def _docx_cell_text(tc) -> str:
+    """单元格正文：段落边界以单空格相连（CH-476 / R7-GAP-3，决策 D7）。
+
+    原实现 `"".join(tc.iter(w:t))` 把单元格内多段落直接粘连（"段落1段落2"），
+    等于吃掉段落边界。逐 `w:p` 取「接受后」文本再以单空格连接后，单段落单元格
+    （现有全部语料）与原实现逐字节相同 → 产物不变（G6）。
+    嵌套 `w:tbl` 的段落仍被拍平进本格：无版面模型，本轮不表达表格嵌套。
+    """
+    parts = ["".join(t.text or "" for t in p.iter(f"{_W_NS}t")).strip()
+             for p in tc.iter(f"{_W_NS}p")]
+    return " ".join(x for x in parts if x)
+
+
+def _docx_table_rows(tbl) -> list[tuple[list[str], bool]]:
+    """`w:tbl` → (单元格文本行, 该行是否含修订痕迹)；空单元格保留空串以对齐列数。
+
+    CH-476（R7-GAP-1）：单元格取「接受后」视图（`w:ins` 内的 `w:t` 覆盖、`w:delText`
+    不含），表格路径天然是接受口径，只需把修订信号带出来。
+    CH-476（R7-GAP-3）：单元格内段落边界以单空格相连，见 `_docx_cell_text`。
+    """
+    rows: list[tuple[list[str], bool]] = []
     for tr in tbl.findall(f"{_W_NS}tr"):
-        cells = []
-        for tc in tr.findall(f"{_W_NS}tc"):
-            cells.append("".join(t.text or "" for t in tc.iter(f"{_W_NS}t")).strip())
+        cells = [_docx_cell_text(tc) for tc in tr.findall(f"{_W_NS}tc")]
         if cells:
-            rows.append(cells)
+            rows.append((cells, _docx_has_revision(tr)))
     return rows
 
 
@@ -389,25 +558,31 @@ def read_docx(path: str | Path, fmt: str | None = None) -> list[RawPage]:
     CH-459：按 body 顺序遍历（段落与表格交错，原实现只读 `d.paragraphs`，
     表格内容整体丢失——FR-104 的 table 块对 DOCX 从未有输入）；
     段落内 `<w:br w:type="page"/>` 合成为 `\\x0c` 行（S3 的 page_break 信号）。
+    CH-476（R7-GAP-1）：修订痕迹按「接受后」口径提取——`w:ins` 插入并入正文、
+    `w:del` 删除不入正文，命中的行打 `Line.has_revision` 供 S3 块级留痕。
+    CH-476（R7-GAP-2，决策 D7）：正文行之后追加脚注 / 尾注行（`_docx_notes_lines`），
+    注文不再整块丢失；无注的文档该行序为空，产物字节不变。
     fmt：调用方已嗅探的格式（形参保留与 read_pdf 对齐；DOCX 分支不使用）。
     """
     import docx
     import docx.text.paragraph as _dp
 
     d = _open_source(lambda: docx.Document(str(path)), path, "docx")
+    ctx = _docx_ctx(d.element.body)
     lines: list[Line] = []
     for child in d.element.body:
         tag = child.tag
         if tag == f"{_W_NS}p":
-            ln = _docx_para_line(_dp.Paragraph(child, d), d)
+            ln = _docx_para_line(_dp.Paragraph(child, d), d, ctx=ctx)
             if ln is not None:
                 lines.append(ln)
             if child.findall(f".//{_W_NS}br[@{_W_NS}type='page']"):
                 lines.append(Line(text="\x0c", size=0.0))
         elif tag == f"{_W_NS}tbl":
-            for cells in _docx_table_rows(child):
+            for cells, rev in _docx_table_rows(child):
                 lines.append(Line(text=" | ".join(cells), row=cells,
-                                  row_explicit=True))
+                                  row_explicit=True, has_revision=rev))
+    lines += _docx_notes_lines(d, ctx)
     pages: list[RawPage] = []
     chunk = 40
     for i in range(0, max(1, (len(lines) + chunk - 1) // chunk)):

@@ -39,6 +39,8 @@ curl -s -X POST localhost:8090/jobs -H "X-Doc2md-Token: $TOK" \
 curl -s "localhost:8090/search?q=例外" -H "X-Doc2md-Token: $TOK"
 ```
 
+`POST /jobs` 的 `mode?` 与 CLI `--mode` 同集合（`auto` / `single` / `two_phase`），非白名单值在转换与入队之前即 **400/E4001**、队列零增长（CH-476 / R7-SVC-2）。大批量目录共享一把进程池闸门，60s 内排不到队回 **503 + `Retry-After`**（`detail.reason = sync_pool_busy`，CH-476 / R7-SVC-3）。
+
 ## 配置
 
 内置默认值见 `doc2md/config/default_toml.py`；部署样例见 `config/doc2md.example.toml`；逐键语义与默认值见方案 附录 A。

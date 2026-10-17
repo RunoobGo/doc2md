@@ -98,7 +98,8 @@ def build_parser() -> argparse.ArgumentParser:
     bksub = bk.add_subparsers(dest="bk_cmd", required=True)
     dl = bksub.add_parser("drill", help="隔离沙箱内跑完整恢复闭环（快照→加密→丢失→轮出→恢复→校验→比对）")
     _add_common(dl)
-    dl.add_argument("--keep", action="store_true", help="保留演练沙箱目录（取证用）")
+    dl.add_argument("--keep", action="store_true",
+                    help="保留演练沙箱目录（取证用；CH-476 起不受 tmp 周期清扫与 cron --daily 清理）")
 
     cv = sub.add_parser("convert", help="转换文件 / 目录")
     _add_common(cv)

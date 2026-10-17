@@ -372,7 +372,11 @@ def test_pipe11_stray_fence_in_text_does_not_expose_code_block():
 
 
 def test_pipe11_nested_fence_inside_code_block_is_untouched():
-    """代码块内含 ``` 字面行 + 空行：整块原样透传（含嵌套围栏与三连空行）。"""
+    """代码块内含 ``` 字面行 + 空行：正文逐字节原样透传（含三连空行）。
+
+    CH-476（R7-PIPE-3）后包裹围栏按内容最长反引号 run 加长为四反引号——正文
+    本身仍一字不动，改的是外层，使内层 ``` 不再提前闭栏。
+    """
     from doc2md.ir import IR, Block
     from doc2md.pipeline.s4_render import render
 
@@ -381,7 +385,7 @@ def test_pipe11_nested_fence_inside_code_block_is_untouched():
             blocks=[Block(id="b1", type="code", text=code),
                     Block(id="b2", type="paragraph", text="正文。")])
     md = render(ir)
-    assert "```\n" + code + "\n```" in md, md
+    assert "````\n" + code + "\n````" in md, md
     assert md.endswith("正文。\n")
 
 
@@ -1064,16 +1068,18 @@ def _seed_v3_lib(path) -> None:
 
 
 @pytest.mark.gate
-def test_test5_v3_stock_library_upgrades_to_v5(tmp_path):
-    """CH-473（TEST-5，INFO）：存量 v3 库开库即无损升级到 v5。
+def test_test5_v3_stock_library_upgrades_to_v6(tmp_path):
+    """CH-473（TEST-5，INFO）：存量 v3 库开库即无损升级到当前 DB_VERSION。
 
-    迁移链三段全覆盖：结构（user_version 3→5、v4 列与四个索引补建、既有行
-    不回填）、凭证（CH-471 SVC-9 存量明文 token 就地哈希，角色/时间戳不变、
-    明文不再可查）、检索（v3 已有 aux → 不重建，索引行原样保留仍可命中）。
+    CH-476（R7-STOR-1/2）：版本断言改为对着 `DB_VERSION` 常量（v6 = FTS rowid
+    映射表），迁移链三段全覆盖：结构（user_version 3→DB_VERSION、v4 列与四个
+    索引补建、既有行不回填）、凭证（CH-471 SVC-9 存量明文 token 就地哈希，
+    角色/时间戳不变、明文不再可查）、检索（v3 已有 aux → 不重建，索引行原样
+    保留仍可命中 + 一次性回填 search_map）。
     另验二次开库幂等（不会二次哈希 / 重复建索引）。
     """
     from doc2md.auth import check
-    from doc2md.storage.db import Store, token_hash
+    from doc2md.storage.db import DB_VERSION, Store, token_hash
     from doc2md.storage.repo import search
 
     db = tmp_path / "state.sqlite"
@@ -1081,13 +1087,15 @@ def test_test5_v3_stock_library_upgrades_to_v5(tmp_path):
     store = Store(db)
 
     # ① 结构：版本 + v4 列 + v4/CH-469 索引
-    assert store.q1("PRAGMA user_version")[0] == 5
+    assert store.q1("PRAGMA user_version")[0] == DB_VERSION
     tcols = {r["name"] for r in store.q("PRAGMA table_info(tasks)")}
     assert {"source_path", "mode"} <= tcols
     idx = {r["name"] for r in store.q(
         "SELECT name FROM sqlite_master WHERE type='index'")}
     assert {"ix_tasks_queued", "ix_tasks_doc",
             "ix_events_job", "ix_events_doc"} <= idx
+    # CH-476（R7-STOR-1/2）：无条件幂等 DDL 也要给 v3 存量库补齐 v6 索引
+    assert {"ux_search_map_blk", "ix_search_map_doc", "ix_audit_doc_id"} <= idx
     # 存量任务行不回填 source_path（NULL = 非队列行，消费方判失败）
     assert store.q1("SELECT source_path FROM tasks WHERE job_id='jv3'")["source_path"] is None
 
@@ -1103,14 +1111,22 @@ def test_test5_v3_stock_library_upgrades_to_v5(tmp_path):
     assert store.q1("SELECT COUNT(*) c FROM blocks")["c"] == 1
     assert store.q1("SELECT text FROM blocks")["text"] == _V3_TEXT
     assert store.q1("SELECT COUNT(*) c FROM search_blocks")["c"] == 1
+    # CH-476（R7-STOR-1）：v3 存量 FTS 行一次性回填 rowid 映射，映射必须闭环
+    assert store.q1("SELECT COUNT(*) c FROM search_map")["c"] == 1
+    assert store.q1(
+        "SELECT doc_id, block_id FROM search_map WHERE fts_rowid="
+        "(SELECT rowid FROM search_blocks)")["block_id"] == "b1"
+    assert store.q1(
+        "SELECT COUNT(*) c FROM search_map WHERE doc_id='dv3' AND block_id='b1'")["c"] == 1
     res = search(store, "例外")
     assert res["mode"] == "fts" and res["total"] >= 1, res
     store.close()
 
-    # ④ 幂等：二次开库不重复哈希、不重复建索引、数据不动
+    # ④ 幂等：二次开库不重复哈希、不重复建索引、映射不重复回填、数据不动
     store2 = Store(db)
-    assert store2.q1("PRAGMA user_version")[0] == 5
+    assert store2.q1("PRAGMA user_version")[0] == DB_VERSION
     assert store2.q1("SELECT COUNT(*) c FROM tokens")["c"] == 1
+    assert store2.q1("SELECT COUNT(*) c FROM search_map")["c"] == 1
     assert store2.q1("SELECT token FROM tokens")["token"] == token_hash(_V3_TOKEN)
     assert search(store2, "例外")["total"] >= 1
     store2.close()
@@ -1155,7 +1171,7 @@ def test_test5_v22_legacy_rebuilds_fts_and_backfills_columns(tmp_path):
     aux n-gram——回填后中文子串检索才真正可用（重建前 unicode61 把连续 CJK 当
     整词，命中 0）。同时验存量明文 token 同样就地哈希。
     """
-    from doc2md.storage.db import Store, token_hash
+    from doc2md.storage.db import DB_VERSION, Store, token_hash
     from doc2md.storage.repo import search
 
     db = tmp_path / "legacy.sqlite"
@@ -1168,13 +1184,21 @@ def test_test5_v22_legacy_rebuilds_fts_and_backfills_columns(tmp_path):
     con.close()
 
     store = Store(db)
-    assert store.q1("PRAGMA user_version")[0] == 5
+    assert store.q1("PRAGMA user_version")[0] == DB_VERSION
     # 补列：存量行取默认值
     assert store.q1("SELECT revision FROM blocks")["revision"] == 1
     assert store.q1("SELECT role FROM tokens")["role"] == "admin"
     # FTS 重建：aux 列就位、行不丢、CJK 子串改走 fts 通道命中
     assert "aux" in {r["name"] for r in store.q("PRAGMA table_info(search_blocks)")}
     assert store.q1("SELECT COUNT(*) c FROM search_blocks")["c"] == 1
+    # CH-476（R7-STOR-1）：影子表交换改变了 FTS rowid，重建事务内整表重算映射，
+    # 回填必须仍然闭环（若只靠 user_version 门的一次性回填，这里就会悬空）。
+    assert store.q1("SELECT COUNT(*) c FROM search_map")["c"] == 1
+    assert store.q1(
+        "SELECT doc_id, block_id FROM search_map WHERE fts_rowid="
+        "(SELECT rowid FROM search_blocks)")["block_id"] == "b1"
+    assert store.q1(
+        "SELECT COUNT(*) c FROM search_map WHERE doc_id='dv22' AND block_id='b1'")["c"] == 1
     res = search(store, "例外")
     assert res["mode"] == "fts" and res["total"] >= 1, res
     # 明文 token 同路哈希

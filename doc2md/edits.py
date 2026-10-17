@@ -16,6 +16,10 @@ from .ir import Block as _Block
 from .storage.db import Store, now_iso
 from .storage.repo import reindex_block
 
+# CH-476（R7-SVC-4）：审计备注（`edit_audit.reason`）的字节无关上限——按**字符**计，
+# 与 `tokens.label` 同一口径（两处都是「人写的备注」，不是被写回的内容）。
+_AUDIT_TEXT_MAX = 256
+
 
 def patch_block(store: Store, doc_id: str, block_id: str, body: dict, actor: str,
                 *, require_base_revision: bool = True) -> dict:
@@ -40,6 +44,15 @@ def patch_block(store: Store, doc_id: str, block_id: str, body: dict, actor: str
     if not isinstance(text, str):
         raise E4001_BadRequest("text is required and must be a string",
                                detail={"field": "text"})
+    # CH-476（R7-SVC-4）：`reason` 与 `text` 一样是 body 直送进 SQL 的字段，此前未设防——
+    # 传对象/数组 → sqlite3 InterfaceError → E5000（本该是 400，客户端连 `{code,message}`
+    # 契约都拿不到）；传超长串则无界写进 `edit_audit.reason`（审计行是长期资产）。
+    # 处置分两段：类型不对直接拒，类型对但过长就截断——理由是备注而非被写回的内容，
+    # 截断不改语义（对比 `text`：那个截断会吞正文，所以只能拒不能截）。
+    reason = body.get("reason", "")
+    if not isinstance(reason, str):
+        raise E4001_BadRequest("reason must be a string", detail={"field": "reason"})
+    reason = reason[:_AUDIT_TEXT_MAX]
 
     with store.tx() as tx:
         row = tx.execute(
@@ -68,7 +81,7 @@ def patch_block(store: Store, doc_id: str, block_id: str, body: dict, actor: str
             "INSERT INTO edit_audit(doc_id, block_id, before, after, from_revision,"
             " to_revision, actor, ts, reason) VALUES (?,?,?,?,?,?,?,?,?)",
             (doc_id, block_id, old_text, text, int(base), int(base) + 1,
-             actor, now_iso(), body.get("reason", "")))
+             actor, now_iso(), reason))
         # CH-459（A-6 / FR-208「该块索引」）：只删插该块一行。
         # CH-464：并入同一事务（原为两笔提交，之间崩溃 → blocks 与
         # search_blocks 永久不一致且无恢复路径）。

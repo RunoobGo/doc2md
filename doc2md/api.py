@@ -16,7 +16,7 @@ import os
 import threading
 from pathlib import Path
 
-from . import auth, config
+from . import PIPELINE_VERSION, auth, config
 from .cron import sweep_tmp
 from .edits import patch_block, rollback
 from .errors import (
@@ -51,6 +51,30 @@ SCRIPT_UA_HINTS = ("python-requests", "curl/", "doc2md-cli", "httpx", "go-http-c
 # 内存随池数翻倍）；单池已用满 perf.workers 的 CPU 并行度，双池不让单请求更快，
 # 只是放大内存峰值——用信号量把并行收敛在单请求内，请求间排队（admin/submit 低频）。
 _SYNC_POOL_GATE = threading.BoundedSemaphore(1)
+
+# CH-476（R7-PERF-j）：列表端点的单次投递上限。`limit` 由客户端自报，SQLite 的
+# `LIMIT -1`/大数语义是「无界」——reader 一个请求就能把全库行数（每行还带
+# snippet / detail_json）物化成 JSON 塞进内存。拒负只挡住了一半（`?limit=999999999`
+# 照样无界），此处再加硬顶：超过即截到 500，口径与 `/events` 的固定 200 同族。
+_MAX_ROWS = 500
+
+# CH-476（R7-PERF-k）：/docs/<id>/markdown 的分块流式读大小。
+_MD_CHUNK = 64 * 1024
+
+# CH-476（R7-SVC-2）：`mode` 档位白名单，与 CLI `--mode` 的 choices 同集合
+# （`cli.py:107`）。用 tuple 不用 set：`in` 走 == 比较，对不可哈希的值（dict/list）
+# 也只会返回 False，不会在校验器里抛 TypeError。
+_MODES = ("auto", "single", "two_phase")
+
+# CH-476（R7-SVC-3）：同步池的排队上界与超时提示。闸门原为无超时 `acquire()`——
+# 小时级大批量占池期间，后续 `POST /jobs` 的请求线程无限期挂起（连接与线程一直被
+# 占着，客户端只能等死）。现给等待设上界、超时即明确 503 + `Retry-After`：符合本项目
+# 「明确失败优先于看似成功」，也不用「降级为串行」去掩盖排队（那会让同一请求在不同
+# 负载下走不同吞吐路径，池路径的产物等价性红线不再覆盖它）。两个数是服务端自持的
+# 排队上界、不是对外契约，故用常量而非配置键（新键要连带 附录 A / example.toml /
+# 键集差校验三处，收益不抵 churn）。
+_SYNC_GATE_WAIT_S = 60
+_SYNC_RETRY_AFTER_S = 60
 
 
 def create_app(cfg: dict | None = None, root: Path | None = None):
@@ -201,6 +225,15 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
         force = b.get("force")
         force = force is True or (
             isinstance(force, str) and force.strip().lower() in ("true", "1", "yes"))
+        # CH-476（R7-SVC-2）：`mode` 白名单。原实现把任意 JSON 值直送 `tasks.mode`，
+        # 消费侧（`convert`）只区分 `"single"`，其余一律按 auto 执行——于是 `mode:"singel"`
+        # （拼写错）与 `mode:{}`（对象）都能入库，用户以为切了档位、实际跑的是默认档，
+        # 而队列行里留着一条永远不被识别的值。CLI 侧 `--mode` 早有 choices（`cli.py:107`），
+        # API 面补齐同一口径：非白名单 → 400/E4001，在入队/转换之前拒。
+        mode = b.get("mode")
+        if mode is not None and mode not in _MODES:
+            raise E4001_BadRequest("mode must be auto/single/two_phase",
+                                   detail={"mode": type(mode).__name__})
         if not path:
             raise E4001_BadRequest("path required")
         p = Path(path)
@@ -237,18 +270,17 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
         # 低配机上「一次丢一个目录」不应把 HTTP 线程占住（也不应同时起步 N 个解析进程）。
         # 默认 false = 同步转换，既有红线契约（方案 5.4：jobs[].doc_id 立即可用）不变。
         if bool(config.get(cur(), "perf.queue_async", False)):
-            from .pipeline.s1_parse import sniff
-            from .worker import enqueue
-            # 入队前整体预检 magic：异步路径必须**要么全入队要么全不入**。
-            # 先嗅探再入队（只读 8 字节），否则目录里混一个坏文件就会留下
-            # 「前半截已入队、请求整体 4xx」的半成品队列（同步路径由 convert()
-            # 逐文件失败，不存在这个中间态）。
-            for f in files:
-                if f.is_file():
-                    sniff(f)
-            mode = b.get("mode")
-            out = [enqueue(sched, f, mode=mode, idem_key=_idem_for(f))
-                   for f in files if f.is_file()]
+            from .worker import enqueue_many
+            targets = [f for f in files if f.is_file()]
+            # CH-476（R7-PERF-3）：预检 + 内容哈希进线程池并行（hashlib 对 1MB 块
+            # 释放 GIL），写库仍按原顺序单线程提交——`jobs[]` 顺序、附着/幂等口径不变。
+            # 入队前整体预检 magic 的「要么全入队、要么零副作用」纪律由 enqueue_many
+            # 的预检阶段承担（原实现另开一轮 sniff，每个文件多读一次头部）。
+            # 竞态口径变化（有意）：清单生成后文件消失，旧实现把它从响应里静默剔除，
+            # 现按 E4041 整体失败——「目录里明明有、队列里没有」比一次 404 更难排查。
+            out = enqueue_many(sched, targets, mode=mode,
+                               idem_keys=[_idem_for(f) for f in targets],
+                               cfg=cur())
             for it in out:
                 if not it["attached"]:
                     _emit(store, "job_queued", it["doc_id"], it["job_id"],
@@ -274,12 +306,24 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
             # （原 5 次独立提交，WAL + synchronous=FULL 每次 fsync）。
             # CH-471（STOR-5）：库内已有编辑时 save_ir 抛 E4091，整笔事务回滚
             # （job 不标 done、编辑原样保留），本文件记为 conflict 后继续处理其余。
+            # CH-476（R7-SVC-1，决策 D6）：mark 提前到 save_ir 之前（与 worker
+            # _finish_ok 同序）——submit 与本事务之间 delete_doc 若级联收走了
+            # 刚建的 queued 行，mark rowcount=0 → 抛 E4041 整笔回滚，正文不写回，
+            # 杜绝「docs 有、tasks 无」的半复活态（FR-128 轮出语义）。
             try:
                 with store.tx() as tx:
+                    if not sched.mark(j.job_id, "done", tx=tx):
+                        raise E4041_NotFound(f"task row gone: {j.job_id}")
                     save_ir(store, ir, tx=tx, force=force)
-                    sched.mark(j.job_id, "done", tx=tx)
                     _emit(store, "job_done", doc_id, j.job_id,
                           {"blocks": len(ir.blocks)}, logw(), tx=tx)
+            except E4041_NotFound:
+                # 行已不在（被删除级联收走）——不再补 mark/rejected 事件，
+                # 对不存在的行写入只会留孤儿行；响应里给本文件明确终态即可。
+                out.append({"file": f.name, "job_id": j.job_id, "doc_id": doc_id,
+                            "status": "rejected", "code": "E4041",
+                            "reason": "doc_deleted_during_conversion"})
+                return
             except E4091_DocOverwrite as e:
                 sched.mark(j.job_id, "rejected", e.code,
                            {"reason": "edited_blocks_present",
@@ -310,9 +354,17 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
             from .worker import _read_ir
             # CH-473（R5-SVC-7）：进程池全局信号量——见 _SYNC_POOL_GATE 注释。
             # 池的整个生命周期（建池 → 转换 → 读产物）都在临界区内，退出即释放。
-            with _SYNC_POOL_GATE:
+            # CH-476（R7-SVC-3）：等待改为有界——超时明确回 503 + Retry-After，
+            # 不让请求线程为上一个大批量的池无限期挂起。
+            if not _SYNC_POOL_GATE.acquire(timeout=_SYNC_GATE_WAIT_S):
+                return jsonify({"code": "E5041", "message": "sync conversion pool busy",
+                                "detail": {"reason": "sync_pool_busy",
+                                           "waited_s": _SYNC_GATE_WAIT_S,
+                                           "files": len(files)}}), 503, {
+                    "Retry-After": str(_SYNC_RETRY_AFTER_S)}
+            try:
                 by_file = {r["file"]: r for r in run_batch(
-                    files, cfg=cur(), out_dir=root / "out",
+                    files, cfg=cur(), mode=mode, out_dir=root / "out",
                     workers=default_workers(cfg))}
                 for f in files:
                     r = by_file.get(str(f)) or {"status": "error", "code": "E5000"}
@@ -332,11 +384,16 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
                                         "status": "error", "code": "E5031"})
                             continue
                         _finish_one(f, ir, r.get("doc_id", ""), r.get("source_key", ""))
+            finally:
+                _SYNC_POOL_GATE.release()
             return jsonify({"jobs": out}), 202
 
         for f in files:
             try:
-                res = convert(f, cfg=cur(), out_dir=root / "out")
+                # CH-476（R7-SVC-2）：同步分支同样吃 `mode`。原实现只在异步分支读这个
+                # 字段，`queue_async=false`（默认）下 `{"mode":"single"}` 被静默忽略——
+                # 客户端以为切了档，实际跑的是 `s2.mode` 默认档。
+                res = convert(f, cfg=cur(), mode=mode, out_dir=root / "out")
             except Doc2mdError as e:
                 if e.code == "E4221":
                     j = sched.submit_rejected(f.name, e.code, e.detail,
@@ -370,6 +427,7 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
         limit = _int_arg("limit", 50)
         if limit < 0:
             raise E4001_BadRequest("limit must be >= 0")
+        limit = min(limit, _MAX_ROWS)      # CH-476（R7-PERF-j）：无界上限硬顶
         sql = ("SELECT job_id, doc_id, source_key, status, created_at, started_at,"
                " finished_at, error_code, detail_json, source_path, mode FROM tasks")
         args: tuple = ()
@@ -409,16 +467,31 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
         if not zp.exists():
             raise E4041_NotFound("artifact not found")
         import zipfile
+        # CH-476（R7-PERF-k）：中央目录先校验 + 正文分块流式出。原实现 `z.read()` 把
+        # 整篇 content.md 一次性读进内存、再 decode 成 str、Flask 又 encode 回 bytes，
+        # 单请求峰值 ≈ 3× 正文大小（数千页文档 = 数十 MB × 并发数）。
+        # 状态码语义不变：坏 zip / 缺 content.md 仍在**响应头之前**判定并抛出
+        # （E5031 / E4041）；流式阶段才失败（读取中被替换）只能截断，属可接受窗口。
         try:
             with zipfile.ZipFile(zp) as z:
                 names = [n for n in z.namelist() if n.endswith("content.md")]
-                if not names:
-                    raise E4041_NotFound("artifact content.md missing")
-                return Response(z.read(names[0]).decode("utf-8"),
-                                mimetype="text/markdown")
         except zipfile.BadZipFile as exc:
             raise E5031_StorageError("artifact unreadable",
                                      detail={"reason": type(exc).__name__}) from exc
+        if not names:
+            raise E4041_NotFound("artifact content.md missing")
+
+        def chunks():
+            with zipfile.ZipFile(zp) as z, z.open(names[0]) as f:
+                while True:
+                    buf = f.read(_MD_CHUNK)
+                    if not buf:
+                        break
+                    yield buf
+
+        # `content_type` 而非 `mimetype`：body 改为字节流后 Flask 不再自动补 charset，
+        # 显式写出以保持与原「返回 str」实现逐字节相同的响应头。
+        return Response(chunks(), content_type="text/markdown; charset=utf-8")
 
     @app.patch("/docs/<doc_id>/blocks/<block_id>")
     def patch(doc_id, block_id):
@@ -523,7 +596,8 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
         limit = _int_arg("limit", 20)
         if limit < 0:
             raise E4001_BadRequest("limit must be >= 0")
-        return jsonify(search(store, request.args.get("q", ""), limit))
+        return jsonify(search(store, request.args.get("q", ""),
+                              min(limit, _MAX_ROWS)))   # CH-476（R7-PERF-j）
 
     @app.get("/events")
     def events():
@@ -657,7 +731,10 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
     @app.get("/healthz")
     def health():
         n = store.q1("SELECT COUNT(*) c FROM docs")["c"]
-        return jsonify({"ok": True, "docs": n, "pipeline": "2.4.0", "ts": now_iso()})
+        # CH-476（R7-OPS-2）：版本走 `PIPELINE_VERSION` 常量——原硬编码 "2.4.0"
+        # 会在每次契约级升版时静默说谎（doctor / cron 日报同为该常量的消费方）。
+        return jsonify({"ok": True, "docs": n, "pipeline": PIPELINE_VERSION,
+                        "ts": now_iso()})
 
     return app
 

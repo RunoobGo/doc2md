@@ -502,7 +502,7 @@ def freeze_docx(path: Path) -> None:
 
 
 def make_docx_samples():
-    """生成 3 个 DOCX 样本"""
+    """生成 4 个 DOCX 样本"""
     docx_dir = GOLDEN_DIR / "docx"
     docx_dir.mkdir(exist_ok=True)
 
@@ -548,20 +548,114 @@ def make_docx_samples():
         doc.save(links_path)
         print_product(links_path, "链接测试")
 
-    # sample_revisions.docx - 修订痕迹（简化版）
-    # 注：python-docx 不易直接构造修订痕迹，需要直接操作 OOXML (w:ins/w:del)
-    # 此处仅生成基础文档，实际修订痕迹构造在脚本注释中说明
+    # sample_revisions.docx - 修订痕迹（真实 w:ins / w:del）
+    # CH-476（R7-GAP-1，决策 D4「提取而非拒收」）：原「基础版」只写普通段落并自认
+    # 「无真实修订标记」，于是修订抽取路径零样本覆盖——而该路径正是静默丢内容的现场
+    # （python-docx 的 p.text 不取 `w:ins` 内的 run）。这里直接构造 OOXML 修订元素：
+    # 插入包在 w:ins、删除包在 w:del（文本用 w:delText）。id/author/date 一律写死，
+    # 配合 freeze_docx 保持逐字节可复现。
     rev_path = docx_dir / "sample_revisions.docx"
     if not should_skip(rev_path):
         print(f"  → 生成 {rev_path.name} ...")
+        from docx.oxml import OxmlElement
+        from docx.oxml.ns import qn
+
+        def _run(text, deleted=False):
+            r = OxmlElement("w:r")
+            t = OxmlElement("w:delText" if deleted else "w:t")
+            t.text = text
+            r.append(t)
+            return r
+
+        def _rev(tag, rev_id, run_el):
+            el = OxmlElement(tag)
+            el.set(qn("w:id"), str(rev_id))
+            el.set(qn("w:author"), "审阅人")
+            el.set(qn("w:date"), "2024-10-13T00:00:00Z")
+            el.append(run_el)
+            return el
+
         doc = Document()
         doc.add_heading("修订测试文档", level=1)
-        doc.add_paragraph("这是原始段落内容。")
-        doc.add_paragraph("这是另一段内容，包含删除和插入的标记。")
-        doc.save(rev_path)
-        print_product(rev_path, "修订测试（基础版，无真实修订标记）")
+        doc.add_paragraph("这是无修订的原始段落。")
 
-    for f in (simple_path, links_path, rev_path):
+        p_in = doc.add_paragraph("段内插入前的文本，")
+        p_in._p.append(_rev("w:ins", 1, _run("段内插入的修订文本。")))
+        p_in._p.append(_rev("w:del", 2, _run("段内被删除的旧文本。", deleted=True)))
+
+        p_all = doc.add_paragraph()
+        p_all._p.append(_rev("w:ins", 3, _run("整段由修订插入的段落，用于验证正文不丢。")))
+
+        p_del = doc.add_paragraph("只有删除的段落：")
+        p_del._p.append(_rev("w:del", 4, _run("这串按接受口径不应出现。", deleted=True)))
+
+        tbl = doc.add_table(rows=2, cols=2)
+        tbl.cell(0, 0).text = "项目"
+        tbl.cell(0, 1).text = "数值"
+        tbl.cell(1, 0).text = "原值"
+        tbl.cell(1, 1).paragraphs[0]._p.append(
+            _rev("w:ins", 5, _run("修订插入的单元格")))
+        doc.save(rev_path)
+        print_product(rev_path, "修订测试（真实 w:ins/w:del 痕迹）")
+
+    # sample_notes.docx - 脚注 / 尾注 + 单元格内多段落
+    # CH-476（R7-GAP-2/3，决策 D7）：原 `read_docx` 只遍历 document.xml 的 body，
+    # `word/footnotes.xml` / `word/endnotes.xml` 完全不读 → 注文整块静默丢失；
+    # 单元格又是 `"".join(tc.iter(w:t))` 扁平粘连 → 段界被吃掉。语料里必须有一份
+    # 真带注 part 与多段落单元格的样本，否则这两条路径只有合成 fixture 覆盖。
+    # 注 part 用 `XmlPart` + `relate_to` 直挂（python-docx 没有加注 API），
+    # XML 为常量字符串 → 无随机量，配合 freeze_docx 保持逐字节可复现。
+    notes_path = docx_dir / "sample_notes.docx"
+    if not should_skip(notes_path):
+        print(f"  → 生成 {notes_path.name} ...")
+        from docx.opc.constants import CONTENT_TYPE as CT
+        from docx.opc.constants import RELATIONSHIP_TYPE as RT
+        from docx.opc.packuri import PackURI
+        from docx.opc.part import XmlPart
+        from docx.oxml import OxmlElement, parse_xml
+
+        _NS = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+        footnotes_xml = (
+            f"<w:footnotes {_NS}>"
+            '<w:footnote w:type="separator"><w:p><w:r><w:separator/></w:r></w:p></w:footnote>'
+            '<w:footnote w:type="continuationSeparator">'
+            '<w:p><w:r><w:continuationSeparator/></w:r></w:p></w:footnote>'
+            '<w:footnote w:id="2"><w:p><w:r><w:t>脚注一第一段，含两个自然段。</w:t></w:r></w:p>'
+            '<w:p><w:r><w:t>脚注一第二段。</w:t></w:r></w:p></w:footnote>'
+            '<w:footnote w:id="3"><w:p><w:r><w:t>脚注二内容。</w:t></w:r></w:p></w:footnote>'
+            "</w:footnotes>")
+        endnotes_xml = (
+            f"<w:endnotes {_NS}>"
+            '<w:endnote w:type="separator"><w:p><w:r><w:separator/></w:r></w:p></w:endnote>'
+            '<w:endnote w:id="2"><w:p><w:r><w:t>尾注一内容，只有一段。</w:t></w:r></w:p></w:endnote>'
+            "</w:endnotes>")
+
+        doc = Document()
+        doc.add_heading("注与单元格测试文档", level=1)
+        doc.add_paragraph("这是正文段落，转换后注文应作为尾部段落块保留。")
+        tbl = doc.add_table(rows=2, cols=2)
+        tbl.cell(0, 0).text = "项目"
+        tbl.cell(0, 1).text = "说明"
+        first = tbl.cell(1, 0).paragraphs[0]
+        first.add_run("单元格第一段")
+        second = OxmlElement("w:p")
+        run, text = OxmlElement("w:r"), OxmlElement("w:t")
+        text.text = "单元格第二段"
+        run.append(text)
+        second.append(run)
+        tbl.cell(1, 0)._tc.append(second)
+        tbl.cell(1, 1).text = "单段单元格"
+        pkg = doc.part.package
+        doc.part.relate_to(
+            XmlPart(PackURI("/word/footnotes.xml"), CT.WML_FOOTNOTES,
+                    parse_xml(footnotes_xml), pkg), RT.FOOTNOTES)
+        doc.part.relate_to(
+            XmlPart(PackURI("/word/endnotes.xml"), CT.WML_ENDNOTES,
+                    parse_xml(endnotes_xml), pkg), RT.ENDNOTES)
+        doc.save(notes_path)
+        print_product(notes_path, "DOCX 脚注/尾注 + 单元格多段落")
+
+    for f in (simple_path, links_path, rev_path, notes_path):
         if f.exists():
             freeze_docx(f)
 
@@ -860,7 +954,9 @@ def make_manifest():
         elif path.name == "sample_links.docx":
             entry["description"] = "DOCX 链接测试"
         elif path.name == "sample_revisions.docx":
-            entry["description"] = "DOCX 修订测试（基础版）"
+            entry["description"] = "DOCX 修订测试（真实 w:ins/w:del 痕迹）"
+        elif path.name == "sample_notes.docx":
+            entry["description"] = "DOCX 脚注/尾注 part + 单元格内多段落"
         elif path.name == "links_pdf.pdf":
             entry["description"] = "PDF 外部链接 + mailto"
         elif path.name == "malicious_names.json":

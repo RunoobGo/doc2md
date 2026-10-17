@@ -285,7 +285,7 @@ function renderBlocks(list) {
   });
 }
 
-function esc(s) { return String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+function esc(s) { return String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
 
 // CH-469（V-11）：块 id 不再拼进 CSS 属性选择器（含引号的 id 会改写选择器）。
 // 改为按 dataset.bid 精确比对——赋值不经解析，天然安全。

@@ -15,6 +15,18 @@ from ..ir import IR, Block
 
 _EXT_SCHEMES = ("http://", "https://", "mailto:", "ftp://")
 _ANCHOR_MARK = ("](#", "#page-")
+_FENCE_RUN = re.compile(r"`+|~+")
+
+
+def _code_fence(text: str) -> str:
+    """CH-476（R7-PIPE-3）：CommonMark 围栏长度 = 内容里最长反引号/波浪线 run + 1。
+
+    固定三反引号遇到代码正文里的 ``` 字面行（S3 把围栏行当内容累积，见
+    `s3_structure` 的 mono/indent 分支）会提前闭栏，产出嵌套破损的 Markdown。
+    无围栏字面的普通代码块 run=0 → 仍为三个反引号，现有语料字节不变。
+    """
+    longest = max((len(m.group(0)) for m in _FENCE_RUN.finditer(text)), default=0)
+    return "`" * max(3, longest + 1)
 
 
 def is_external(url: str) -> bool:
@@ -28,7 +40,7 @@ def render(ir: IR, *, preserve_strike: bool = False, link_internal: str = "plain
         md = _render_block(b, preserve_strike=preserve_strike, link_internal=link_internal)
         if md:
             # CH-473（PIPE-11）：空行压缩只作用于**非代码块**。围栏结构由块类型
-            # 唯一决定（只有 code 块包 ```），不再对整篇做正则切围栏——正文里
+            # 唯一决定（只有 code 块包围栏，长度见 `_code_fence`），不再对整篇做正则切围栏——正文里
             # 出现的 ``` 字面行（文档内示例、引用内容）会让非贪婪配对错位：
             # 轻则把正文误判成代码免于压缩，重则把真实代码块暴露给 `\n{3,}`
             # 压缩（S3 emit_code 特意保留的代码空行被压扁，代码内容失真）。
@@ -50,7 +62,8 @@ def _render_block(b: Block, **opt) -> str:
         # CH-459：GFM 无分页符语法——结构信息留在 IR / 审阅页，Markdown 不落字节
         return ""
     if b.type == "code":
-        return "```\n" + text + "\n```"
+        fence = _code_fence(text)
+        return fence + "\n" + text + "\n" + fence
     if b.type == "quote":
         return "\n".join("> " + ln for ln in text.splitlines())
     if b.type == "table":
