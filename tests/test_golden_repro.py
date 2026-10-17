@@ -31,10 +31,11 @@ def test_pdf_sample_is_byte_reproducible(tmp_path, gen):
         d.mkdir()
         gen.GOLDEN_DIR = d
         gen.make_small_3p()
+        gen.make_numlist_pdf()
         gen.GOLDEN_DIR = tmp_path
-    a = (first / "small_3p.pdf").read_bytes()
-    b = (second / "small_3p.pdf").read_bytes()
-    assert a == b, "PDF 样本不可复现（/CreationDate 或 /ID 未被固定）"
+    for name in ("small_3p.pdf", "numlist_1p.pdf"):
+        assert (first / name).read_bytes() == (second / name).read_bytes(), \
+            f"{name} 不可复现（/CreationDate 或 /ID 未被固定）"
 
 
 def test_large_pdf_sample_is_byte_reproducible(tmp_path, gen):

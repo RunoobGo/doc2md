@@ -773,6 +773,52 @@ def make_links_pdf():
 
 
 # ============================================================================
+# 6b. numlist_1p.pdf - 编号列表项字号==正文众数的端到端反例（R6-PIPE-1 / B-1）
+# ============================================================================
+def make_numlist_pdf():
+    """同字号编号列表反例：`_heading_level` 的第三回退必须被字号/加粗门拦住。
+
+    判别力设计（单页，众数字号 10，CID 字体无粗体变体）：
+      · 「1. 安装依赖 / 2. 配置环境变量 / 3. 启动服务」= 单级编号 + 短行 + 无句末标点
+        + **字号等于正文众数** + 无加粗——正是 CH-475 加门前的 H1 误判形态，现应落段落；
+      · 「第一章 绪论」（CJK 章節目条）与「1.1 环境要求」（多级编号）同为字号 10，
+        仍应判标题——证明门不是「同字号一律不判标题」；
+      · 「2. 运行说明」字号 14，走第一分支（字号≥正文+3.5）判 H1，作大字号对照。
+    """
+    path = GOLDEN_DIR / "numlist_1p.pdf"
+    if should_skip(path):
+        print(f"  ⊘ {path.name} 已存在，跳过")
+        return
+
+    print(f"  → 生成 {path.name} ...")
+    c = canvas.Canvas(str(path), pagesize=A4)
+    _, height = A4
+
+    lines = [
+        ("第一章 绪论", 10),
+        ("本节说明本样本的用途：编号列表项与正文字号相同时不得误判为标题。", 10),
+        ("1. 安装依赖", 10),
+        ("2. 配置环境变量", 10),
+        ("3. 启动服务", 10),
+        ("1.1 环境要求", 10),
+        ("运行环境需要 Python 3.11 以上版本，并安装 pdfplumber 与 python-docx 组件。", 10),
+        ("2. 运行说明", 14),
+    ]
+    for i in range(12):
+        lines.append((f"正文第 {i + 1} 段用于确立众数字号，行末带句号，形态上不构成标题候选。", 10))
+
+    y = height - 3 * cm
+    for text, size in lines:
+        c.setFont(FONT_REGULAR, size)
+        c.drawString(2 * cm, y, text)
+        y -= 0.7 * cm
+
+    c.showPage()
+    c.save()
+    print_product(path, "编号列表项字号==正文众数（同页含三类真标题对照）")
+
+
+# ============================================================================
 # 7. names/malicious_names.json - 恶意文件名清单
 # ============================================================================
 def make_malicious_names():
@@ -959,6 +1005,8 @@ def make_manifest():
             entry["description"] = "DOCX 脚注/尾注 part + 单元格内多段落"
         elif path.name == "links_pdf.pdf":
             entry["description"] = "PDF 外部链接 + mailto"
+        elif path.name == "numlist_1p.pdf":
+            entry["description"] = "编号列表项字号==正文众数（R6-PIPE-1 端到端反例，含三类真标题对照）"
         elif path.name == "malicious_names.json":
             entry["description"] = "恶意文件名测试清单"
         elif path.name == "bigfile.bin":
@@ -988,7 +1036,8 @@ def self_check():
     # 1. 每个 PDF 汉字数量 > 50
     pdf_files = [
         "large_320p.pdf", "small_3p.pdf", "badtail_scan.pdf",
-        "badtail_front.pdf", "badtail_late.pdf", "links_pdf.pdf"
+        "badtail_front.pdf", "badtail_late.pdf", "links_pdf.pdf",
+        "numlist_1p.pdf"
     ]
     for pdf_name in pdf_files:
         path = GOLDEN_DIR / pdf_name
@@ -1215,33 +1264,36 @@ def main():
     GOLDEN_DIR.mkdir(parents=True, exist_ok=True)
 
     # 生成所有样本
-    print("1/9  large_320p.pdf ...")
+    print("1/10  large_320p.pdf ...")
     make_large_320p()
 
-    print("\n2/9  small_3p.pdf ...")
+    print("\n2/10  small_3p.pdf ...")
     make_small_3p()
 
-    print("\n3/9  badtail 样本 ...")
+    print("\n3/10  badtail 样本 ...")
     make_badtail_scan()
     make_badtail_front()
     make_badtail_late()
 
-    print("\n4/9  injected/ & clean/ ...")
+    print("\n4/10  injected/ & clean/ ...")
     make_injection_samples()
 
-    print("\n5/9  docx/ ...")
+    print("\n5/10  docx/ ...")
     make_docx_samples()
 
-    print("\n6/9  links_pdf.pdf ...")
+    print("\n6/10  links_pdf.pdf ...")
     make_links_pdf()
 
-    print("\n7/9  names/malicious_names.json ...")
+    print("\n7/10  numlist_1p.pdf ...")
+    make_numlist_pdf()
+
+    print("\n8/10  names/malicious_names.json ...")
     make_malicious_names()
 
-    print("\n8/9  dirs/ ...")
+    print("\n9/10  dirs/ ...")
     make_dirs()
 
-    print("\n9/9  bigfile.bin ...")
+    print("\n10/10  bigfile.bin ...")
     make_bigfile()
 
     # 生成 MANIFEST

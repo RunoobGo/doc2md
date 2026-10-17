@@ -29,6 +29,12 @@ from .s1_parse import RawPage
 _NUM = re.compile(r"^\s*(\d+(?:\.\d+)*)\s*[、\.::]?\s*")
 _CJK_HEAD = re.compile(r"^\s*(第[一二三四五六七八九十百千\d]+[章节条款项编部篇])")
 _BULLET = re.compile(r"^\s*([·•‣∙○●■□\-\*])\s+")
+# CH-478（R6-PIPE-1 收口，决策「落地有序列表分支」）：PDF 有序列表项的编号形态。
+# `(?!\d)` 挡住小数（"3.5 节"），`\d{1,3}` 上限挡住年份起头的段落（"2019. 报告"），
+# 分隔符集含全角 `．）`，空格可选（"1.安装依赖" 同样成立）。
+# 正文首字用先行断言而非 `\S`：S4 复用本式取 `m.end()` 切序号，多吃一个字符会把
+# 列表项内容削掉首字（"1. 安装依赖" → "1. 装依赖"）。
+_ORDERED_ITEM = re.compile(r"^\s*(\d{1,3})[、.．)）]\s*(?!\d)(?=\S)")
 # CH-430：只能「续句」不能「起句」的行首标点 —— 这类行必是上一段的延续，
 # 即便中间被标题行或空行打断（PDF 折行 + 页眉/编号标题插入是常态），
 # 也必须并回前一个段落块，否则产出「半句开头」块（G1 明令禁止）。
@@ -49,6 +55,19 @@ _ROW_MIN = 2
 def _continuation_led(text: str) -> bool:
     t = (text or "").strip()
     return bool(t) and bool(_CONT_HEAD.match(t)) and t[0] not in "（(【《「『"
+
+
+def _is_ordered_item(text: str) -> bool:
+    """CH-478（R6-PIPE-1 收口）：有序列表项判定，与标题第三回退共用反向信号。
+
+    同字号（size == 正文众数）、非粗体、单级编号、短行、无句末标点——这五条既是
+    `_heading_level` 让位的条件，也是列表项成立的充分形态；判为 `list_item` 后
+    编号在 S4 保留（`1. `），不再退化成段落或假 H1。
+    """
+    t = (text or "").strip()
+    if not _ORDERED_ITEM.match(t) or len(t) >= 30:
+        return False
+    return not t.endswith(("。", "！", "？", ".", "!", "?"))
 
 
 def _join_back(blocks: list[Block], text: str, font: dict) -> Block | None:
@@ -295,6 +314,18 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
                 continue
             # --- 列表（既有口径不变）---
             if _BULLET.match(text):
+                flush_para()
+                flush_quote()
+                flush_rows(True)             # 行组被结构行终止：按事实判定
+                blocks.append(Block(id="", type="list_item", text=text.strip(),
+                                    font=_font(ln), page=page.index))
+                _attach_link(blocks[-1], ln)
+                _mark_provenance(blocks[-1], (ln,))
+                continue
+            # --- 有序列表（CH-478 / R6-PIPE-1 收口：同字号单级编号行的归宿）---
+            # 表格行优先于本分支：S1 已按横向间隙聚出 ≥2 单元格时，行首的 "1、"
+            # 是单元格内容而非列表标记（宁漏勿误）。
+            if _is_ordered_item(text) and not (ln.row and len(ln.row) >= 2):
                 flush_para()
                 flush_quote()
                 flush_rows(True)             # 行组被结构行终止：按事实判定

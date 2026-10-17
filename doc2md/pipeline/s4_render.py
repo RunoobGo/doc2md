@@ -12,6 +12,7 @@ from __future__ import annotations
 import re
 
 from ..ir import IR, Block
+from .s3_structure import _ORDERED_ITEM
 
 _EXT_SCHEMES = ("http://", "https://", "mailto:", "ftp://")
 _ANCHOR_MARK = ("](#", "#page-")
@@ -56,6 +57,10 @@ def _render_block(b: Block, **opt) -> str:
         lvl = min(6, max(1, b.level or 1))
         return "#" * lvl + " " + _inline(text, b, **opt)
     if b.type == "list_item":
+        m = _ORDERED_ITEM.match(text)
+        if m:
+            # CH-478（R6-PIPE-1 收口）：有序项保留序号，分隔符统一为 GFM 的 `N. `
+            return m.group(1) + ". " + _inline(text[m.end():].strip(), b, **opt)
         t = re.sub(r"^\s*[·•‣∙○●■□\-\*]\s+", "", text)
         return "- " + _inline(t, b, **opt)
     if b.type == "page_break":

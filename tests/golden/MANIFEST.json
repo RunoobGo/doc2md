@@ -21,6 +21,13 @@
     "description": "后段坏页样本（15-17 页无文本）"
   },
   {
+    "path": "bigfile.bin",
+    "sha256": "0fac0148877f9a5df10b80901152374fb923360acbf9c921397572406946901b",
+    "bytes": 125829120,
+    "pages": null,
+    "description": "120MB 随机文件"
+  },
+  {
     "path": "clean/cln_01.pdf",
     "sha256": "381ce66d939e979a5ad6d11abfd3a296e0bf2c9b609a798b778456f674f71e45",
     "bytes": 4579,
@@ -35929,6 +35936,13 @@
     "bytes": 2100,
     "pages": null,
     "description": "恶意文件名测试清单"
+  },
+  {
+    "path": "numlist_1p.pdf",
+    "sha256": "4d87109b4f54de7231835bbc68e3997db3a42d43e07a28b2a54d96e39a34b2ef",
+    "bytes": 3049,
+    "pages": 1,
+    "description": "编号列表项字号==正文众数（R6-PIPE-1 端到端反例，含三类真标题对照）"
   },
   {
     "path": "small_3p.pdf",
