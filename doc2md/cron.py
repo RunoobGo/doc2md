@@ -1,8 +1,11 @@
 """doc2md cron —— 定时任务承载（ADR-30 / CH-414 / P-62）。
 
-执行语义（方案 6.5）：
-  --daily  = 日报（NFR-14）→ 本地快照备份（FR-607）→ tmp 清理 → 日志轮转检查
-  --weekly = --daily 的超集：先完整执行 --daily（幂等），再增量打包至外置加密卷（NFR-18）
+执行语义（方案 6.5 与 附录 E 步骤表为准，逐条失败语义见后者）：
+  --daily  = daily_report → local_snapshot（磁盘门禁是其前置检查）→〔快照成功且 chmod 有告警时 work_dir_mode〕
+             → rotation → tmp_clean → log_rotation → events_purge → tasks_purge → search_reconcile
+  --weekly = 同一序列，只在 `local_snapshot` 成功之后、`rotation` **之前**插入 external_backup（NFR-18），
+             故新副本当轮即受轮出保护——不是「跑完日流程再追加备份」
+不装 cron、不在 serve 内起常驻线程；由 launchd StartCalendarInterval 触发。
 不装 cron、不在 serve 内起常驻线程；由 launchd StartCalendarInterval 触发。
 """
 from __future__ import annotations

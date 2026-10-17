@@ -303,7 +303,8 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
                             "status": row.get("status", j.status)})
                 return
             # CH-459（A-4）：save_ir / mark(done) / 事件三写合并为单事务
-            # （原 5 次独立提交，WAL + synchronous=FULL 每次 fsync）。
+            # （原 5 次独立提交；每提交一次 fsync 是当时的口径，`synchronous`
+            # 自 CH-471 / STOR-1 起已是 NORMAL，合批的收益剩「一次写锁 + 崩溃原子性」）。
             # CH-471（STOR-5）：库内已有编辑时 save_ir 抛 E4091，整笔事务回滚
             # （job 不标 done、编辑原样保留），本文件记为 conflict 后继续处理其余。
             # CH-476（R7-SVC-1，决策 D6）：mark 提前到 save_ir 之前（与 worker

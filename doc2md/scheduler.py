@@ -108,7 +108,8 @@ class Scheduler:
 
         CH-459（A-4）：`tx` 形参允许并入调用方事务——
         worker._finish_ok 与同步 /jobs 路径把 mark 与入库/事件合为单次提交
-        （WAL + synchronous=FULL 下每次提交都 fsync，是每任务固定开销主因）。
+        （原口径是每提交一次 fsync；`synchronous` 自 CH-471 / STOR-1 起为 NORMAL，
+        合批仍保留——少一次写锁往返并保持崩溃原子性）。
 
         CH-476（R7-SVC-1，决策 D6）：返回值供调用方做「行还在不在」判定——
         delete_doc 级联 `DELETE FROM tasks WHERE doc_id=?` 会收走在途 running 行，

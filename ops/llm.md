@@ -37,8 +37,11 @@ llama-server -m vendor/models/llm/qwen2.5-3b-instruct-q4_k_m.gguf \
   --host 127.0.0.1 --port 8080
 
 # ④ 验证模型资产完整性（M0 工具链，非运行必需但建议做一次）
+#   `export` 不指定 --manifest 时写到 [chunks].manifest（默认 vendor/models/llm/tokenizer.manifest.json），
+#   `verify` 的两个参数都是必填，路径照 export 的落点填即可（照抄旧示例的
+#   chunks.manifest.json 会因文件不存在直接退 5）。
 doc2md tokenizer export vendor/models/llm/qwen2.5-3b-instruct-q4_k_m.gguf
-doc2md tokenizer verify --manifest chunks.manifest.json \
+doc2md tokenizer verify --manifest vendor/models/llm/tokenizer.manifest.json \
   --gguf vendor/models/llm/qwen2.5-3b-instruct-q4_k_m.gguf
 
 # ⑤ 自检 + 切换

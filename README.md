@@ -10,7 +10,7 @@ python3 -m venv env && env/bin/pip install -e ".[dev]"
 env/bin/doc2md doctor                    # 环境自检（依赖 / 目录权限 / tokenizer 口径）
 ```
 
-命名纪律：标识符一律小写 `doc2md`；launchd 标签 `md.doc2md.cron` / `md.doc2md.cron.weekly`（随包分发的两档；`serve` / `llm` 常驻资产为待办 T12，尚无标签）。
+命名纪律：标识符一律小写 `doc2md`；launchd 标签 `md.doc2md.cron` / `md.doc2md.cron.weekly`（随包分发的两档；`serve` / `work` 常驻资产为待办 T12，尚无标签）。
 
 ## CLI
 
@@ -18,15 +18,19 @@ env/bin/doc2md doctor                    # 环境自检（依赖 / 目录权限 
 doc2md serve [--host H --port P --root DIR --config F]   # API 服务（默认 127.0.0.1:8090）
 doc2md serve token [--role R --label L | --revoke TOKEN | --list]
 doc2md cron --daily | --weekly [--no-backup]
-doc2md convert <file|dir> [--mode auto|single|two_phase --out DIR --workers N --json --follow-symlinks]
+doc2md convert <file|dir> [--mode auto|single|two_phase --out DIR --workers N --json --follow-symlinks \
+              --llm-mode offline|server --llm-no-fallback]
 doc2md work [--once --max-jobs N --workers N --idle S --enqueue PATH --status]
 doc2md watch <dir> [--once --interval S]
 doc2md tokenizer export F [--vocab V --manifest M]
 doc2md tokenizer verify --manifest M --gguf F
+doc2md backup drill [--keep]                     # 隔离沙箱内跑完整恢复闭环（ops/backup.md）
 doc2md doctor
 ```
 
 退出码：`0` 成功 / `2` 用法错误 / `3` 门禁拒收（E4221 等） / `4` 业务错误 / `5` 系统错误。
+`2` 也覆盖两类安全拒收：`serve --host` 非回环且未设 `api.allow_remote_bind`、`serve token` 的
+`--role` 不在 `api.token_roles`；`4` 覆盖 `serve token --revoke` 的未知 token（E4041）。
 CI 里 `doc2md convert --json` 的 stderr 会打印门禁摘要（键为 `mode` / `sampled_pages` / `reasons` / `stats`，CH-462 实核）。
 
 ## 快速开始
@@ -96,7 +100,10 @@ launchctl load ~/Library/LaunchAgents/md.doc2md.cron.weekly.plist
 launchctl list | grep doc2md          # 校验（R6）：应列出两个标签
 ```
 
-`--daily` = 日报 → 本地快照 → tmp 清理 → 日志轮转检查；`--weekly` = `--daily` 超集 + 外置加密增量。
+`--daily` = 日报 → 本地快照（磁盘门禁是它的前置检查，不是独立步骤）→ 轮出 → tmp 清理 → 日志轮转检查
+→ events / 终态 tasks 保留期清理 → 搜索索引对账；`--weekly` = 同一序列，只在本地快照成功后、**轮出之前**插入
+外置加密增量（新副本当轮即受轮出保护）。
+全部 10 个步骤名与失败语义见方案 附录 E。
 口令不要写进 plist；用 `launchctl setenv DOC2MD_BACKUP_PASSPHRASE …` 或 Keychain 包装脚本注入。
 
 ## 定时任务（Windows 任务计划）
@@ -134,7 +141,7 @@ rename 轮转只能有一个属主，三类进程三份文件。
 | `ops/backup.md` | 备份介质与恢复演练细则 |
 | `ops/windows/install-doc2md-tasks.ps1` | Windows 任务计划安装 / 校验 / 卸载（与 launchd 同等能力） |
 
-跟踪约定：契约变更、缺陷、更优做法一律按登记流写入方案 第十一章（当前编号至 `CH-474`，下一条 `CH-475`），实测数字进第十二章并标注语料与测量方法；规格发生变化时同步主题篇章节与本文相应小节，并递增 `doc2md.PLAN_VERSION`（管线契约变化另递增 `PIPELINE_VERSION`；状态库结构变化另递增 `DB_VERSION`，CH-469 起为 `5`）。
+跟踪约定：契约变更、缺陷、更优做法一律按登记流写入方案 第十一章（当前编号至 `CH-476`，下一条自 `CH-477`），实测数字进第十二章并标注语料与测量方法；规格发生变化时同步主题篇章节与本文相应小节，并递增 `doc2md.PLAN_VERSION`（管线契约变化另递增 `PIPELINE_VERSION`；状态库结构变化另递增 `DB_VERSION`，CH-469 起为 `5`、CH-476 起为 `6`）。
 
 ## 验收与测试
 
@@ -154,9 +161,9 @@ rename 轮转只能有一个属主，三类进程三份文件。
 > 也成立，需为 `main` 打开「Require a pull request before merging」，那是改变日常工作流的决策项。
 
 ```bash
-pytest -m gate            # 红线层：六条 merge-gate + 低配机专项 + CH-469 两批安全/契约专项 + CH-473 第五轮 12 项 + CH-475 第六轮 7 项（全绿方可合并）
-                          # 当前 153 项 = 40（契约红线）+ 29（低配机）+ 10（服务/存储）+ 54（安全/配置/运维）+ 13（CH-473 12 项 + CH-474 补入 X-17 1 项）+ 7（CH-475 第六轮）
-                          # 耗时历史记录：Linux 沙箱轮次 72–110s、T8 优化后 53.0s、CH-469 本机（macOS arm64 / Py 3.15）28.7s、CH-473 62.7s、CH-475 30.0s——项数是硬口径，耗时只作历史
+pytest -m gate            # 红线层：六条 merge-gate + 低配机专项 + CH-469 两批安全/契约专项 + CH-473 第五轮 12 项 + CH-475 第六轮 7 项 + CH-476 第七轮 91 项（全绿方可合并）
+                          # 当前 244 项 = 153（本轮起点：40 契约红线 + 29 低配机 + 10 服务/存储 + 54 安全/配置/运维 + 13（CH-473 12 项 + CH-474 补入 X-17 1 项）+ 7（CH-475 第六轮））+ 91（CH-476：test_ch476_fixes.py 83 + test_sharding_unit.py 8）
+                          # 耗时历史记录：Linux 沙箱轮次 72–110s、T8 优化后 53.0s、CH-469 本机（macOS arm64 / Py 3.15）28.7s、CH-473 62.7s、CH-475 30.0s、CH-476 33.9s——项数是硬口径，耗时只作历史
 pytest tests/             # 全量（marker 实际取值：M0+M2 / M3 / M5 / M6c / M8 / M9a / DoD / PERF，见 pytest.ini）
 python3 tests/make_golden.py            # 重建黄金样本（输出目录随脚本位置，--golden 可覆盖）
 python3 tests/make_golden.py --force    # 强制重生成

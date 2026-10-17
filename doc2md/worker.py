@@ -221,7 +221,9 @@ def _finish_ok(store: Store, sched: Scheduler, job: dict, res: dict, ir,
     """入库 + 状态推进。返回是否发生内容漂移（入队后源文件被改写）。
 
     CH-459（A-4）：detail 更新 / save_ir / mark(done) / 事件原为四次独立
-    提交（WAL + synchronous=FULL 下每次 fsync）——每任务固定开销的主因，
+    提交（每次提交一次 fsync 是当时口径；`synchronous` 自 CH-471 / STOR-1 起为
+    NORMAL，合批仍保留——每任务固定开销的剩余主因是池重建与 worker 重导入，
+    见 12.3 归因与 CH-476 / R7-PERF-1），
     现合并为单事务。同笔修掉一个静默缺陷：原实现先写 detail_json 再
     `sched.mark(done)`，而 mark 用 `{}` 覆盖 detail_json——明细从来没活过
     （本次把 detail 与终态写进同一笔 UPDATE）。

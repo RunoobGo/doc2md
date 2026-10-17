@@ -68,9 +68,9 @@ def save_ir(store: Store, ir: IR, profile: str = "standard", tx=None,
     """整本文档入库（docs + blocks + FTS）。
 
     CH-459（A-4/A-14）：原实现 docs/blocks 与 reindex 各起一次事务、逐块
-    `execute`——N 块 = 2 次写事务 + 2N 条语句，而 WAL + synchronous=FULL 下
-    每次提交都 fsync，这是每任务固定开销的主因（12.3 实测佐证）。现合并为
-    **单事务 + executemany**（两次语句批量）。
+    `execute`——N 块 = 2 次写事务 + 2N 条语句（当时 `synchronous=FULL`，每提交
+    一次 fsync；该 PRAGMA 自 CH-471 / STOR-1 起为 NORMAL，合批仍保留——少事务
+    往返并保持崩溃原子性）。现合并为 **单事务 + executemany**（两次语句批量）。
 
     `tx` 形参（CH-459）：调用方可传入已有事务把入库并入其中——
     `worker._finish_ok` 用它把 detail/mark/event/入库四写合成一次提交。
