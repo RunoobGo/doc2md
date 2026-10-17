@@ -65,10 +65,18 @@ def test_launchd_plists_are_valid_xml(plist_path):
     """plist 必须是合法 XML（注释里的连续连字符曾让 plutil/expat 拒解析，CH-456 修复）。"""
     data = plistlib.loads(plist_path.read_bytes())
     assert data["Label"].startswith("md.doc2md.cron")
-    # ProgramArguments 末两位必须是 cron 与档位开关（超集语义，§539）
+    args = data["ProgramArguments"]
+    # ProgramArguments 前缀必须是 exe + cron + 档位开关（超集语义，§539）
     # 注意日任务文件名是 md.doc2md.cron.plist（无 .daily 后缀），周任务才有 .weekly
     expect = "--weekly" if "weekly" in plist_path.name else "--daily"
-    assert data["ProgramArguments"][-2:] == ["cron", expect]
+    assert args[1:3] == ["cron", expect]
+    # CH-475（R6-OPS-1）：launchd 默认 cwd 为 /，root_setting 会把相对根名 work 解析成
+    # /work → cron 操作错误根。修复口径（D3）＝WorkingDirectory（安装根）+ 显式根参数
+    # （安装根/work）双保险；Windows 孪生靠安装脚本渲染 WorkingDirectory，macOS 是手改
+    # 模板无渲染脚本，故这里显式钉住根参数。二者缺一即回归。
+    wd = data["WorkingDirectory"]
+    assert wd and "--root" in args
+    assert args[args.index("--root") + 1] == f"{wd}/work"
 
 
 def test_task_names_match_launchd_labels():

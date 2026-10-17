@@ -267,14 +267,15 @@ def check_runtime_immutable(candidate: dict, baseline: dict) -> None:
     """运行期配置变更门禁（CH-471 SVC-6 / D4）。
 
     `RUNTIME_IMMUTABLE_KEYS` 里的红线键允许出现在 `config.load()` / `convert(cfg=...)`
-    的显式配置里（合法的按 profile 用法），但不许被 PUT /settings 从基线**改动**——
-    否则在线途中一次请求就能关掉离线守护。改回同值（无实际变化）放行。
+    的显式配置里（合法的按 profile 用法），但不许被 PUT /settings 或 reload 从基线
+    **改动**——否则在线途中一次请求（或改文件后 reload）就能关掉离线守护。改回同值
+    （无实际变化）放行；确需调整须重启进程。
     """
     for dotted in RUNTIME_IMMUTABLE_KEYS:
         cur_v, base_v = get(candidate, dotted), get(baseline, dotted)
         if cur_v != base_v:
             raise ConfigError(
-                f"{dotted} 为运行期不可变红线键，禁止经 PUT /settings 修改"
+                f"{dotted} 为运行期不可变红线键，禁止经 PUT /settings 或 reload 修改"
                 f"（基线 {base_v!r} → 请求 {cur_v!r}）；确需调整请改配置文件后重启")
 
 

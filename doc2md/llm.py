@@ -43,15 +43,62 @@ SYSTEM_PROMPT_V23 = SYSTEM_PROMPT_V24.split("7) 文档正文")[0] + \
 _INJECT_HINT = re.compile(
     r"(忽略(以上|前面|上述|文档|本|所有)?(的)?(规则|指令|格式|内容|要求|说明)|"
     r"无视(文档|以上|上述|前面)?(内容|规则|指令|说明)?|"
+    r"忘记(之前|以上|上述|前面|所有)?(的)?(规则|指令|内容|对话|提示)|"
+    r"忘记.{0,8}(规则|指令|内容|对话|提示|限制|约束)|"
     r"ignore\s*(all\s*)?(previous|above|prior|system)\s*(instructions?|rules?|prompts?)|"
+    # R6-LLM-2（CH-475）：补常见英文/变体注入话术——原式漏掉 forget/disregard/
+    # "new instructions:"/"developer mode" 等真实越狱措辞（漏报）。所列均为明确指向
+    # 「让模型抛弃规则/切换人格」的短语，正常文档转换语料几乎不会出现，误报极低；
+    # 纯增量，不动既有 10 条 golden 注入的命中口径。误报收窄（扮演/debug/密钥 等
+    # 高 FP token）需真实注入语料评估，登记 B-3，本轮不动。
+    r"forget\s+(everything|all\s+(previous|prior|the)|the\s+(rules|instructions?|prompts?)|your\s+(instructions?|rules?|training|programming))|"
+    r"disregard\s+(all|any|previous|prior|above|the)\s+(rules|instructions?|prompts?|content|guidelines|directives)|"
+    r"new\s+(system\s+)?instructions?:|"
+    r"you\s+are\s+now\s+(in\s+)?(developer\s+mode|dan|jailbroken|jailbreak|unrestricted|unfiltered)|"
     r"system\s*(override|prompt|instructions?)|override:|"
     r"reveal\s*(your\s*)?(the\s*)?(system\s*)?(prompt|key|secret|token|api)|"
     r"(display|extract|output|输出|返回|显示|执行).{0,20}"
     r"(提示词|系统配置|内部指令|隐藏内容|密钥|api.?key|metadata|hidden\s*text|"
     r"debug|完整日志|新的系统命令|日志和调试)|"
-    r"把所有表格改成|改写成人话|改成人话|输出你的提示词|扮演|"
+    r"把所有表格改成|改写成人话|改成人话|输出你的提示词|"
+    # R6-LLM-2（CH-475）：裸 `扮演` 误报极高（「角色扮演游戏」「扮演重要角色」是
+    # 正常中文），且无 golden 依赖——收窄为要求越狱语境（不受限/开发者模式/DAN 等）。
+    r"扮演.{0,12}(不受限|无限制|越狱|开发者模式|DAN|没有(任何)?限制|邪恶|恶意|一个(没有|不受))|"
     r"(章节标题|所有标题).{0,10}(大写|表情符号|emoji)|指令已过期)",
     re.I)
+
+
+# R6-LLM-1（CH-475，决策 D2）：算子参数值白名单。文档正文不可信，模型可被诱导产出
+# 畸形参数——`level:"3"`（字符串）/`level:99`（越界）会让 apply_ops 把非法值写进
+# b.level，渲染期（s4_render）抛 TypeError；`marker:"\1"` 作为 re.sub 替换串触发
+# re.error（非法组引用）。单算子畸形不得让整篇转换崩溃：非法参数的算子整条拒绝
+# （计入 rejected + 归因），绝不进入 apply_ops。拒绝而非崩溃，与离线确定性口径一致。
+_MARKER_OK = re.compile(r"^[-*+·•‣]{1,3}$")
+
+
+def valid_level(v) -> int | None:
+    """把 level 参数规约为合法标题层级 int（1..6）；非法返回 None。
+
+    接受 int 与纯数字串（模型常把数字字符串化，"3" 意图明确即 3，不该丢弃——
+    功能全面）；拒绝 bool（isinstance(True, int) 为真的陷阱）、越界、非数字。
+    """
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, int):
+        return v if 1 <= v <= 6 else None
+    if isinstance(v, str) and v.strip().isdigit():
+        n = int(v.strip())
+        return n if 1 <= n <= 6 else None
+    return None
+
+
+def valid_marker(v) -> str | None:
+    """把 marker 参数规约为安全的项目符号串；非法返回 None。
+
+    只放行常见 markdown 项目符号（`- * + · • ‣`，≤3 字符）——杜绝 `\\`、组引用、
+    控制字符等进入 re.sub 替换串。apply_ops 另用函数式替换二次设防（见下）。
+    """
+    return v if isinstance(v, str) and _MARKER_OK.match(v) else None
 
 
 class OpValidator:
@@ -90,6 +137,13 @@ class OpValidator:
         if name not in self.whitelist:
             reasons.append("not_whitelisted")
             return reasons
+        # R6-LLM-1（CH-475，决策 D2）：参数值校验——白名单/目标校验之外，畸形参数
+        # （level 非 1..6 的 int、marker 非安全短串）整条拒绝，绝不让其进 apply_ops
+        # 致渲染期崩溃。仅当算子确实带了该参数才校验（缺省走 apply_ops 的安全默认）。
+        if name == "fix_heading_level" and "level" in op and valid_level(op.get("level")) is None:
+            reasons.append(f"bad_level:{op.get('level')!r}")
+        elif name == "fix_list_marker" and "marker" in op and valid_marker(op.get("marker")) is None:
+            reasons.append(f"bad_marker:{op.get('marker')!r}")
         t = self._targets(op)
         if not t:
             reasons.append("no_target")
@@ -384,12 +438,17 @@ def apply_ops(ir, accepted: list[dict]) -> int:
             continue
         name = op.get("op")
         if name == "fix_heading_level":
-            b.level = op.get("level", b.level)
+            # R6-LLM-1（CH-475）：纵深防御——即使绕过 OpValidator 直接调用 apply_ops，
+            # 非法 level 也规约回原值（绝不把 str/越界写进 b.level 致渲染期 TypeError）。
+            lv = valid_level(op.get("level"))
+            b.level = lv if lv is not None else b.level
             b.provenance.setdefault("modified_by", []).append("llm:fix_heading_level")
             n += 1
         elif name == "fix_list_marker":
-            marker = str(op.get("marker", "-"))[:3] or "-"
-            new = re.sub(r"^\s*[·•‣∙○●■□\-\*]\s+", marker + " ", b.text or "")
+            # R6-LLM-1（CH-475）：marker 经白名单规约；替换用**函数式** repl，返回值
+            # 不被 re 解释为组引用——即便 marker 含 `\1` 也只做字面拼接，杜绝 re.error。
+            marker = valid_marker(op.get("marker")) or "-"
+            new = re.sub(r"^\s*[·•‣∙○●■□\-\*]\s+", lambda _: marker + " ", b.text or "")
             if new != b.text:
                 b.text = new
                 b.provenance.setdefault("modified_by", []).append("llm:fix_list_marker")

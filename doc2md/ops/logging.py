@@ -128,6 +128,11 @@ def scrub_record(rec):
         return {k: scrub_record(v) for k, v in rec.items()}
     if isinstance(rec, (list, tuple)):
         return [scrub_record(v) for v in rec]
+    if isinstance(rec, (bytes, bytearray)):
+        # R6-OPS-2（CH-475）：bytes 不经此分支会被 json.dumps(default=str) 在
+        # _scrub **之后**才逐字字符串化，绕过「>SCRUB_MAX_LEN 换指纹」——正文/
+        # 二进制片段可经 bytes 通道原样泄露进日志（NFR-20）。先解码再走 str 长度规则。
+        rec = bytes(rec).decode("utf-8", "replace")
     if isinstance(rec, str) and len(rec) > SCRUB_MAX_LEN:
         return _fingerprint(rec)
     return rec

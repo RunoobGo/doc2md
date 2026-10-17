@@ -30,7 +30,18 @@ _LEGIT_LOWER = re.compile(
 
 
 def norm_lines(text: str) -> list[str]:
-    return [_WS.sub("", ln) for ln in (text or "").splitlines() if _WS.sub("", ln)]
+    # R6-PIPE-2（CH-475）：原口径 `_WS.sub("", ln)` 删尽**全部**空白——等价门对
+    # 「缩进丢失 / 行内空格增删 / 代码块缩进破损」完全失明（抹掉空白后字符序列相同，
+    # 门照样判绿）。改为：保留行首缩进（代码块语义所在），行内连续空白折叠为单空格。
+    # 既收紧敏感度（捕获缩进/分隔变化），又对散文的无害空白差异保持容忍，不破 0.99。
+    out: list[str] = []
+    for ln in (text or "").splitlines():
+        stripped = ln.strip()
+        if not stripped:
+            continue
+        indent = ln[:len(ln) - len(ln.lstrip())]
+        out.append(indent + _WS.sub(" ", stripped))
+    return out
 
 
 def _matched_chars(a: str, b: str) -> int:

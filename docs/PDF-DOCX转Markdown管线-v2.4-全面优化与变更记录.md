@@ -267,6 +267,8 @@ PL
 
 `doc2md cron --daily` 依次执行：日报（NFR-14）→ 本地快照备份（FR-607）→ tmp 清理 → 日志轮转检查；`--weekly` 追加增量打包至外置加密卷（NFR-18）。cron 与 serve 分离进程、共用 state.sqlite（WAL 下安全）。
 
+> **部署以 `ops/launchd/*.plist` 为准**：上面的 v2.4 示例是历史快照（省略了 `StandardOutPath`/`StandardErrorPath` 等），权威文件此后已两次修订——CH-456/T5 修复注释含连续连字符的非法 XML，CH-475/R6-OPS-1 补 `WorkingDirectory` 与显式 `--root {安装根}/work`。launchd 默认 cwd 为 `/`，缺此二者时相对根名 `work` 会被 `root_setting` 解析成 `/work`，日流程要么失败要么操作错误根（Windows 孪生 `ops/windows/*.xml` 由安装脚本渲染 `WorkingDirectory`，本就无此患）。
+
 ### 4.7 并发与竞态防护（动因 P-60）
 
 scheduler 约束追加（附录 B-8 第 9 条）：`tasks` 表对 `doc_id` 建唯一索引（进行中状态）；`submit()` 遇到已存在同 doc_id 作业时**附着**到既有作业（返回其 job_id）而非新建——与 Idempotency-Key 去重合并为同一机制的两条路径。

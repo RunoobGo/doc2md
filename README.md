@@ -152,9 +152,9 @@ rename 轮转只能有一个属主，三类进程三份文件。
 > 也成立，需为 `main` 打开「Require a pull request before merging」，那是改变日常工作流的决策项。
 
 ```bash
-pytest -m gate            # 红线层：六条 merge-gate + 低配机专项 + CH-469 两批安全/契约专项 + CH-473 第五轮 12 项（全绿方可合并）
-                          # 当前 146 项 = 40（契约红线）+ 29（低配机）+ 10（服务/存储）+ 54（安全/配置/运维）+ 13（CH-473 12 项 + CH-474 补入 X-17 1 项）
-                          # 耗时历史记录：Linux 沙箱轮次 72–110s、T8 优化后 53.0s、CH-469 本机（macOS arm64 / Py 3.15）28.7s、CH-473 62.7s——项数是硬口径，耗时只作历史
+pytest -m gate            # 红线层：六条 merge-gate + 低配机专项 + CH-469 两批安全/契约专项 + CH-473 第五轮 12 项 + CH-475 第六轮 7 项（全绿方可合并）
+                          # 当前 153 项 = 40（契约红线）+ 29（低配机）+ 10（服务/存储）+ 54（安全/配置/运维）+ 13（CH-473 12 项 + CH-474 补入 X-17 1 项）+ 7（CH-475 第六轮）
+                          # 耗时历史记录：Linux 沙箱轮次 72–110s、T8 优化后 53.0s、CH-469 本机（macOS arm64 / Py 3.15）28.7s、CH-473 62.7s、CH-475 30.0s——项数是硬口径，耗时只作历史
 pytest tests/             # 全量（marker 实际取值：M0+M2 / M3 / M5 / M6c / M8 / M9a / DoD / PERF，见 pytest.ini）
 python3 tests/make_golden.py            # 重建黄金样本（输出目录随脚本位置，--golden 可覆盖）
 python3 tests/make_golden.py --force    # 强制重生成

@@ -90,13 +90,21 @@ class Scheduler:
                "failed": "finished_at", "rejected": "finished_at"}.get(status)
 
         def _do(t):
+            # R6-SVC-3（CH-475，决策 D1）：终态幂等——mark 不得改写已成功（done）或
+            # 已拒收（rejected）的作业，杜绝「幂等重执行 / submit_rejected 命中既有
+            # done 作业」把成功终态翻成 rejected 的数据安全缺陷。仍允许从 queued/
+            # running/failed 迁移：failed→done 是同步 serve 路径与常驻 worker 竞争
+            # 同一行时的自纠正（worker 误判 E4001、同步路径实际已落库），不可堵死；
+            # 历史无路径孤儿行的 queued→failed 清理（CH-448） likewise 保留。
+            # 需重开一个 done 作业走显式 requeue，而非 mark。
             if col:
                 t.execute(f"UPDATE tasks SET status=?, error_code=?, detail_json=?,"
-                          f" {col}=? WHERE job_id=?",
+                          f" {col}=? WHERE job_id=? AND status NOT IN ('done','rejected')",
                           (status, error_code, json.dumps(detail or {}, ensure_ascii=False),
                            now_iso(), job_id))
             else:
-                t.execute("UPDATE tasks SET status=? WHERE job_id=?", (status, job_id))
+                t.execute("UPDATE tasks SET status=? WHERE job_id=?"
+                          " AND status NOT IN ('done','rejected')", (status, job_id))
 
         if tx is not None:
             _do(tx)

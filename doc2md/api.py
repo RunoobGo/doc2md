@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
 import threading
@@ -106,6 +107,22 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
     def tok() -> str | None:
         return request.headers.get("X-Doc2md-Token") or (
             request.headers.get("Authorization", "").removeprefix("Bearer ").strip() or None)
+
+    def actor_id(b: dict | None = None, default: str = "anon") -> str:
+        """审计 actor 标识（R6-SVC-2 / CH-475）。
+
+        优先用客户端显式给出的 "as"（用户自填署名，非凭据）；缺省时用 bearer
+        token 的 sha256 前 12 位——绝不把明文 token 前缀写进 edit_audit / tombstone。
+        token 在库内只存哈希，审计面同样不落明文凭据（NFR-20 精神）；哈希前缀仍
+        保留「同一 token 同一 actor」的可关联性，不保留凭据本身。
+        """
+        a = (b or {}).get("as")
+        if a:
+            return str(a)[:12]
+        t = tok()
+        if t:
+            return hashlib.sha256(t.encode("utf-8")).hexdigest()[:12]
+        return default
 
     def need(action: str) -> str:
         return auth.check(store, tok(), action)
@@ -243,6 +260,16 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
 
         def _finish_one(f, ir, doc_id, source_key):
             j = sched.submit(doc_id, source_key, idem_key=_idem_for(f))
+            # R6-SVC-3（CH-475，决策 D1）：幂等命中 / 附着既有作业时，该 doc_id 已由
+            # 在途或既往作业负责落库——不再重跑 save_ir。既省一次全量写（性能优先），
+            # 又杜绝「对已 done 作业再 mark 致终态翻转 / 对已编辑文档误触 E4091 报
+            # conflict」的数据安全缺陷。直接复用既有作业状态。
+            if j.idem_hit or j.attached:
+                row = sched.get(j.job_id) or {}
+                out.append({"file": f.name, "job_id": j.job_id, "doc_id": doc_id,
+                            "attached": j.attached, "idempotency_hit": j.idem_hit,
+                            "status": row.get("status", j.status)})
+                return
             # CH-459（A-4）：save_ir / mark(done) / 事件三写合并为单事务
             # （原 5 次独立提交，WAL + synchronous=FULL 每次 fsync）。
             # CH-471（STOR-5）：库内已有编辑时 save_ir 抛 E4091，整笔事务回滚
@@ -397,7 +424,7 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
     def patch(doc_id, block_id):
         need("edit")
         b = body()
-        res = patch_block(store, doc_id, block_id, b, b.get("as", tok() or "anon")[:12],
+        res = patch_block(store, doc_id, block_id, b, actor_id(b),
                           require_base_revision=bool(
                               config.get(cur(), "api.base_revision_required", True)))
         _emit(store, "text_edited", doc_id, None, {"block_id": block_id,
@@ -415,8 +442,8 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
         except (KeyError, TypeError, ValueError):
             raise E4001_BadRequest("to_revision must be an integer",
                                    detail={"field": "to_revision"})
-        actor = b.get("as") or tok() or "anon"
-        return jsonify(rollback(store, doc_id, block_id, to_rev, str(actor)[:12]))
+        actor = actor_id(b)
+        return jsonify(rollback(store, doc_id, block_id, to_rev, actor))
 
     @app.delete("/docs/<doc_id>")
     def del_doc(doc_id):
@@ -424,7 +451,7 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
         if request.args.get("confirm") != "true":
             raise E4001_BadRequest("confirm=true required for destructive delete",
                                  detail={"rule": "FR-128", "requires": "confirm=true"})
-        return jsonify(delete_doc(store, doc_id, tok() or "admin", root))
+        return jsonify(delete_doc(store, doc_id, actor_id(None, default="admin"), root))
 
     @app.delete("/sources/<source_key>")
     def del_src(source_key):
@@ -432,7 +459,7 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
         if request.args.get("confirm") != "true":
             raise E4001_BadRequest("confirm=true required for destructive delete",
                                  detail={"rule": "FR-128", "requires": "confirm=true"})
-        return jsonify(delete_source(store, source_key, tok() or "admin", root))
+        return jsonify(delete_source(store, source_key, actor_id(None, default="admin"), root))
 
     @app.get("/docs/<doc_id>/audit")
     def doc_audit(doc_id):
@@ -580,6 +607,12 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
             if override.is_file():
                 _deep(merged, json.loads(override.read_text(encoding="utf-8")))
             config.validate(merged)
+            # R6-SVC-1（CH-475）：reload 与 PUT /settings 同口径守运行期不可变红线键。
+            # 原实现只在 PUT 调 check_runtime_immutable——直接改 doc2md.toml 再 reload
+            # 即可绕过守卫关掉 run.offline_assert / api.allow_remote_bind，等于离线断言
+            # 存在运行期旁路。比对当前内存基线，红线键变化则拒绝 reload（保持旧配置服务）。
+            # 确需调整红线键仍须**重启**（reload 属运行期变更，与 PUT 同等对待）。
+            config.check_runtime_immutable(merged, app.config["doc2md"]["cfg"])
         except config.ConfigError as exc:
             raise E4001_BadRequest(f"invalid configuration: {exc}") from None
         except (OSError, ValueError) as exc:      # 配置文件缺失 / 非法 TOML / 非法 JSON

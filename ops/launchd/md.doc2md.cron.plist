@@ -3,14 +3,19 @@
 <!-- Doc2md 日任务（附录 C-2 / ADR-30）：本地墙钟 00:00 触发 doc2md cron 的日流程（TZ=UTC 仅设定子进程时钟口径，不改触发时刻）。
      安装：cp ops/launchd/md.doc2md.cron.plist ~/Library/LaunchAgents/
      校验：launchctl list | grep doc2md  （应列出 md.doc2md.cron 与 md.doc2md.cron.weekly）
-     注：ProgramArguments 路径按实际部署前缀改写（方案示例为 /Users/you/doc2md）。
+     注：ProgramArguments / WorkingDirectory / 显式根参数（root）三处路径一律按实际部署
+         前缀改写（方案示例为 /Users/you/doc2md）。CH-475（R6-OPS-1）补 WorkingDirectory
+         与显式 root，钉住工作根——launchd 默认 cwd 为 /，缺此二者时相对根名 work 会被
+         root_setting 解析成 /work，日流程要么失败要么操作错误根（Windows 孪生已带 WorkingDirectory）。
      注：XML 注释内不得出现连续两个连字符（XML 1.0 注释非法令牌），
          故注释里写「日流程」而非命令行开关；ProgramArguments 里的开关不受影响。 -->
 <plist version="1.0"><dict>
   <key>Label</key><string>md.doc2md.cron</string>
   <key>ProgramArguments</key><array>
     <string>/Users/you/doc2md/env/bin/doc2md</string>
-    <string>cron</string><string>--daily</string></array>
+    <string>cron</string><string>--daily</string>
+    <string>--root</string><string>/Users/you/doc2md/work</string></array>
+  <key>WorkingDirectory</key><string>/Users/you/doc2md</string>
   <key>StartCalendarInterval</key><dict>
     <key>Hour</key><integer>0</integer><key>Minute</key><integer>0</integer></dict>
   <key>EnvironmentVariables</key><dict><key>TZ</key><string>UTC</string></dict>

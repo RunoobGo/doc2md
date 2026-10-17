@@ -46,13 +46,15 @@ def _console_safe() -> None:
             pass
 
 
-def _jline(obj: dict) -> str:
-    """机器可读行（--json / 脚本 / CI 消费）：一律 ASCII 转义（CH-451）。
+def _jline(obj, indent: int | None = None) -> str:
+    """机器可读 JSON（--json / 脚本 / CI 消费）：一律 ASCII 转义（CH-451）。
 
     `ensure_ascii=False` 在 GBK 控制台上要么崩、要么被 errors="replace" 打成 `?`
     —— 那就不再是有效 JSON。ASCII 转义在两种控制台下同字节可解析。
+    CH-475（R6-OPS-3）：所有 CLI 机器可读 JSON 出口统一走此函数——含 doctor/cron/
+    list-tokens 这类「人读 + 机读」的 indent=2 面，消除绕过 `_jline` 的 ensure_ascii=False 旁路。
     """
-    return json.dumps(obj, ensure_ascii=True)
+    return json.dumps(obj, ensure_ascii=True, indent=indent)
 
 # CH-441：doctor 自检的依赖清单 = pyproject 运行时依赖的导入名（单一口径，防漂移）。
 # 实装只用 pdfplumber / python-docx / cryptography / Flask；
@@ -216,10 +218,9 @@ def _token_body(args, cfg, store, auth) -> int:
         # CH-471 SVC-9：库里只存 token 哈希（明文仅签发时展示一次）。--list 输出哈希前缀，
         # 既够运维按 label/时间定位并吊销，也不再从 DB/终端泄露可用凭证。
         rows = store.q("SELECT token, role, label, created_at, revoked_at FROM tokens")
-        print(json.dumps([{"token_sha256": r["token"][:16], "role": r["role"],
-                           "label": r["label"], "created_at": r["created_at"],
-                           "revoked_at": r["revoked_at"]} for r in rows],
-                         ensure_ascii=False, indent=2))
+        print(_jline([{"token_sha256": r["token"][:16], "role": r["role"],
+                       "label": r["label"], "created_at": r["created_at"],
+                       "revoked_at": r["revoked_at"]} for r in rows], indent=2))
         return EXIT_OK
     if args.revoke:
         # CH-469（V-13）：`auth.revoke` 现在回报是否命中。原实现在这里同样
@@ -228,8 +229,8 @@ def _token_body(args, cfg, store, auth) -> int:
             print(_jline({"revoked": False, "code": "E4041",
                           "message": "unknown token"}), file=sys.stderr)
             return EXIT_BIZ
-        print(json.dumps({"revoked": True, "effective_within_s": int(config.get(
-            cfg, "api.revoke_effective_seconds", 5))}, ensure_ascii=False))
+        print(_jline({"revoked": True, "effective_within_s": int(config.get(
+            cfg, "api.revoke_effective_seconds", 5))}))
         return EXIT_OK
     allowed = config.get(cfg, "api.token_roles", auth.ROLES)
     if args.role not in tuple(allowed):
@@ -249,8 +250,7 @@ def cmd_cron(args: argparse.Namespace) -> int:
     cfg = _cfg(args)
     mode = "weekly" if args.weekly else "daily"
     rep = cron.run(cfg, _root(cfg), mode=mode, with_backup=not args.no_backup)
-    print(json.dumps({"mode": rep.mode, "ok": rep.ok, "steps": rep.steps},
-                     ensure_ascii=False, indent=2))
+    print(_jline({"mode": rep.mode, "ok": rep.ok, "steps": rep.steps}, indent=2))
     return EXIT_OK if rep.ok else EXIT_SYS
 
 
@@ -500,13 +500,12 @@ def cmd_tokenizer(args: argparse.Namespace) -> int:
         vocab = args.vocab or str(manifest_path.with_name("vocab.jsonl"))
         man = gguf.export_vocab(args.gguf, vocab)
         gguf.write_manifest(man, manifest_path)
-        print(json.dumps({"manifest": str(manifest_path), "vocab": man["vocab_file"],
-                          "n_vocab": man["n_vocab"],
-                          "gguf_sha256_prefix": man["gguf_sha256_prefix"]},
-                         ensure_ascii=False, indent=2))
+        print(_jline({"manifest": str(manifest_path), "vocab": man["vocab_file"],
+                      "n_vocab": man["n_vocab"],
+                      "gguf_sha256_prefix": man["gguf_sha256_prefix"]}, indent=2))
         return EXIT_OK
     res = gguf.verify_manifest(args.manifest, args.gguf)
-    print(json.dumps(res, ensure_ascii=False, indent=2))
+    print(_jline(res, indent=2))
     return EXIT_OK if all(res[k] for k in ("gguf_ok", "vocab_ok", "name_ok", "n_vocab_ok")) else EXIT_SYS
 
 
@@ -563,18 +562,30 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         except Exception as exc:             # noqa: BLE001 — 自检用途
             checks[f"dep_{mod}"] = f"MISSING ({type(exc).__name__})"
     # CH-456 / T2：server 模式下探测 llama-server /health（offline 模式不探测，零网络）
-    if str(config.get(cfg, "llm.mode", "offline")) == "server":
+    llm_server_mode = str(config.get(cfg, "llm.mode", "offline")) == "server"
+    if llm_server_mode:
         from .llm import LlmClient
         ok, why = LlmClient.from_cfg(cfg).probe()
         checks["llm_server"] = "reachable" if ok else f"unreachable ({why})"
-    print(json.dumps(checks, ensure_ascii=False, indent=2))
+    print(_jline(checks, indent=2))
     # CH-473（CFG-2，LOW）：配置语义非法（冻结键校验不过）时自检必须非零退出。
     # 原实现只把 MISSING 依赖算失败——`config_frozen_keys: invalid` 照样退 0，
     # 「doctor 全绿」与「配置实际不可用」并存，自检面失去门禁意义。配置错按
     # O-15 口径映射为用法退出码（EXIT_USAGE），与加载期配置错同族。
     if not frozen_ok:
         return EXIT_USAGE
-    return EXIT_OK if not any(str(v).startswith("MISSING") for v in checks.values()) else EXIT_SYS
+    # CH-475（R6-OPS-3）：自检失败口径补齐。原判定只看 `MISSING` 依赖——
+    # ① server 模式 `llm_server: unreachable`、② 磁盘不足（`free_mb < min_free_mb`，
+    # 含探测失败的 `-1`）都 exit 0，用户误判「环境健康」，转换时才暴雷，与「低配机友好、
+    # 早失败」口径相悖。offline 模式不探测 llm_server（本就离线），不算失败。
+    free_mb = checks["free_mb"]
+    min_free_mb = int(checks["min_free_mb"] or 0)
+    unhealthy = (
+        any(str(v).startswith("MISSING") for v in checks.values())
+        or (llm_server_mode and str(checks.get("llm_server", "")).startswith("unreachable"))
+        or free_mb < 0 or free_mb < min_free_mb
+    )
+    return EXIT_SYS if unhealthy else EXIT_OK
 
 
 def _vendor_models(cfg) -> list[str]:

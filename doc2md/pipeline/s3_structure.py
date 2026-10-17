@@ -370,7 +370,16 @@ def _heading_level(text: str, size: float, base: float, bold: bool,
     if numbered and bold and size and size >= base + 0.8 and len(t) < 40:
         return _level_from_number(t, size, base)
     if numbered and len(t) < 30 and not t.endswith(("。", "！", "？", ".", "!", "?")):
-        return _level_from_number(t, size or base, base)
+        # R6-PIPE-1（CH-475，决策 D4）：第三回退原无字号/加粗门——「单级编号 + 短行 +
+        # 无句末标点」正是有序列表项（"1. 安装依赖"）的典型形态，会被误判为 H1，污染
+        # 正文结构与 TOC。纯单级编号不构成标题充分条件：仅当存在标题信号时才走编号→层级——
+        # 字号>正文 / 粗体 / 多级编号（"1.1"，列表极少用）/ CJK 章節目条（永非列表项）。
+        # 否则返回 None，留给后续段落处理（消除假阳性 H1，胜过罕见漏判一个同字号标题）。
+        m_num = _NUM.match(t)
+        multi_level = bool(m_num and "." in m_num.group(1))
+        cjk_head = bool(_CJK_HEAD.match(t))
+        if (size or base) > base or bold or multi_level or cjk_head:
+            return _level_from_number(t, size or base, base)
     return None
 
 
