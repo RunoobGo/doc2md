@@ -192,7 +192,7 @@ doctor        ：dep_pdfplumber/docx/flask/cryptography 全 ok
 ### 6.1 需构造语料 / 真实环境样本
 - **B-1（验 R6-PIPE-1）**：构造「编号列表字号 == 正文众数 + 无加粗」的 PDF/DOCX golden，复现短编号项被误判 H1，并作为修复后的回归红线。
 - **B-2（验 R6-PIPE-2）**：构造「代码块缩进 / 列表标记漂移」样本，验证收紧后的等价性门能捕获（现门失明）。
-  - **闭环（CH-478 批次②）**：样本已造（`tests/golden/codeindent_1p.pdf`）、端到端对照已实测并钉成红线 4 项；结论见上一条的「校正」段——缩进漂移判红得到证实，围栏/标记两类原列为「门失明」不成立。
+  - **闭环（CH-478 批次②）**：样本已造（`tests/golden/codeindent_1p.pdf`）、端到端对照已实测并钉成红线 4 项；结论见上一条的「校正」段——缩进漂移判红得到证实，围栏/标记两类原列为「门失明」不成立。远端确认 = run `39030470549`（push `2e04aaf`，五作业全绿：三档 merge-gate 各 256 passed、full-suite 805 passed in 155.87s，`Golden assets byte-reproducible` 步骤含新样本）。
 - **B-3（验 R6-LLM-2）**：准备真实注入语料（含英文 forget/disregard 变体 + 中文「扮演/输出 debug」正常技术文档），评估词表误报/漏报率。
 - **B-4（验 R6-SVC-4，可选）**：并发压测（同步 serve + 常驻 worker 同时跑），稳定复现 claim 误认领 source_path=NULL 行。
 
