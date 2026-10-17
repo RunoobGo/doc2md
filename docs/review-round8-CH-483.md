@@ -1519,11 +1519,11 @@ def body() -> dict:
 | B-2 | 真实双栏/页眉带链接 PDF 语料 | geoms 扩为横向重叠会改变产物字节；需语料评估 | MED |
 | B-3 | 真实注入语料 + `_attribute` 归因去循环 | 词表已扩，循环归因未改 | MED |
 | B-4 | 并发压测（同步 serve + 常驻 worker + 并发删除） | R8-SVC-1 的墓碑守护需多进程压测复现 | HIGH（数据安全） |
-| B-5 | macOS 真机 `launchctl load` 实跑 cron/serve/work | 第六轮唯一 HIGH 真机项；plist 路径/日志目录需真机确认 | **HIGH（建议优先）** |
+| B-5 | macOS 真机 launchd 实跑 cron（serve/work 见 B-9） | **cron 部分已实机验证（2026-10-18，本机 arm64）**：`plutil -lint` 四档全绿；临时 label `bootstrap`+`kickstart` 拉起日任务 exit 0、stderr 空，`WorkingDirectory`+`--root` 生效、产物与 `launchd-daily.{out,err}` 落在指定根；对照实验证实 CH-475 堵住「相对根名解析成 `/work`」的失败面。serve/work 常驻运行时（自启/崩溃自愈/unload 不复活）已于 2026-10-18 于 B-9 本机 macOS 验证，仅 Windows 腿待验 | **HIGH→已验 cron** |
 | B-6 | Win11 spawn 平台池策略实测 | T6 数字全部来自 Linux fork | MED |
 | B-7 | CI 增 Windows 腿 | 现三档均 ubuntu-latest | MED |
 | B-8 | 跨机性能基准（低配 Win11 vs 本机） | 12.3 数字为本机口径 | MED |
-| B-9 | serve/work 常驻资产实机“开机自启 + 崩溃自恢复” | 四档 plist/XML 已入库，运行时未证 | HIGH |
+| B-9 | serve/work 常驻资产实机“开机自启 + 崩溃自恢复” | **macOS 半侧已实机验证（2026-10-18，本机 arm64，临时唯一 label + bootstrap/kickstart）**：serve 随 RunAtLoad 自起绑 `127.0.0.1`（curl 200、约 10s 冷启延迟）、`kill -9` 即时重启重绑；work 常驻自起、`kill -9` 后 +22s 自愈（落在 `ThrottleInterval=30` 窗口，实证风暴护栏）；`bootout` 后二者均不复活；`work --once` 排空 exit 0 后连续 poll 恒「not running/exit 0」不重启，证实 `KeepAlive.SuccessfulExit=false` 可停性。全程沙箱 + 临时 label，未写 `~/Library/LaunchAgents`，跑毕清扫。**未证**：Windows `Register-ScheduledTask` 四档定义 + `.ps1` 真机执行（本机无 `pwsh`），并入 Windows 腿 | **HIGH→已验 macOS 半侧** |
 | B-10 | 备份容器 v2 外置卷真机恢复演练 | 沙箱闭环已覆盖；外置实景恢复未做；R8-OPS-2 后需重跑 | **HIGH（数据安全）** |
 | B-11 | 编辑器/审阅页真实浏览器人工走查 | 仅页面契约与单测 | MED |
 | B-12 | >30min 合法千页转换与 `reclaim_stale` 双进程实测 | 张力未验证 | MED |
@@ -1541,7 +1541,7 @@ def body() -> dict:
 
 **请优先安排**：
 
-1. **B-5**：macOS 真机 launchd 全链路（README 安装步骤修复后一并验证）。
+1. **B-5 / B-9**：cron 日任务与 serve/work 常驻运行时（自启/崩溃自愈/`bootout` 不复活/`--once` 正常退出不重启）均已于 2026-10-18 本机 macOS launchd 实机验证；唯余 Windows 腿（`Register-ScheduledTask` + `.ps1` 真机）待验。
 2. **B-10**：外置卷备份恢复演练（在 R8-OPS-2 落地后执行）。
 3. **B-4**：并发删除/转换压测（验证 R8-SVC-1 的事务守护）。
 4. **B-1/B-13/B-15**：真实语料评估（噪声、Word 模板、中文标题）。
@@ -1751,4 +1751,4 @@ tests/test_golden*.py（H1/heading/raw 断言）
 
 本轮的 7 项 HIGH 中，有 4 项集中在删除/备份/恢复链路，说明“数据安全承诺”已经从设计问题转化为实现与运维入口问题；另外 3 项分别指向中文标题、DOCX 内容控件和文档失真。建议严格按 Batch 0→1→2→3→4 推进：先把“删除不会复活、恢复有安全入口、轮出不会删最后副本”做实，再做 DOCX 功能补全，最后处理性能与文档收口。
 
-**B 类提醒**：B-5（macOS launchd 真机）、B-10（外置卷恢复演练）、B-4（并发删除/转换压测）、B-1/B-13/B-15（真实语料）需要本机以外环境或人工参与，请优先安排；其余 B 项在每批完成后继续提醒。
+**B 类提醒**：B-10（外置卷恢复演练）、B-4（并发删除/转换压测）、B-1/B-13/B-15（真实语料）需要本机以外环境或人工参与，请优先安排；**B-5（cron 日任务）与 B-9（serve/work 常驻运行时：自启/崩溃自愈/`bootout` 不复活/`--once` 正常退出不重启）已于 2026-10-18 本机 macOS launchd 实机验证，唯余 Windows 腿（`Register-ScheduledTask` + `.ps1` 真机执行，本机无 `pwsh`）待验，并入 B-6/B-7**。其余 B 项在每批完成后继续提醒。
