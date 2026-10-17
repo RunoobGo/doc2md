@@ -141,7 +141,7 @@ rename 轮转只能有一个属主，三类进程三份文件。
 | `ops/backup.md` | 备份介质与恢复演练细则 |
 | `ops/windows/install-doc2md-tasks.ps1` | Windows 任务计划安装 / 校验 / 卸载（与 launchd 同等能力） |
 
-跟踪约定：契约变更、缺陷、更优做法一律按登记流写入方案 第十一章（当前编号至 `CH-478`，下一条自 `CH-479`），实测数字进第十二章并标注语料与测量方法；规格发生变化时同步主题篇章节与本文相应小节，并递增 `doc2md.PLAN_VERSION`（管线契约变化另递增 `PIPELINE_VERSION`；状态库结构变化另递增 `DB_VERSION`，CH-469 起为 `5`、CH-476 起为 `6`）。
+跟踪约定：契约变更、缺陷、更优做法一律按登记流写入方案 第十一章（当前编号至 `CH-479`，下一条自 `CH-480`），实测数字进第十二章并标注语料与测量方法；规格发生变化时同步主题篇章节与本文相应小节，并递增 `doc2md.PLAN_VERSION`（管线契约变化另递增 `PIPELINE_VERSION`；状态库结构变化另递增 `DB_VERSION`，CH-469 起为 `5`、CH-476 起为 `6`）。
 
 ## 验收与测试
 
@@ -153,6 +153,14 @@ rename 轮转只能有一个属主，三类进程三份文件。
 `-vv`（CH-471）：没有上界时一次挂死会占满 6 小时默认限，红线在那几小时里既非绿也非红；
 `-vv` 才打得出逐用例行（`pytest.ini` 的 `addopts` 已含 `-q`，单 `-v` 会被抵成 0 档），
 挂死时能直接指认到用例。
+
+跨版本覆盖分两套工作流（CH-479）：上面的 `ci.yml` 是 **push 面**，`full-suite` 只在 `3.12` 单档跑一次
+（红线层本就是三档矩阵，把全量也扩成三档会让每次推送多两条 30 分钟腿，而覆盖增量只落在非红线的
+551 项用例上）；**周期面** `.github/workflows/ci-full-matrix.yml` 每周一 02:17 UTC（另有
+`workflow_dispatch` 供取证）用 3.11/3.12/3.13 三档跑全量 + 黄金逐字节复现 + `doctor`，补上那 551 项的
+跨版本空白。这个分工由 `tests/test_ch479_ci_matrix.py` 的四条红线钉住：两工作流的版本集合必须相等、
+push 面 `full-suite` 必须保持无矩阵且钉死 `3.12`、每个作业必须带 `timeout-minutes`、周期腿不得挂
+`push`/`pull_request` 触发。
 > 现状（CH-468 起）：仓库已公开，`main` 分支保护已配置——`merge-gate (3.11/3.12/3.13)` 为**必需检查**，
 > 三个 gate 任一失败即禁止合并（`full-suite` 因 `needs` 同样被阻断）。验收：故意失败的 PR #1 被
 > `mergeStateStatus=BLOCKED` 拦下。另有本地 pre-push 钩子双保险（见「本地红线兜底」）。
@@ -161,9 +169,9 @@ rename 轮转只能有一个属主，三类进程三份文件。
 > 也成立，需为 `main` 打开「Require a pull request before merging」，那是改变日常工作流的决策项。
 
 ```bash
-pytest -m gate            # 红线层：六条 merge-gate + 低配机专项 + CH-469 两批安全/契约专项 + CH-473 第五轮 12 项 + CH-475 第六轮 7 项 + CH-476 第七轮 91 项 + CH-477 版本对账 4 项 + CH-478 批次① 有序列表端到端 4 项 + 批次② 等价门缩进敏感度 4 项（全绿方可合并）
-                          # 当前 256 项 = 252（上一轮口径：40 契约红线 + 29 低配机 + 10 服务/存储 + 54 安全/配置/运维 + 13（CH-473 12 项 + CH-474 补入 X-17 1 项）+ 7（CH-475 第六轮）+ 91（CH-476：test_ch476_fixes.py 83 + test_sharding_unit.py 8）+ 4（CH-477 版本与编号对账）+ 4（CH-478 批次①：test_ch478_fixes.py 端到端反例））+ 4（CH-478 批次②：test_ch478_gate_drift.py 度量对照）
-                          # 耗时历史记录：Linux 沙箱轮次 72–110s、T8 优化后 53.0s、CH-469 本机（macOS arm64 / Py 3.15）28.7s、CH-473 62.7s、CH-475 30.0s、CH-476 33.9s、CH-477 33.25s / 31.98s、CH-478 批次① 31.54s、批次② 31.16s——项数是硬口径，耗时只作历史
+pytest -m gate            # 红线层：六条 merge-gate + 低配机专项 + CH-469 两批安全/契约专项 + CH-473 第五轮 12 项 + CH-475 第六轮 7 项 + CH-476 第七轮 91 项 + CH-477 版本对账 4 项 + CH-478 批次① 有序列表端到端 4 项 + 批次② 等价门缩进敏感度 4 项 + CH-479 CI 版本矩阵口径 4 项（全绿方可合并）
+                          # 当前 260 项 = 256（上一轮口径：40 契约红线 + 29 低配机 + 10 服务/存储 + 54 安全/配置/运维 + 13（CH-473 12 项 + CH-474 补入 X-17 1 项）+ 7（CH-475 第六轮）+ 91（CH-476：test_ch476_fixes.py 83 + test_sharding_unit.py 8）+ 4（CH-477 版本与编号对账）+ 4（CH-478 批次①：test_ch478_fixes.py 端到端反例）+ 4（CH-478 批次②：test_ch478_gate_drift.py 度量对照））+ 4（CH-479：test_ch479_ci_matrix.py 工作流文本静态断言）
+                          # 耗时历史记录：Linux 沙箱轮次 72–110s、T8 优化后 53.0s、CH-469 本机（macOS arm64 / Py 3.15）28.7s、CH-473 62.7s、CH-475 30.0s、CH-476 33.9s、CH-477 33.25s / 31.98s、CH-478 批次① 31.54s、批次② 31.16s、CH-479 38.55s / 收口复跑 33.74s（四条新红线只读工作流文本，差值属同机负载抖动）——项数是硬口径，耗时只作历史
 pytest tests/             # 全量（marker 实际取值：M0+M2 / M3 / M5 / M6c / M8 / M9a / DoD / PERF，见 pytest.ini）
 python3 tests/make_golden.py            # 重建黄金样本（输出目录随脚本位置，--golden 可覆盖）
 python3 tests/make_golden.py --force    # 强制重生成

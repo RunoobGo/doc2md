@@ -1,0 +1,59 @@
+name: full-matrix
+
+# CH-479（关闭方案 12.7「Python 3.11 / 3.12 / 3.13 矩阵」行的 ②：全量套件要不要扩到版本矩阵）。
+# 裁定：**推送腿维持单口径**——`ci.yml` 的 `full-suite` 只在 3.12 上跑，跨版本的信息面覆盖改由
+# 本工作流**每周一次**在 3.11 / 3.12 / 3.13 三档跑全量 + 黄金逐字节复现 + `doctor`。
+# 依据两条原则：
+#   ① 功能全面——805 项里 549 项是非红线层，此前只在 3.12 被执行过；解释器差异形态（X-16 / X-17
+#      的退出死锁、pdfplumber 的行形状）在这条腿上才第一次有实测机会。
+#   ② 性能优先——把三档全量并到每次 push 会把推送反馈从实测 5m14s 抬到约三倍 runner 占用，
+#      而阻断合并的只有 merge-gate 三档（12.7「CI 红线阻断合并」行）；信息面不是阻断项，
+#      用周度腿换覆盖率比用推送时长换更划算。
+# 本工作流**不是必需检查**：它红了不改判推送质量，只暴露跨版本信息面回归。
+# `timeout-minutes: 30` 沿用 `ci.yml` 的 full-suite 口径——3.13 那次挂死根因始终未定位
+# （12.7 矩阵行），无上限时一次挂死会占满 GitHub 的 6 小时默认上限。
+# 逐用例行同样用 `-vv`（`pytest.ini` addopts 已含 `-q`，净 verbosity 0）：挂死时「最后一条
+# PASSED 之后的下一个用例」就是嫌疑人。
+# `schedule` 只在默认分支上生效，`workflow_dispatch` 供取证时手动触发。
+
+on:
+  schedule:
+    - cron: '17 2 * * 1'      # 每周一 02:17 UTC（避开整点的 runner 排队高峰）
+  workflow_dispatch:
+
+concurrency:
+  group: full-matrix-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  full-suite:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install (runtime + dev extras)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Full test suite
+        run: python -m pytest -vv --durations=15
+
+      - name: Golden assets byte-reproducible (CH-442)
+        run: python -m pytest -q tests/test_golden_repro.py
+
+      - name: doctor self-check (CH-441 dep single source)
+        run: |
+          doc2md doctor
+          doc2md --version

@@ -13,8 +13,12 @@ name: ci
 # fixture），故降到 6 分钟——≈最慢样本的 2.2 倍，仍留冷缓存/慢 runner 余量，同时把挂死时
 # 的空耗从 15 分钟砍到 6（full-suite 的 needs 也就更早拿到结论）。
 # 同时 gate 与 full-suite 改用 `-vv`（`pytest.ini` 的 addopts 已含 `-q`，净 verbosity
-# = -1 + 1 = 0，单 `-v` 在 CI 里打不出逐用例行；`-vv` 每行一个用例名，256/805 行的日志
+# = -1 + 1 = 0，单 `-v` 在 CI 里打不出逐用例行；`-vv` 每行一个用例名，260/811 行的日志
 # 代价可忽略）：挂死发生时「最后一条 PASSED 之后的下一个用例」就是嫌疑人，作业超时无需再猜。
+# CH-479（版本矩阵口径）：本文件是 **push 面**，`full-suite` 刻意保持 3.12 单档——跨版本
+# 全量在 `ci-full-matrix.yml` 的周度腿（周一 02:17 UTC + workflow_dispatch）里跑。理由与
+# 分工见方案 8.6；该口径由 `tests/test_ch479_ci_matrix.py` 四条红线钉住——给本文件的
+# `full-suite` 加矩阵、或给周期腿挂 `push` 触发，都会在 merge-gate 里直接判红。
 
 on:
   push:
