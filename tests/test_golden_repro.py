@@ -32,8 +32,9 @@ def test_pdf_sample_is_byte_reproducible(tmp_path, gen):
         gen.GOLDEN_DIR = d
         gen.make_small_3p()
         gen.make_numlist_pdf()
+        gen.make_codeindent_pdf()
         gen.GOLDEN_DIR = tmp_path
-    for name in ("small_3p.pdf", "numlist_1p.pdf"):
+    for name in ("small_3p.pdf", "numlist_1p.pdf", "codeindent_1p.pdf"):
         assert (first / name).read_bytes() == (second / name).read_bytes(), \
             f"{name} 不可复现（/CreationDate 或 /ID 未被固定）"
 

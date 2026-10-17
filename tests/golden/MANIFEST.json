@@ -98,6 +98,13 @@
     "description": "干净对照样本 10"
   },
   {
+    "path": "codeindent_1p.pdf",
+    "sha256": "eb4f525402f077bb1dc4c5cb78f2cc11e6632d9c0cdb1055c3c79b58fd966349",
+    "bytes": 3521,
+    "pages": 1,
+    "description": "代码块缩进/围栏/列表标记漂移语料（R6-PIPE-2 等价门敏感度对照）"
+  },
+  {
     "path": "dirs/deep/level_01/level_02/level_03/level_04/level_05/level_06/level_07/level_08/level_09/level_10/level_11/level_12/level_13/level_14/level_15/level_16/level_17/level_18/level_19/level_20/level_21/level_22/level_23/level_24/level_25/leaf.txt",
     "sha256": "26b6e47c50f5848fabc83791103e46d65cc8e9fba33398b982f6c762152ac3d5",
     "bytes": 9,

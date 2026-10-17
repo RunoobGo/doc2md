@@ -819,6 +819,77 @@ def make_numlist_pdf():
 
 
 # ============================================================================
+# 7b. codeindent_1p.pdf —— 代码块缩进 / 围栏 / 列表标记漂移语料
+# ============================================================================
+def make_codeindent_pdf():
+    """等价性门的「缩进敏感度」语料（CH-478 批次② / R6-PIPE-2 的 B-2 出口）。
+
+    判别力设计（单页，众数字号 10）：
+      · 显式围栏代码块（```python 起、``` 止，Courier 等宽）内含二级缩进；
+      · 无围栏的纯等宽缩进块（靠 `Line.mono` 起块）；
+      · `-` 符号 bullet 两项（供合成为 `*` 漂移）；
+      · 若干中文正文段，既确立众数字号，也把单处漂移摊到更大分母上——
+        相似度是否掉到 0.99 以下取决于此，语料过小会让所有口径都判红、失去区分力。
+
+    本样本刻意把缩进写进 PDF 源（`drawString` 的 x 起点 + 前导空格），但 S1 的
+    pdfplumber `extract_text_lines()` 会剥掉行首空白，故**现行产物是无缩进的等宽行**
+    ——这正是批次②实测登记的上游成因（见 12.7 的新增行），不是样本造错了。
+    """
+    path = GOLDEN_DIR / "codeindent_1p.pdf"
+    if should_skip(path):
+        print(f"  ⊘ {path.name} 已存在，跳过")
+        return
+
+    print(f"  → 生成 {path.name} ...")
+    c = canvas.Canvas(str(path), pagesize=A4)
+    _, height = A4
+
+    left = 2 * cm
+    body = [
+        ("第一章 代码缩进与围栏等价性样本", 15),
+        ("本样本用于验证验收门对代码块缩进、围栏完整性与列表标记三类漂移的敏感度口径。"
+         "正文以众数字号排版，代码块用等宽字体，二者字号相同，避免字号信号干扰判定。"
+         "下面先给一段显式围栏块，紧接一段只靠字体信号起块的无围栏等宽块。", 10),
+    ]
+    y = height - 3 * cm
+    for text, size in body:
+        c.setFont(FONT_REGULAR, size)
+        c.drawString(left, y, text)
+        y -= 0.7 * cm
+
+    # 两段代码块连续排布：围栏块收尾后 `para_buf` 为空，紧随的等宽行才按 `Line.mono`
+    # 起块（若中间插一行正文，等宽块会被吞进段落——那是另一条口径，不在本样本内）。
+    c.setFont("Courier", 10)
+    for text, dx in [("```python", 0),
+                     ("def indent_probe(x):", 0),
+                     ("    if x:", 40),
+                     ("        return 1", 80),
+                     ("    return 0", 40),
+                     ("```", 0),
+                     ("for i in range(3):", 0),
+                     ("    print(i)", 40)]:
+        c.drawString(left + dx, y, text)
+        y -= 0.55 * cm
+
+    c.setFont(FONT_REGULAR, 10)
+    tail = [
+        "- 甲项：等价性门的缩进用例锚点",
+        "- 乙项：符号标记可被合成为星号标记",
+        "结尾段落继续以众数字号补足正文规模，使单处字符漂移相对整篇的分母足够小，"
+        "从而把「口径是否收紧」而不是「样本是否太短」变成唯一变量。",
+        "第二段正文继续补足分母：验收门比较的是两份产物的字符级匹配量，语料越长，"
+        "内容级漂移的相对降幅越小，纯空白级漂移在新旧口径下的差异越能对照出来。",
+    ]
+    for text in tail:
+        c.drawString(left, y, text)
+        y -= 0.7 * cm
+
+    c.showPage()
+    c.save()
+    print_product(path, "代码块缩进 / 围栏 / 列表标记漂移语料（R6-PIPE-2 端到端口径对照）")
+
+
+# ============================================================================
 # 7. names/malicious_names.json - 恶意文件名清单
 # ============================================================================
 def make_malicious_names():
@@ -1007,6 +1078,8 @@ def make_manifest():
             entry["description"] = "PDF 外部链接 + mailto"
         elif path.name == "numlist_1p.pdf":
             entry["description"] = "编号列表项字号==正文众数（R6-PIPE-1 端到端反例，含三类真标题对照）"
+        elif path.name == "codeindent_1p.pdf":
+            entry["description"] = "代码块缩进/围栏/列表标记漂移语料（R6-PIPE-2 等价门敏感度对照）"
         elif path.name == "malicious_names.json":
             entry["description"] = "恶意文件名测试清单"
         elif path.name == "bigfile.bin":
@@ -1037,7 +1110,7 @@ def self_check():
     pdf_files = [
         "large_320p.pdf", "small_3p.pdf", "badtail_scan.pdf",
         "badtail_front.pdf", "badtail_late.pdf", "links_pdf.pdf",
-        "numlist_1p.pdf"
+        "numlist_1p.pdf", "codeindent_1p.pdf"
     ]
     for pdf_name in pdf_files:
         path = GOLDEN_DIR / pdf_name
@@ -1264,36 +1337,39 @@ def main():
     GOLDEN_DIR.mkdir(parents=True, exist_ok=True)
 
     # 生成所有样本
-    print("1/10  large_320p.pdf ...")
+    print("1/11  large_320p.pdf ...")
     make_large_320p()
 
-    print("\n2/10  small_3p.pdf ...")
+    print("\n2/11  small_3p.pdf ...")
     make_small_3p()
 
-    print("\n3/10  badtail 样本 ...")
+    print("\n3/11  badtail 样本 ...")
     make_badtail_scan()
     make_badtail_front()
     make_badtail_late()
 
-    print("\n4/10  injected/ & clean/ ...")
+    print("\n4/11  injected/ & clean/ ...")
     make_injection_samples()
 
-    print("\n5/10  docx/ ...")
+    print("\n5/11  docx/ ...")
     make_docx_samples()
 
-    print("\n6/10  links_pdf.pdf ...")
+    print("\n6/11  links_pdf.pdf ...")
     make_links_pdf()
 
-    print("\n7/10  numlist_1p.pdf ...")
+    print("\n7/11  numlist_1p.pdf ...")
     make_numlist_pdf()
 
-    print("\n8/10  names/malicious_names.json ...")
+    print("\n8/11  codeindent_1p.pdf ...")
+    make_codeindent_pdf()
+
+    print("\n9/11  names/malicious_names.json ...")
     make_malicious_names()
 
-    print("\n9/10  dirs/ ...")
+    print("\n10/11  dirs/ ...")
     make_dirs()
 
-    print("\n10/10  bigfile.bin ...")
+    print("\n11/11  bigfile.bin ...")
     make_bigfile()
 
     # 生成 MANIFEST
