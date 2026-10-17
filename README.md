@@ -141,7 +141,7 @@ rename 轮转只能有一个属主，三类进程三份文件。
 | `ops/backup.md` | 备份介质与恢复演练细则 |
 | `ops/windows/install-doc2md-tasks.ps1` | Windows 任务计划安装 / 校验 / 卸载（与 launchd 同等能力） |
 
-跟踪约定：契约变更、缺陷、更优做法一律按登记流写入方案 第十一章（当前编号至 `CH-476`，下一条自 `CH-477`），实测数字进第十二章并标注语料与测量方法；规格发生变化时同步主题篇章节与本文相应小节，并递增 `doc2md.PLAN_VERSION`（管线契约变化另递增 `PIPELINE_VERSION`；状态库结构变化另递增 `DB_VERSION`，CH-469 起为 `5`、CH-476 起为 `6`）。
+跟踪约定：契约变更、缺陷、更优做法一律按登记流写入方案 第十一章（当前编号至 `CH-477`，下一条自 `CH-478`），实测数字进第十二章并标注语料与测量方法；规格发生变化时同步主题篇章节与本文相应小节，并递增 `doc2md.PLAN_VERSION`（管线契约变化另递增 `PIPELINE_VERSION`；状态库结构变化另递增 `DB_VERSION`，CH-469 起为 `5`、CH-476 起为 `6`）。
 
 ## 验收与测试
 
@@ -161,9 +161,9 @@ rename 轮转只能有一个属主，三类进程三份文件。
 > 也成立，需为 `main` 打开「Require a pull request before merging」，那是改变日常工作流的决策项。
 
 ```bash
-pytest -m gate            # 红线层：六条 merge-gate + 低配机专项 + CH-469 两批安全/契约专项 + CH-473 第五轮 12 项 + CH-475 第六轮 7 项 + CH-476 第七轮 91 项（全绿方可合并）
-                          # 当前 244 项 = 153（本轮起点：40 契约红线 + 29 低配机 + 10 服务/存储 + 54 安全/配置/运维 + 13（CH-473 12 项 + CH-474 补入 X-17 1 项）+ 7（CH-475 第六轮））+ 91（CH-476：test_ch476_fixes.py 83 + test_sharding_unit.py 8）
-                          # 耗时历史记录：Linux 沙箱轮次 72–110s、T8 优化后 53.0s、CH-469 本机（macOS arm64 / Py 3.15）28.7s、CH-473 62.7s、CH-475 30.0s、CH-476 33.9s——项数是硬口径，耗时只作历史
+pytest -m gate            # 红线层：六条 merge-gate + 低配机专项 + CH-469 两批安全/契约专项 + CH-473 第五轮 12 项 + CH-475 第六轮 7 项 + CH-476 第七轮 91 项 + CH-477 版本对账 4 项（全绿方可合并）
+                          # 当前 248 项 = 244（上一轮口径：40 契约红线 + 29 低配机 + 10 服务/存储 + 54 安全/配置/运维 + 13（CH-473 12 项 + CH-474 补入 X-17 1 项）+ 7（CH-475 第六轮）+ 91（CH-476：test_ch476_fixes.py 83 + test_sharding_unit.py 8））+ 4（CH-477 版本与编号对账）
+                          # 耗时历史记录：Linux 沙箱轮次 72–110s、T8 优化后 53.0s、CH-469 本机（macOS arm64 / Py 3.15）28.7s、CH-473 62.7s、CH-475 30.0s、CH-476 33.9s、CH-477 33.25s / 31.98s——项数是硬口径，耗时只作历史
 pytest tests/             # 全量（marker 实际取值：M0+M2 / M3 / M5 / M6c / M8 / M9a / DoD / PERF，见 pytest.ini）
 python3 tests/make_golden.py            # 重建黄金样本（输出目录随脚本位置，--golden 可覆盖）
 python3 tests/make_golden.py --force    # 强制重生成
