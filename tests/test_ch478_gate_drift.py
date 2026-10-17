@@ -7,16 +7,17 @@
 1. **行首缩进漂移**：CH-475 收紧前的口径（`_WS.sub("", ln)` 删尽全部空白）对这类漂移
    是**结构失明**——归一化后两份产物逐行相同，相似度精确等于 1.0，无论多少处缩进都
    不会有一丁点下降；收紧后同一对在本语料上得 0.973958，判红（门 = 0.99）。
-2. **内容级漂移**（围栏缺失 0.991914、`-`↔`*` 标记替换 0.994652）：收紧**不带来任何额外敏感度**，两种口径
+2. **内容级漂移**（围栏缺失 0.992327、`-`↔`*` 标记替换 0.994924）：收紧**不带来任何额外敏感度**，两种口径
    差值 < 0.001，且在本语料上**同判绿**。原登记把「列表标记替换」「围栏破损」也写成
    「旧口径失明、收紧后可见」是过度声明，这里钉成断言，防止后续再按那个口径立论。
 3. **0.99 是粗大漂移探测器，不是等值证明**：判红与否取决于漂移量相对语料的分母——四类
    漂移里本语料只有缩进一类过阈，逐字节等值仍由 12.2 的 sha 对照负责（本文件的行内空白
-   用例 0.997333 是「已脱盲但未判红」的第二个实例）。
+   用例 0.997468 是「已脱盲但未判红」的第二个实例）。
 
-另附一条本轮实测的上游事实（红线）：同一页里 `Line.x0` 带着三级缩进（56.7 / 120.7 / 184.7），
-而 `Line.text` 的行首空白被 pdfplumber 的 `extract_text_lines()` 剥掉了——代码块缩进在 S1
-就丢失，两个版本的产物同样都没有缩进，等价门在这条路径上「无漂移可看」。
+另附一条实测的上游事实（红线）：同一页里 `Line.x0` 带着三级缩进（56.7 / 80.7 / 104.7），
+而 `Line.text` 的行首空白被 pdfplumber 的 `extract_text_lines()` 剥掉了——代码块缩进在
+S1 的文本层丢失，只能由 CH-482 的几何重建找回；本文件的漂移对照把重建后的缩进再去掉，
+模拟「旧产物 / 排版漂移」的另一侧。
 """
 
 from __future__ import annotations
@@ -32,15 +33,15 @@ pytestmark = [pytest.mark.milestone("DoD")]
 
 GATE = 0.99                       # 方案 4.7 / G1 的等价阈值
 
-# 产物里应当带缩进的代码行 → 缩进级（每级 4 空格）。键取自真实 IR 的 `code` 块文本，
-# 命中数不足即说明样本或渲染形状变了，测试先红再让人复核，不放行静默失效。
-_INDENT_LEVEL = {
+# 产物里代码行的规范缩进（空格数）。CH-482 起产物自带按几何重建的缩进，漂移样本
+# 由它逐行去掉缩进得到；命中数不足即说明样本或重建口径变了，先红再让人复核。
+_CANONICAL_INDENT = {
     "def indent_probe(x):": 0,
-    "if x:": 1,
-    "return 1": 2,
-    "return 0": 1,
+    "if x:": 4,
+    "return 1": 8,
+    "return 0": 4,
     "for i in range(3):": 0,
-    "print(i)": 1,
+    "print(i)": 4,
 }
 
 
@@ -86,18 +87,25 @@ def product(golden_dir) -> str:
     return convert(golden_dir / "codeindent_1p.pdf").markdown
 
 
-def _with_indent(md: str) -> str:
-    """按 `_INDENT_LEVEL` 给代码行补回行首缩进（= 缩进漂移的另一侧产物）。"""
+def _deindent(md: str) -> str:
+    """去掉代码行的规范缩进（= 缩进漂移的另一侧产物：旧产物 / 顶格排版）。
+
+    同时校验产物自身带的就是重建后的规范缩进——若重建失效（全部顶格），这里的
+    `ln == " "*level + stripped` 断言先红，而不是静默把漂移样本变成原样。
+    """
     hit = 0
     out: list[str] = []
     for ln in md.splitlines():
-        level = _INDENT_LEVEL.get(ln)
+        stripped = ln.lstrip()
+        level = _CANONICAL_INDENT.get(stripped)
         if level is None:
             out.append(ln)
         else:
             hit += 1
-            out.append("    " * level + ln)
-    assert hit == len(_INDENT_LEVEL), f"缩进锚点只命中 {hit}/{len(_INDENT_LEVEL)} 行，产物形状已变"
+            assert ln == " " * level + stripped, (
+                f"规范缩进漂移：{ln!r} 期望 {level} 个前导空格")
+            out.append(stripped)
+    assert hit == len(_CANONICAL_INDENT), f"缩进锚点只命中 {hit}/{len(_CANONICAL_INDENT)} 行，产物形状已变"
     return "\n".join(out)
 
 
@@ -126,11 +134,11 @@ def _inline_space(md: str) -> str:
 @pytest.mark.gate
 def test_indent_drift_turns_the_gate_red_and_legacy_is_exactly_blind(product):
     """缩进漂移：收紧后的门判红，收紧前的口径精确等于 1.0（结构失明）。"""
-    indented = _with_indent(product)
-    assert norm_lines(product) != norm_lines(indented), "新口径对行首缩进仍失明"
-    assert char_similarity(product, indented) < GATE, (
-        f"缩进漂移未判红：{char_similarity(product, indented)}")
-    assert _similarity(_legacy_norm_lines, product, indented) == 1.0, (
+    deindented = _deindent(product)
+    assert norm_lines(product) != norm_lines(deindented), "新口径对行首缩进仍失明"
+    assert char_similarity(product, deindented) < GATE, (
+        f"缩进漂移未判红：{char_similarity(product, deindented)}")
+    assert _similarity(_legacy_norm_lines, product, deindented) == 1.0, (
         "旧口径不再是精确失明——本文件的对照基线要重判")
 
 
@@ -150,11 +158,10 @@ def test_content_drift_gains_no_extra_sensitivity_from_the_tightening(product):
 
 @pytest.mark.gate
 def test_s1_extraction_drops_the_leading_indent_that_geometry_still_carries(golden_dir):
-    """上游成因（本轮实测）：`Line.x0` 有三级缩进，`Line.text` 的行首空白已被剥光。
+    """上游事实（CH-478 实测，CH-482 复核）：`Line.x0` 有三级缩进，`Line.text` 的行首空白已被剥光。
 
-    断言只落在 S1 抽取层（不依赖 S3 是否日后按 x0 重建缩进），因此批次③ 若实现
-    「按 x0 重建代码缩进」本条照旧成立——门看不到缩进漂移的原因是产物两侧都无缩进，
-    而不是门本身不敏感。
+    断言只落在 S1 抽取层：CH-482 在 S3 按 x0 重建缩进后，抽取层的文本仍是顶格的
+    ——若哪天 pdfplumber 开始保留前导空白，S1 与 S3 就会双重缩进，本条先红提醒重判。
     """
     from doc2md.pipeline.s1_parse import read_any
 
@@ -170,7 +177,7 @@ def test_s1_extraction_drops_the_leading_indent_that_geometry_still_carries(gold
 @pytest.mark.gate
 def test_reference_similarity_stays_in_sync_with_the_product_gate(product):
     """参照实现与产品实现必须同值，否则上面的旧/新对照数字随时会失真。"""
-    drifted = _with_indent(product)
+    drifted = _deindent(product)
     assert _similarity(norm_lines, product, drifted) == char_similarity(product, drifted)
 
 

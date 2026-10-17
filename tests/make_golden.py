@@ -502,7 +502,7 @@ def freeze_docx(path: Path) -> None:
 
 
 def make_docx_samples():
-    """生成 4 个 DOCX 样本"""
+    """生成 5 个 DOCX 样本"""
     docx_dir = GOLDEN_DIR / "docx"
     docx_dir.mkdir(exist_ok=True)
 
@@ -655,7 +655,28 @@ def make_docx_samples():
         doc.save(notes_path)
         print_product(notes_path, "DOCX 脚注/尾注 + 单元格多段落")
 
-    for f in (simple_path, links_path, rev_path, notes_path):
+    # sample_code.docx - 等宽代码段的前导空白（CH-482）
+    # DOCX 没有 x0 几何可供重建，行首空格 / `w:tab` 必须由 S1 原样保留；本样本的
+    # 首行无缩进（确保按 Line.mono 起块），后续行给出 tab 与空格两种形态，钉住
+    # 「等宽段前导空白是内容」这一口径。首个段落用标题，保证 mono 行到达 S3 时
+    # para_buf 为空（DOCX 空段落不进 Line 序列，不能靠它冲刷段缓冲）。
+    code_path = docx_dir / "sample_code.docx"
+    if not should_skip(code_path):
+        print(f"  → 生成 {code_path.name} ...")
+        from docx.shared import Pt
+
+        doc = Document()
+        doc.add_heading("代码缩进测试文档", level=1)
+        for text in ("def g(x):", "\tif x:", "\t\treturn 1", "    return 0"):
+            p = doc.add_paragraph()
+            r = p.add_run(text)
+            r.font.name = "Consolas"
+            r.font.size = Pt(10)
+        doc.add_paragraph("代码段结束，后接普通正文以关闭等宽块。")
+        doc.save(code_path)
+        print_product(code_path, "DOCX 等宽段前导空白（tab / 空格）")
+
+    for f in (simple_path, links_path, rev_path, notes_path, code_path):
         if f.exists():
             freeze_docx(f)
 
@@ -831,9 +852,11 @@ def make_codeindent_pdf():
       · 若干中文正文段，既确立众数字号，也把单处漂移摊到更大分母上——
         相似度是否掉到 0.99 以下取决于此，语料过小会让所有口径都判红、失去区分力。
 
-    本样本刻意把缩进写进 PDF 源（`drawString` 的 x 起点 + 前导空格），但 S1 的
-    pdfplumber `extract_text_lines()` 会剥掉行首空白，故**现行产物是无缩进的等宽行**
-    ——这正是批次②实测登记的上游成因（见 12.7 的新增行），不是样本造错了。
+    CH-482：S1 的 pdfplumber 抽取会剥掉行首空白，缩进只能由 `Line.x0` 重建；
+    故本样本把缩进**只写进 x 起点**（4 空格 = 24pt，Courier 10pt），不写前导空格
+    ——旧版同时写前导空格与 dx=40/80，视觉缩进是 1.4 级的非整数倍，量化容差
+    正确地拒绝猜测（那正是「几何不可信宁可不缩」的口径）。重建后的产物由
+    `tests/test_ch482_indent_rebuild.py` 与 `test_ch478_gate_drift.py` 双向钉住。
     """
     path = GOLDEN_DIR / "codeindent_1p.pdf"
     if should_skip(path):
@@ -859,15 +882,16 @@ def make_codeindent_pdf():
 
     # 两段代码块连续排布：围栏块收尾后 `para_buf` 为空，紧随的等宽行才按 `Line.mono`
     # 起块（若中间插一行正文，等宽块会被吞进段落——那是另一条口径，不在本样本内）。
+    # CH-482：缩进仅由 dx 表达（一级 24pt = 4 空格 × Courier 6pt），文本不带前导空格。
     c.setFont("Courier", 10)
     for text, dx in [("```python", 0),
                      ("def indent_probe(x):", 0),
-                     ("    if x:", 40),
-                     ("        return 1", 80),
-                     ("    return 0", 40),
+                     ("if x:", 24),
+                     ("return 1", 48),
+                     ("return 0", 24),
                      ("```", 0),
                      ("for i in range(3):", 0),
-                     ("    print(i)", 40)]:
+                     ("print(i)", 24)]:
         c.drawString(left + dx, y, text)
         y -= 0.55 * cm
 
@@ -887,6 +911,137 @@ def make_codeindent_pdf():
     c.showPage()
     c.save()
     print_product(path, "代码块缩进 / 围栏 / 列表标记漂移语料（R6-PIPE-2 端到端口径对照）")
+
+
+def make_codeindent_multi_pdf():
+    """CH-482：多档缩进 / 量化容差 / 右栏噪声语料（单页，众数字号 10）。
+
+    与 `codeindent_1p.pdf` 的干净三等分几何对照，本样本专钉重建口径的**容错边界**
+    （Courier 10pt，4 空格 = 24pt）：
+      · 围栏块内 0 / 24 / 48pt 三级 → 0 / 4 / 8 空格；
+      · +7.2pt 抖动行（0.3 级）→ 残差超容差，不缩进（宁漏勿误）；
+      · +29pt 偏差行（1.208 级，残差 0.208 级）→ 仍判 1 级；
+      · +400pt 远右行（16.7 级）→ 超上限，不缩进（多栏并排的右栏不得被当深缩进）；
+      · 无围栏等宽块同样给三级几何，验证 mono 模式与 fence 模式同口径。
+    正文段落补足分母，并满足生成器自检的汉字数下限。
+    """
+    path = GOLDEN_DIR / "codeindent_multi_1p.pdf"
+    if should_skip(path):
+        print(f"  ⊘ {path.name} 已存在，跳过")
+        return
+
+    print(f"  → 生成 {path.name} ...")
+    c = canvas.Canvas(str(path), pagesize=A4)
+    _, height = A4
+    left = 2 * cm
+
+    y = height - 3 * cm
+    c.setFont(FONT_REGULAR, 15)
+    c.drawString(left, y, "第二章 代码缩进重建的容错边界样本")
+    y -= 0.9 * cm
+    c.setFont(FONT_REGULAR, 10)
+    for text in (
+        "本样本用等宽字体的几何位置表达多档缩进，并故意混入三类不可信几何："
+        "非整数倍的抖动、接近整数倍的偏差、以及远右栏位置。重建器必须只接住"
+        "可信的整数倍缩进，其余一律保持原样——代码内容宁可少缩，不能被猜错。",
+        "正文段落同时确立众数字号并补足分母：缩进重建发生在结构层，与正文规模无关，"
+        "但等价性门的对照需要足够的字符量才能把单处缩进漂移的相对降幅显示出来。",
+    ):
+        c.drawString(left, y, text)
+        y -= 0.7 * cm
+
+    c.setFont("Courier", 10)
+    fence_lines = [
+        ("```python", 0),
+        ("def outer():", 0),
+        ("if ready:", 24),
+        ("return 1", 48),
+        ("return 0", 24),
+        ("jitter_probe = True", 7.2),      # 0.3 级：残差超容差 → 不缩进
+        ("snap_probe = True", 29),         # 1.208 级：残差 0.208 → 判 1 级
+        ("right_column = 2", 400),         # 16.7 级：超上限 → 不缩进
+        ("```", 0),
+    ]
+    for text, dx in fence_lines:
+        c.drawString(left + dx, y, text)
+        y -= 0.55 * cm
+
+    # 围栏块后 `para_buf` 为空，紧随的等宽行按 `Line.mono` 起块（同 codeindent_1p）。
+    for text, dx in [("for i in range(3):", 0),
+                     ("print(i)", 24),
+                     ("log(i)", 48)]:
+        c.drawString(left + dx, y, text)
+        y -= 0.55 * cm
+
+    c.setFont(FONT_REGULAR, 10)
+    for text in (
+        "等宽块结束后的正文用于关闭等宽段，同时把页面汉字规模补到自检下限以上。"
+        "多档缩进、抖动行、偏差行与远右行四类几何各司其职，缺一类就会让容错口径失守。",
+    ):
+        c.drawString(left, y, text)
+        y -= 0.7 * cm
+
+    c.showPage()
+    c.save()
+    print_product(path, "代码缩进重建容错边界（多档 / 抖动 / 偏差 / 远右）")
+
+
+def make_codeindent_table_pdf():
+    """CH-482：表格内代码语料（单页，众数字号 10）。
+
+    钉住「表格优先」口径：同一行里左列是中文标签、右列是等宽代码时，该行是
+    **表格行**而不是代码块——列偏移不得被缩进重建器当成缩进（右列比左列远
+    200pt，若误走代码块路径会被量化成几十级）。单元格文本按表格口径 strip，
+    代码缩进在单元格内不保留，这是既有表格模型的边界，本样本把它钉成事实。
+    """
+    path = GOLDEN_DIR / "codeindent_table_1p.pdf"
+    if should_skip(path):
+        print(f"  ⊘ {path.name} 已存在，跳过")
+        return
+
+    print(f"  → 生成 {path.name} ...")
+    c = canvas.Canvas(str(path), pagesize=A4)
+    _, height = A4
+    left = 2 * cm
+    code_x = left + 200
+
+    y = height - 3 * cm
+    c.setFont(FONT_REGULAR, 15)
+    c.drawString(left, y, "第三章 表格内代码样本")
+    y -= 0.9 * cm
+    c.setFont(FONT_REGULAR, 10)
+    for text in (
+        "本样本把等宽代码放进表格右列，验证结构层先判表格、再判代码："
+        "左列标签与右列代码的横向距离是列偏移，不是代码缩进。"
+        "若把右列位置误当缩进，代码会凭空多出几十级缩进，正文即被污染。",
+        "表格三行都保持两列结构，行尾不含句末标点，确保按表格成组而不是逐行退回段落。"
+        "正文段落同时补足页面字符规模与自检汉字数，避免样本过短导致门禁失去区分力。",
+    ):
+        c.drawString(left, y, text)
+        y -= 0.7 * cm
+
+    rows = [("名称", "代码"), ("循环", "print(i)"), ("缩进", "log(i)")]
+    start_y = y
+    for i, (label, code) in enumerate(rows):
+        ry = start_y - i * 0.8 * cm
+        c.setFont(FONT_REGULAR, 10)
+        c.drawString(left, ry, label)
+        # 表头也是中文，必须用 CJK 字体；Courier 缺中文字形会把「代码」抽成占位符。
+        c.setFont(FONT_REGULAR if i == 0 else "Courier", 10)
+        c.drawString(code_x, ry, code)
+    y = start_y - len(rows) * 0.8 * cm
+
+    c.setFont(FONT_REGULAR, 10)
+    for text in (
+        "表格之后的段落用于关闭任何可能残留的行组缓冲，同时补足正文规模。"
+        "表格内代码按单元格内容处理，不进入代码块分支，也不参与行首缩进重建。",
+    ):
+        c.drawString(left, y, text)
+        y -= 0.7 * cm
+
+    c.showPage()
+    c.save()
+    print_product(path, "表格内代码（先判表格、列偏移不得当缩进）")
 
 
 # ============================================================================
@@ -1074,12 +1229,18 @@ def make_manifest():
             entry["description"] = "DOCX 修订测试（真实 w:ins/w:del 痕迹）"
         elif path.name == "sample_notes.docx":
             entry["description"] = "DOCX 脚注/尾注 part + 单元格内多段落"
+        elif path.name == "sample_code.docx":
+            entry["description"] = "DOCX 等宽段前导空白（tab / 空格，CH-482）"
         elif path.name == "links_pdf.pdf":
             entry["description"] = "PDF 外部链接 + mailto"
         elif path.name == "numlist_1p.pdf":
             entry["description"] = "编号列表项字号==正文众数（R6-PIPE-1 端到端反例，含三类真标题对照）"
         elif path.name == "codeindent_1p.pdf":
             entry["description"] = "代码块缩进/围栏/列表标记漂移语料（R6-PIPE-2 等价门敏感度对照）"
+        elif path.name == "codeindent_multi_1p.pdf":
+            entry["description"] = "代码缩进重建容错边界（多档 / 抖动 / 偏差 / 远右，CH-482）"
+        elif path.name == "codeindent_table_1p.pdf":
+            entry["description"] = "表格内代码（先判表格、列偏移不得当缩进，CH-482）"
         elif path.name == "malicious_names.json":
             entry["description"] = "恶意文件名测试清单"
         elif path.name == "bigfile.bin":
@@ -1110,7 +1271,8 @@ def self_check():
     pdf_files = [
         "large_320p.pdf", "small_3p.pdf", "badtail_scan.pdf",
         "badtail_front.pdf", "badtail_late.pdf", "links_pdf.pdf",
-        "numlist_1p.pdf", "codeindent_1p.pdf"
+        "numlist_1p.pdf", "codeindent_1p.pdf", "codeindent_multi_1p.pdf",
+        "codeindent_table_1p.pdf"
     ]
     for pdf_name in pdf_files:
         path = GOLDEN_DIR / pdf_name
@@ -1360,8 +1522,10 @@ def main():
     print("\n7/11  numlist_1p.pdf ...")
     make_numlist_pdf()
 
-    print("\n8/11  codeindent_1p.pdf ...")
+    print("\n8/11  codeindent 样本 ...")
     make_codeindent_pdf()
+    make_codeindent_multi_pdf()
+    make_codeindent_table_pdf()
 
     print("\n9/11  names/malicious_names.json ...")
     make_malicious_names()

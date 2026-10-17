@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "doc2md"
-version = "2.4.0"
+version = "2.5.0"
 description = "文本型 PDF / DOCX → Markdown 离线转换管线（Doc2md）"
 license = "MIT"
 classifiers = [

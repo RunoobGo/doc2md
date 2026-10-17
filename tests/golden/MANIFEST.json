@@ -99,10 +99,24 @@
   },
   {
     "path": "codeindent_1p.pdf",
-    "sha256": "eb4f525402f077bb1dc4c5cb78f2cc11e6632d9c0cdb1055c3c79b58fd966349",
-    "bytes": 3521,
+    "sha256": "7d73afd70d08d02aa331ed87094cc886b185e084f719979476bc39e24be866c9",
+    "bytes": 3516,
     "pages": 1,
     "description": "代码块缩进/围栏/列表标记漂移语料（R6-PIPE-2 等价门敏感度对照）"
+  },
+  {
+    "path": "codeindent_multi_1p.pdf",
+    "sha256": "b353a4d768405ba7fcf1adc28b02eda9c714bfd4299d2d4d233ed6426d93d167",
+    "bytes": 3536,
+    "pages": 1,
+    "description": "代码缩进重建容错边界（多档 / 抖动 / 偏差 / 远右，CH-482）"
+  },
+  {
+    "path": "codeindent_table_1p.pdf",
+    "sha256": "bb69c15a8c4b628922fb9c78c9b3f5a8a307b3bcd396a68d7c8ea1dc6b8e67e2",
+    "bytes": 3285,
+    "pages": 1,
+    "description": "表格内代码（先判表格、列偏移不得当缩进，CH-482）"
   },
   {
     "path": "dirs/deep/level_01/level_02/level_03/level_04/level_05/level_06/level_07/level_08/level_09/level_10/level_11/level_12/level_13/level_14/level_15/level_16/level_17/level_18/level_19/level_20/level_21/level_22/level_23/level_24/level_25/leaf.txt",
@@ -35824,6 +35838,13 @@
     "bytes": 1,
     "pages": null,
     "description": "目录结构样本: dirs/many/file_5099"
+  },
+  {
+    "path": "docx/sample_code.docx",
+    "sha256": "a9aae100400fcb4797475b3d963906fd9c3969b9dceb02b6dfd41b256a29d215",
+    "bytes": 36818,
+    "pages": null,
+    "description": "DOCX 等宽段前导空白（tab / 空格，CH-482）"
   },
   {
     "path": "docx/sample_links.docx",

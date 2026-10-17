@@ -177,7 +177,7 @@ Windows 任务计划不捕获标准输出，日志目录里没有 `launchd-*` �
 | `ops/backup.md` | 备份介质与恢复演练细则 |
 | `ops/windows/install-doc2md-tasks.ps1` | Windows 任务计划安装 / 校验 / 卸载（与 launchd 同等能力） |
 
-跟踪约定：契约变更、缺陷、更优做法一律按登记流写入方案 第十一章（当前编号至 `CH-481`，下一条自 `CH-482`），实测数字进第十二章并标注语料与测量方法；规格发生变化时同步主题篇章节与本文相应小节，并递增 `doc2md.PLAN_VERSION`（管线契约变化另递增 `PIPELINE_VERSION`；状态库结构变化另递增 `DB_VERSION`，CH-469 起为 `5`、CH-476 起为 `6`）。
+跟踪约定：契约变更、缺陷、更优做法一律按登记流写入方案 第十一章（当前编号至 `CH-482`，下一条自 `CH-483`），实测数字进第十二章并标注语料与测量方法；规格发生变化时同步主题篇章节与本文相应小节，并递增 `doc2md.PLAN_VERSION`（管线契约变化另递增 `PIPELINE_VERSION`；状态库结构变化另递增 `DB_VERSION`，CH-469 起为 `5`、CH-476 起为 `6`）。
 
 ## 验收与测试
 
@@ -192,11 +192,11 @@ Windows 任务计划不捕获标准输出，日志目录里没有 `launchd-*` �
 
 跨版本覆盖分两套工作流（CH-479）：上面的 `ci.yml` 是 **push 面**，`full-suite` 只在 `3.12` 单档跑一次
 （红线层本就是三档矩阵，把全量也扩成三档会让每次推送多两条 30 分钟腿，而覆盖增量只落在非红线的
-551 项用例上，CH-480 后为 560、CH-481 后为 563 项）；**周期面** `.github/workflows/ci-full-matrix.yml` 每周一 02:17 UTC（另有
+551 项用例上，CH-480 后为 560、CH-481 后为 563、CH-482 后为 567 项）；**周期面** `.github/workflows/ci-full-matrix.yml` 每周一 02:17 UTC（另有
 `workflow_dispatch` 供取证）用 3.11/3.12/3.13 三档跑全量 + 黄金逐字节复现 + `doctor`，补上这些非红线项的
 跨版本空白。这个分工由 `tests/test_ch479_ci_matrix.py` 的四条红线钉住：两工作流的版本集合必须相等、
 push 面 `full-suite` 必须保持无矩阵且钉死 `3.12`、每个作业必须带 `timeout-minutes`、周期腿不得挂
-`push`/`pull_request` 触发。周期腿首证 = run `39032817663`（手动 `workflow_dispatch`，三档各 `811 passed`，含黄金逐字节复现与 `doctor` 自检），push 面 = run `39032796293`（三档各 `260 passed, 551 deselected` + `811 passed` 全量）；最新一轮（CH-481）push 面 = run `39041920410`（三档各 `275 passed, 563 deselected`，全量 `838 passed` 干净退出）。
+`push`/`pull_request` 触发。周期腿首证 = run `39032817663`（手动 `workflow_dispatch`，三档各 `811 passed`，含黄金逐字节复现与 `doctor` 自检），push 面 = run `39032796293`（三档各 `260 passed, 551 deselected` + `811 passed` 全量）；上一轮（CH-481）push 面 = run `39041920410`（三档各 `275 passed, 563 deselected`，全量 `838 passed` 干净退出）；最新一轮（CH-482）的本机口径为 gate `285` / 全量 `852`，push 面证据待回填。
 > 现状（CH-468 起）：仓库已公开，`main` 分支保护已配置——`merge-gate (3.11/3.12/3.13)` 为**必需检查**，
 > 三个 gate 任一失败即禁止合并（`full-suite` 因 `needs` 同样被阻断）。验收：故意失败的 PR #1 被
 > `mergeStateStatus=BLOCKED` 拦下。另有本地 pre-push 钩子双保险（见「本地红线兜底」）。
@@ -205,9 +205,9 @@ push 面 `full-suite` 必须保持无矩阵且钉死 `3.12`、每个作业必须
 > 也成立，需为 `main` 打开「Require a pull request before merging」，那是改变日常工作流的决策项。
 
 ```bash
-pytest -m gate            # 红线层：六条 merge-gate + 低配机专项 + CH-469 两批安全/契约专项 + CH-473 第五轮 12 项 + CH-475 第六轮 7 项 + CH-476 第七轮 91 项 + CH-477 版本对账 4 项 + CH-478 批次① 有序列表端到端 4 项 + 批次② 等价门缩进敏感度 4 项 + CH-479 CI 版本矩阵口径 4 项 + CH-480 常驻资产同构 7 项 + CH-481 捕获档截断 8 项（全绿方可合并）
-                          # 当前 275 项 = 267（上一轮口径：40 契约红线 + 29 低配机 + 10 服务/存储 + 54 安全/配置/运维 + 13（CH-473 12 项 + CH-474 补入 X-17 1 项）+ 7（CH-475 第六轮）+ 91（CH-476：test_ch476_fixes.py 83 + test_sharding_unit.py 8）+ 4（CH-477 版本与编号对账）+ 4（CH-478 批次①：test_ch478_fixes.py 端到端反例）+ 4（CH-478 批次②：test_ch478_gate_drift.py 度量对照）+ 4（CH-479：test_ch479_ci_matrix.py 工作流文本静态断言）+ 7（CH-480：test_ch480_resident_assets.py 常驻 plist/schtasks 资产的静态同构断言））+ 8（CH-481：test_ch481_capture_clip.py 捕获档就地截断与 cron 接线）
-                          # 耗时历史记录：Linux 沙箱轮次 72–110s、T8 优化后 53.0s、CH-469 本机（macOS arm64 / Py 3.15）28.7s、CH-473 62.7s、CH-475 30.0s、CH-476 33.9s、CH-477 33.25s / 31.98s、CH-478 批次① 31.54s、批次② 31.16s、CH-479 38.55s / 收口复跑 33.74s、CH-480 36.13s / 收口复跑 35.43s（新七条红线只做 plistlib 解析与 XML 读 DOM，差值属同机负载抖动）、CH-481 36.14s / 34.92s / 35.91s——项数是硬口径，耗时只作历史
+pytest -m gate            # 红线层：六条 merge-gate + 低配机专项 + CH-469 两批安全/契约专项 + CH-473 第五轮 12 项 + CH-475 第六轮 7 项 + CH-476 第七轮 91 项 + CH-477 版本对账 4 项 + CH-478 批次① 有序列表端到端 4 项 + 批次② 等价门缩进敏感度 4 项 + CH-479 CI 版本矩阵口径 4 项 + CH-480 常驻资产同构 7 项 + CH-481 捕获档截断 8 项 + CH-482 代码块缩进重建 10 项（全绿方可合并）
+                          # 当前 285 项 = 275（上一轮口径：267（更早口径：40 契约红线 + 29 低配机 + 10 服务/存储 + 54 安全/配置/运维 + 13（CH-473 12 项 + CH-474 补入 X-17 1 项）+ 7（CH-475 第六轮）+ 91（CH-476：test_ch476_fixes.py 83 + test_sharding_unit.py 8）+ 4（CH-477 版本与编号对账）+ 4（CH-478 批次①：test_ch478_fixes.py 端到端反例）+ 4（CH-478 批次②：test_ch478_gate_drift.py 度量对照）+ 4（CH-479：test_ch479_ci_matrix.py 工作流文本静态断言）+ 7（CH-480：test_ch480_resident_assets.py 常驻 plist/schtasks 资产的静态同构断言））+ 8（CH-481：test_ch481_capture_clip.py 捕获档就地截断与 cron 接线））+ 10（CH-482：test_ch482_indent_rebuild.py 代码块行首缩进按几何重建：PDF 围栏/等宽块 2 + 几何守卫 1 + S1 字宽 1 + DOCX 保空白 1 + 表格不误判 1 + mono 首行缩进 1 + indent 模式不二次缩进 1 + 无字宽回退 1 + 缓冲/两行守卫 1）
+                          # 耗时历史记录：Linux 沙箱轮次 72–110s、T8 优化后 53.0s、CH-469 本机（macOS arm64 / Py 3.15）28.7s、CH-473 62.7s、CH-475 30.0s、CH-476 33.9s、CH-477 33.25s / 31.98s、CH-478 批次① 31.54s、批次② 31.16s、CH-479 38.55s / 收口复跑 33.74s、CH-480 36.13s / 收口复跑 35.43s（新七条红线只做 plistlib 解析与 XML 读 DOM，差值属同机负载抖动）、CH-481 36.14s / 34.92s / 35.91s、CH-482 35.71s（`--junitxml` 35.36s）——项数是硬口径，耗时只作历史
 pytest tests/             # 全量（marker 实际取值：M0+M2 / M3 / M5 / M6c / M8 / M9a / DoD / PERF，见 pytest.ini）
 python3 tests/make_golden.py            # 重建黄金样本（输出目录随脚本位置，--golden 可覆盖）
 python3 tests/make_golden.py --force    # 强制重生成

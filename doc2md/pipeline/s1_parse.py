@@ -62,6 +62,9 @@ class Line:
     note_kind: str = ""                     # CH-476（R7-GAP-2）：该行来自 DOCX 注
                                             # （"footnote" / "endnote"），空串=正文
     x0: float = 0.0
+    char_w: float = 0.0                     # CH-482：等宽字符实测宽度（pt，非等宽行 0）
+                                            # ——x0 含行首空白，字宽不能由 (x1-x0)/len(text)
+                                            # 反推；S3 的缩进量化用它把 x0 差换算成空格级数
 
 
 @dataclass
@@ -174,7 +177,8 @@ def read_pdf(path: str | Path, page_span: tuple[int, int] | None = None,
                                       bold=st[1], italic=st[2], strike=st[3],
                                       mono=st[4],
                                       row=_row_cells(lchars),
-                                      x0=float(ln.get("x0", 0.0) or 0.0)))
+                                      x0=float(ln.get("x0", 0.0) or 0.0),
+                                      char_w=_char_width(lchars) if st[4] else 0.0))
                     geoms.append((top, bottom))
                 _attach_links(lines, geoms, page)
                 out.append(RawPage(index=i, lines=lines))
@@ -285,6 +289,26 @@ def _is_mono(c: dict) -> bool:
     return any(h in str(c.get("fontname", "")).lower() for h in _MONO_HINTS)
 
 
+def _char_width(chars: list[dict]) -> float:
+    """CH-482：行内字符宽度中位数（pt）。
+
+    `Line.x0` 是从**行首空白**起算的，`(x1-x0)/len(text)` 会把缩进空格摊进字宽
+    （空白已被 `extract_text_lines` 从 text 剥掉，但仍在 chars/几何里）。逐字符取宽
+    再取中位数不受行首空白影响；等宽字体下空格与可见字符同宽，故不区分空白。
+    """
+    widths = []
+    for c in chars:
+        if not (c.get("text") or ""):
+            continue
+        w = float(c.get("x1", 0.0) or 0.0) - float(c.get("x0", 0.0) or 0.0)
+        if w > 0:
+            widths.append(w)
+    if not widths:
+        return 0.0
+    widths.sort()
+    return widths[len(widths) // 2]
+
+
 def _row_cells(chars: list[dict]) -> list[str] | None:
     """CH-459（FR-104 表格）：行内字符按横向间隙聚类成单元格。
 
@@ -388,11 +412,11 @@ def _docx_para_line(p, d, rels=None, ctx: _DocxCtx | None = None) -> Line | None
     if rev:
         runs = _docx_all_runs(p)
         # `w:del` 里的文本是 `w:delText`，`Run.text` 本就不取 → 拼出来即「接受后」正文
-        text = "".join(r.text or "" for r in runs).strip()
+        raw_text = "".join(r.text or "" for r in runs)
     else:
         runs = p.runs
-        text = (p.text or "").strip()
-    if not text:
+        raw_text = p.text or ""
+    if not raw_text.strip():
         return None
     size = 0.0
     bold = italic = strike = mono = False
@@ -403,6 +427,9 @@ def _docx_para_line(p, d, rels=None, ctx: _DocxCtx | None = None) -> Line | None
         italic = italic or bool(r.italic)
         strike = strike or bool(r.font.strike)
         mono = mono or _name_is_mono(r.font.name)
+    # CH-482：等宽段的行首空白（空格 / `w:tab`）是代码内容，DOCX 没有 x0 几何可重建，
+    # 丢了就无从恢复——只对等宽行保留前导空白，散文行仍走 strip（原口径不变）。
+    text = raw_text.rstrip() if mono else raw_text.strip()
     style = _docx_style_name(el, d, ctx)
     level = None
     if style.lower().startswith("heading"):

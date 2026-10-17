@@ -51,6 +51,57 @@ _SENT_END = ("。", "！", "？", "；", ".", "!", "?", ";", "：", ":")
 _ROW_X0_TOL = 3.0
 _ROW_MIN = 2
 
+# CH-482：代码块行首缩进重建（S1 几何 → Markdown 的 4 空格一级）
+_CODE_INDENT_UNIT = 4       # Markdown 代码块一级缩进
+_CODE_INDENT_MAX = 8        # 32 空格；超出视为多栏/远右噪声，不猜
+_CODE_INDENT_SNAP = 0.25    # 量化残差容差（级）：与 4 空格整数倍不吻合的行保持原样
+
+
+def _rebuild_code_indent(buf: list[str], lines: list) -> list[str]:
+    """CH-482：按行几何重建代码块的行首缩进（仅 fence / mono 模式调用）。
+
+    抽取层（pdfplumber `extract_text_lines`）把行首空白从 `Line.text` 剥掉，但
+    `Line.x0` 仍带几何——代码缩进是内容不是装饰，不重建即丢失 Python/YAML 的
+    语法结构。做法：块内最小 x0 为基准，按实测等宽字宽 `char_w` 把 x0 差量化成
+    4 空格一级（`level = round(delta / (4*char_w))`）。
+
+    保守边界（宁漏勿误）：
+    - 残差超过 ±0.25 级 → 该行不缩进（2 空格缩进、扫描噪点、比例字体都落此）；
+    - 级数 > `_CODE_INDENT_MAX` → 不缩进（多栏并排的右栏、远右注释）；
+    - 少于两行带几何 / 无字宽可估 → 整块保持原样；
+    - DOCX 行 x0=0（无几何），文本已在 S1 保留空白，不经本函数。
+    `buf` 与 `lines` 由 S3 同步维护（含空行），长度不一致时按原样返回，不做猜测。
+    """
+    if len(buf) != len(lines):
+        return buf
+    pairs = [(i, t, ln) for i, (t, ln) in enumerate(zip(buf, lines))
+             if t.strip() and getattr(ln, "x0", 0.0) > 0]
+    if len(pairs) < 2:
+        return buf
+    widths = sorted(ln.char_w for _, _, ln in pairs
+                    if getattr(ln, "char_w", 0.0) > 0)
+    if widths:
+        char_w = widths[len(widths) // 2]
+    else:
+        sizes = sorted(ln.size for _, _, ln in pairs if ln.size > 0)
+        if not sizes:
+            return buf
+        char_w = 0.6 * sizes[len(sizes) // 2]
+    if char_w <= 0:
+        return buf
+    base = min(ln.x0 for _, _, ln in pairs)
+    unit = _CODE_INDENT_UNIT * char_w
+    rebuilt: dict[int, str] = {}
+    for i, t, ln in pairs:
+        raw = (ln.x0 - base) / unit
+        level = round(raw)
+        if level <= 0 or level > _CODE_INDENT_MAX or abs(raw - level) > _CODE_INDENT_SNAP:
+            continue
+        rebuilt[i] = " " * (_CODE_INDENT_UNIT * level) + t
+    if not rebuilt:
+        return buf
+    return [rebuilt.get(i, t) for i, t in enumerate(buf)]
+
 
 def _continuation_led(text: str) -> bool:
     t = (text or "").strip()
@@ -183,6 +234,10 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
     def emit_code(page: int) -> None:
         nonlocal code_buf, code_lines
         buf = list(code_buf or [])
+        if code_mode in ("fence", "mono"):
+            # CH-482：indent 模式在累积时已删去一级（Markdown 块标记），再按几何
+            # 重建会把块容器的缩进当成内容缩进又加回来（双重缩进）。
+            buf = _rebuild_code_indent(buf, code_lines)
         while buf and not buf[-1]:
             buf.pop()
         while buf and not buf[0]:
@@ -290,7 +345,10 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
                     code_lines.append(ln)
                     continue
             # --- 缩进代码（Markdown 语义：4 空格 / 制表符，仅空段起算）---
-            if (text.startswith("    ") or text.startswith("\t")) and not para_buf:
+            # CH-482：等宽行不走本分支——DOCX 等宽段的前导空白是内容（S1 已保留），
+            # 交给 mono 分支原样累积；indent 分支会删掉一级，等于改写代码内容。
+            if (text.startswith("    ") or text.startswith("\t")) \
+                    and not ln.mono and not para_buf:
                 flush_quote()
                 flush_rows(True)             # 行组被结构行终止：按事实判定
                 code_buf, code_mode = [re.sub(r"^(    |\t)", "", text)], "indent"

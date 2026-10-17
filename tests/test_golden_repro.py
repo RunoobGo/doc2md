@@ -33,8 +33,11 @@ def test_pdf_sample_is_byte_reproducible(tmp_path, gen):
         gen.make_small_3p()
         gen.make_numlist_pdf()
         gen.make_codeindent_pdf()
+        gen.make_codeindent_multi_pdf()
+        gen.make_codeindent_table_pdf()
         gen.GOLDEN_DIR = tmp_path
-    for name in ("small_3p.pdf", "numlist_1p.pdf", "codeindent_1p.pdf"):
+    for name in ("small_3p.pdf", "numlist_1p.pdf", "codeindent_1p.pdf",
+                 "codeindent_multi_1p.pdf", "codeindent_table_1p.pdf"):
         assert (first / name).read_bytes() == (second / name).read_bytes(), \
             f"{name} 不可复现（/CreationDate 或 /ID 未被固定）"
 
@@ -58,7 +61,7 @@ def test_docx_sample_is_byte_reproducible(tmp_path, gen):
         gen.make_docx_samples()
         dirs.append(d / "docx")
     for f in ("sample_simple.docx", "sample_links.docx", "sample_revisions.docx",
-              "sample_notes.docx"):
+              "sample_notes.docx", "sample_code.docx"):
         assert (dirs[0] / f).read_bytes() == (dirs[1] / f).read_bytes(), f"{f} 不可复现"
 
 
