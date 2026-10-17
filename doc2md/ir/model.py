@@ -2,7 +2,7 @@
 
 v2.4 增补字段（CH-419 / IR 约定 14）：
 - meta.source_name      安全名，可进 zip / front-matter
-- meta.source_name_raw  消毒前原始名，仅展示层（HTML 转义后），不进 zip
+- meta.source_name_raw  消毒前原始名，仅展示层（HTML 转义后）；不进 content.md/ir.json
 - meta.sharded / meta.shard_count   分片产物标记（FR-126 再修订 ⑤）
 - blocks[i].flags.shard_edge        分片边界块
 - blocks[i].flags.absorbed_ids      被本块吸收的块 id（缝合结果留痕）
@@ -99,8 +99,8 @@ class IR:
     schema_version: int = SCHEMA_VERSION
     extra_meta: dict[str, Any] = field(default_factory=dict)
 
-    def meta(self) -> dict:
-        return {
+    def meta(self, *, include_raw: bool = True) -> dict:
+        d = {
             "doc_id": self.doc_id,
             "source_key": self.source_key,
             "source_name": self.source_name,
@@ -113,9 +113,15 @@ class IR:
             "warnings": list(self.warnings),
             **self.extra_meta,
         }
+        # CH-483（R8-PIPE-8）：交付物（zip 内 ir.json）不得携带未消毒原始名；
+        # API / 内存视图保留该字段供审阅与追溯。
+        if not include_raw:
+            d.pop("source_name_raw", None)
+        return d
 
-    def to_dict(self) -> dict:
-        return {"meta": self.meta(), "blocks": [b.to_dict() for b in self.blocks]}
+    def to_dict(self, *, for_export: bool = False) -> dict:
+        return {"meta": self.meta(include_raw=not for_export),
+                "blocks": [b.to_dict() for b in self.blocks]}
 
     @classmethod
     def from_dict(cls, d: dict) -> "IR":

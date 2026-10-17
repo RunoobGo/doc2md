@@ -231,8 +231,9 @@ def _metrics(md: str, ir) -> dict:
 
 def package(ir: IR, md: str, meta: dict, out_dir: Path, cfg: dict,
             gate: dict | None = None) -> Path:
-    """产物打包：zip 条目名双闸（FR-127）；source_name_raw 不进 zip（约定 14）。
+    """产物打包：zip 条目名双闸（FR-127）；raw 名不进 content.md/ir.json（约定 14）。
 
+    report.html 仍在展示层做 HTML 转义展示（CH-483 决策 D11），以保留审阅可追溯性。
     `gate`（T9）：S1.5 页级明细，按 `s1_5.page_detail_in_report` 只进 report.html，
     不进 front-matter——报告口径不得改变 content.md 字节（G6 等价纪律）。
     """
@@ -243,7 +244,8 @@ def package(ir: IR, md: str, meta: dict, out_dir: Path, cfg: dict,
     zp = out_dir / f"{ir.doc_id}.zip"
     fm = {k: v for k, v in meta.items() if k != "source_name_raw"}
     body = "---\n" + json.dumps(fm, ensure_ascii=False, indent=2) + "\n---\n\n" + md
-    entries = [("content.md", body), ("ir.json", json.dumps(ir.to_dict(), ensure_ascii=False)),
+    entries = [("content.md", body),
+               ("ir.json", json.dumps(ir.to_dict(for_export=True), ensure_ascii=False)),
                ("report.html", render_report(ir, meta, gate))]
     with zipfile.ZipFile(zp, "w", zipfile.ZIP_DEFLATED) as z:
         for name, content in entries:

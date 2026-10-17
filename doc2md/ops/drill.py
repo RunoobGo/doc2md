@@ -21,7 +21,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from ..errors import E4001_BadRequest
-from .backup import MAGIC_V2, BackupPlan
+from .backup import MAGIC_V2, BackupPlan, sqlite_backup
 
 DRILL_DIR_NAME = "drill"
 
@@ -134,7 +134,13 @@ def run_drill(cfg: dict, root: Path, *, keep: bool = False) -> DrillReport:
     try:
         # 1) 线上库只读拷贝进沙箱（不存在则建空 schema，演练对空库同样成立）
         live_copy = work / "state.sqlite"
-        shutil.copy2(live_db, live_copy) if live_db.is_file() else _create_empty(live_copy)
+        # CH-483（R8-OPS-4）：WAL 模式下 copy2 会漏掉未 checkpoint 的事务；
+        # 演练必须与真实备份同口径（sqlite3 backup API），否则「演练通过」
+        # 不能证明备份可恢复。
+        if live_db.is_file():
+            sqlite_backup(live_db, live_copy)
+        else:
+            _create_empty(live_copy)
         rep.steps.append(DrillStep("copy_live", True, {"bytes": live_copy.stat().st_size}))
         pre_loss = fingerprint(live_copy)
 

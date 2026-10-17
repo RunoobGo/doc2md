@@ -100,6 +100,14 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common(dl)
     dl.add_argument("--keep", action="store_true",
                     help="保留演练沙箱目录（取证用；CH-476 起不受 tmp 周期清扫与 cron --daily 清理）")
+    rs = bksub.add_parser("restore", help="从快照/加密容器恢复 state.sqlite（CH-483）")
+    _add_common(rs)
+    rs.add_argument("src", help="快照或 .enc 容器路径")
+    rs.add_argument("--to", help="恢复目标（默认 <root>/state.sqlite）")
+    rs.add_argument("--force", action="store_true",
+                    help="目标已存在时先备份旧库再覆盖；不绕过完整性校验")
+    rs.add_argument("--passphrase-env", default="DOC2MD_BACKUP_PASSPHRASE",
+                    help="读取口令的环境变量名（默认 DOC2MD_BACKUP_PASSPHRASE）")
 
     cv = sub.add_parser("convert", help="转换文件 / 目录")
     _add_common(cv)
@@ -268,6 +276,46 @@ def cmd_backup_drill(args: argparse.Namespace) -> int:
         return EXIT_BIZ
     print(_jline(rep.to_dict()))
     return EXIT_OK if rep.ok else EXIT_BIZ
+
+
+def cmd_backup_restore(args: argparse.Namespace) -> int:
+    """离线恢复（CH-483 / R8-OPS-2）：默认拒绝覆盖，强制时先备份旧库。
+
+    恢复前必须停止 serve / work；本命令不尝试探测在线进程（跨平台锁的成本
+    高于收益，且真实停服流程属 B-10 真机演练）。
+    """
+    from .ops.backup import BackupPlan
+    cfg = _cfg(args)
+    root = _root(cfg)
+    dst = Path(args.to).expanduser() if args.to else root / "state.sqlite"
+    plan = BackupPlan(
+        local_dir=config.path_setting(cfg, "ops.backup_local_dir", root,
+                                      str(root / "reports/backups")),
+        external_dir=None,
+        rotation_days=int(config.get(cfg, "ops.backup_rotation_days", 14)),
+        work_root=root,
+        work_dir_mode=str(config.get(cfg, "ops.work_dir_mode", "700")),
+        cfg=cfg)
+    phrase = os.environ.get(args.passphrase_env, "")
+    try:
+        plan.restore_safe(Path(args.src).expanduser(), dst, phrase,
+                          force=bool(args.force))
+    except FileExistsError as exc:
+        print(_jline({"code": "E4001", "message": str(exc)}), file=sys.stderr)
+        return EXIT_USAGE
+    except Exception as exc:                    # noqa: BLE001 — CLI 统一退出码 4
+        print(_jline({"code": "E5031",
+                      "message": f"restore failed: {type(exc).__name__}"}),
+              file=sys.stderr)
+        return EXIT_BIZ
+    print(_jline({"restored": str(dst), "bytes": dst.stat().st_size}))
+    return EXIT_OK
+
+
+def cmd_backup(args: argparse.Namespace) -> int:
+    if getattr(args, "bk_cmd", "") == "restore":
+        return cmd_backup_restore(args)
+    return cmd_backup_drill(args)
 
 
 # --- convert ------------------------------------------------------------------
@@ -601,7 +649,7 @@ def _vendor_models(cfg) -> list[str]:
 COMMANDS = {"serve": cmd_serve, "cron": cmd_cron, "convert": cmd_convert,
             "watch": cmd_watch, "work": cmd_work,
             "tokenizer": cmd_tokenizer, "doctor": cmd_doctor,
-            "backup": cmd_backup_drill}
+            "backup": cmd_backup}
 
 
 def main(argv: list[str] | None = None) -> int:

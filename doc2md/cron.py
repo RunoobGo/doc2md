@@ -138,6 +138,9 @@ def run(cfg: dict | None = None, root: Path | None = None, mode: str = "daily",
         from .ops.diskguard import assert_free_space
         state = root / "state.sqlite"
         snap = None
+        # CH-483（R8-OPS-3）：只有本轮外置加密备份成功，才允许轮出外置旧副本。
+        # 失败/跳过的轮次若仍 wheel，连续失败超过保留期会删掉最后一份外置副本。
+        external_rotatable = False
         try:
             assert_free_space(plan.local_dir, _db_bytes(state), cfg=cfg,
                               what="local_snapshot")
@@ -172,6 +175,7 @@ def run(cfg: dict | None = None, root: Path | None = None, mode: str = "daily",
                         # （plan 带 cfg → 内部自检），这里不再重复预检，to_external 成为
                         # 唯一闸口，直接调用方也受同一道保护。
                         out = plan.to_external(snap, phrase)
+                        external_rotatable = True
                         rep.add("external_backup", path=str(out), bytes=out.stat().st_size,
                                 encrypted=True)
                     except Doc2mdError as exc:
@@ -179,8 +183,11 @@ def run(cfg: dict | None = None, root: Path | None = None, mode: str = "daily",
                                 ok=False)
                         rep.ok = False
 
-            removed = plan.rotate()
-            rep.add("rotation", removed=[str(p) for p in removed])
+            removed = plan.rotate(include_external=(mode == "weekly" and external_rotatable),
+                                  keep_newest=True)
+            rep.add("rotation", removed=[str(p) for p in removed],
+                    external_rotation=("done" if mode == "weekly" and external_rotatable
+                                       else "skipped"))
 
     # 4) tmp 清理（服务启动同样执行一次，见 api.create_app）
     cleaned = sweep_tmp(cfg, root)

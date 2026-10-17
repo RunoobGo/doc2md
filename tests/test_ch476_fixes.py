@@ -316,7 +316,8 @@ def test_v5_stock_library_without_map_backfills_and_closes(tmp_path):
 
     s2 = Store(db)
     assert s2.q1("SELECT COUNT(*) c FROM search_map")["c"] == 2
-    assert s2.q1("PRAGMA user_version")[0] == 6
+    from doc2md.storage.db import DB_VERSION
+    assert s2.q1("PRAGMA user_version")[0] == DB_VERSION
     _map_closure(s2)
     idx = {r["name"] for r in s2.q(
         "SELECT name FROM sqlite_master WHERE type='index'")}
@@ -1566,7 +1567,9 @@ def test_perf_b_page_metrics_equal_to_regex_reference():
         stripped = [x.strip() for x in lines]
         kept = [x for x in stripped if x]
         n = sum(1 for x in kept if noise.match(x))
-        return chars, ratio, len(kept), ((n / len(kept)) if kept else 1.0)
+        letters_ratio = ((c + l) / chars) if chars else 0.0
+        return (chars, ratio, letters_ratio, len(kept),
+                ((n / len(kept)) if kept else 1.0))
 
     page_cases = [
         [Line("第一章 总则"), Line("本规定适用于全部情形。")],

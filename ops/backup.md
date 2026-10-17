@@ -48,17 +48,17 @@ DOC2MD_BACKUP_PASSPHRASE='…' doc2md cron --weekly
 DOC2MD_BACKUP_PASSPHRASE='…' doc2md backup drill            # 退出码 0=成功 4=失败
 DOC2MD_BACKUP_PASSPHRASE='…' doc2md backup drill --keep      # 留存沙箱取证
 
-# 真恢复（从外置卷单个容器解密回工作根）
-python3 - <<'PY'
-from pathlib import Path
-from doc2md.ops.backup import BackupPlan
-import os
-p = os.environ["DOC2MD_BACKUP_PASSPHRASE"]
-plan = BackupPlan(local_dir=Path("work/reports/backups"), external_dir=Path("/Volumes/doc2md-backup"))
-plan.restore(Path("/Volumes/doc2md-backup/state-XXXX.sqlite.enc"), Path("work/state.sqlite"), p)
-PY
+# 真恢复（CH-483）：先停 serve / work，再执行；目标已存在须显式 --force
+DOC2MD_BACKUP_PASSPHRASE='…' doc2md backup restore \
+    /Volumes/doc2md-backup/state-XXXX.sqlite.enc \
+    --to work/state.sqlite --force
+# 命令内部已做：解密 → integrity_check → 旧库备份 → 清理 -wal/-shm →
+# 原子替换 → 恢复后再次 integrity_check；失败退出码 4，目标保持不变。
 sqlite3 work/state.sqlite "PRAGMA integrity_check;"   # 期望 ok
 ```
+
+> `--force` 只允许覆盖已存在的目标，不绕过完整性校验；旧库会先备份为
+> `pre-restore-<ts>-<rand>.sqlite`。恢复期间必须停止 serve / work 两个进程。
 
 `backup drill`（CH-456 / T7）在 `work/tmp/drill-<ts>/` 隔离沙箱内依次执行：
 **copy_live → snapshot → external_encrypt → simulate_loss → rotate → restore →

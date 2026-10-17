@@ -40,6 +40,8 @@ _V2_HEADER_LEN = 7 + _V2_SALT_LEN + 4 + 8   # magic | salt | chunk_size | total_
 
 # 本工具产生的副本名（轮出只认这个形态，见 BackupPlan.rotate）
 _SNAPSHOT_RE = re.compile(r"^state-(\d{8}T\d{6}Z)\.sqlite(\.enc)?$")
+# CH-483（R8-OPS-1）：删除前整库快照。随机后缀避免同一秒内两次删除互相覆盖。
+_PREDELETE_RE = re.compile(r"^predelete-(\d{8}T\d{6}Z)-[0-9a-f]{8}\.sqlite$")
 _TS_FMT = "%Y%m%dT%H%M%SZ"
 
 
@@ -176,6 +178,32 @@ def decrypt_bytes(blob: bytes, passphrase: str) -> bytes:
     return AESGCM(derive_key(passphrase, LEGACY_SALT)).decrypt(nonce, ct, MAGIC)
 
 
+def sqlite_backup(src: str | Path, dst: str | Path) -> Path:
+    """SQLite 在线备份（WAL 安全）：用 backup API，不做文件级复制。
+
+    CH-483（R8-OPS-1 / OPS-4）：`shutil.copy2` 只复制主库文件，已提交但尚未
+    checkpoint 的 WAL 帧会丢失，且可能拿到撕裂状态。备份/删除前快照/演练
+    统一走这里。
+    """
+    import sqlite3
+
+    src, dst = Path(src), Path(dst)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    src_c = dst_c = None
+    try:
+        src_c = sqlite3.connect(str(src))
+        dst_c = sqlite3.connect(str(dst))
+        src_c.backup(dst_c)
+    except Exception:
+        dst.unlink(missing_ok=True)
+        raise
+    finally:
+        for con in (dst_c, src_c):
+            if con is not None:
+                con.close()
+    return dst
+
+
 @dataclass
 class BackupPlan:
     local_dir: Path
@@ -193,27 +221,55 @@ class BackupPlan:
         ts = ts or datetime.now(timezone.utc)
         self.local_dir.mkdir(parents=True, exist_ok=True)
         dst = self.local_dir / f"state-{ts.strftime(_TS_FMT)}.sqlite"
-        # SQLite WAL 安全快照：用备份 API 而非 cp
-        import sqlite3
-        # CH-469（O-11）：原实现三个连接各自裸 close，且 backup 中途抛错（源库被
-        # 占用、磁盘写满）时半截 `state-*.sqlite` 会留在备份目录里——它名字合法、
-        # 时间戳是「当期」，轮出不会清它，恢复演练却会挑中它。改 try/finally + 失败即删。
-        src_c = dst_c = None
-        try:
-            src_c = sqlite3.connect(str(state_db))
-            dst_c = sqlite3.connect(str(dst))
-            src_c.backup(dst_c)
-        except Exception:
-            dst.unlink(missing_ok=True)
-            raise
-        finally:
-            for con in (dst_c, src_c):
-                if con is not None:
-                    con.close()
+        # CH-469（O-11）：backup 中途抛错（源库被占用、磁盘写满）时不得留下
+        # 半截 `state-*.sqlite`——它名字合法、时间戳是「当期」，轮出不会清它，
+        # 恢复演练却会挑中它。sqlite_backup 失败即删。
+        sqlite_backup(state_db, dst)
         mode = _parse_mode(self.work_dir_mode)
         self._enforce_mode(self.local_dir, mode)
         self._enforce_mode(self._resolve_work_root(), mode)
         return dst
+
+    def predelete_snapshot(self, state_db: Path,
+                           ts: datetime | None = None) -> Path:
+        """删除前整库快照（CH-483 / R8-OPS-1）：删除入口调用，失败必须阻断删除。"""
+        import secrets
+
+        ts = ts or datetime.now(timezone.utc)
+        self.local_dir.mkdir(parents=True, exist_ok=True)
+        dst = self.local_dir / (
+            f"predelete-{ts.strftime(_TS_FMT)}-{secrets.token_hex(4)}.sqlite")
+        sqlite_backup(state_db, dst)
+        mode = _parse_mode(self.work_dir_mode)
+        self._enforce_mode(self.local_dir, mode)
+        self._enforce_mode(self._resolve_work_root(), mode)
+        self.rotate_predelete(now=ts)
+        return dst
+
+    def rotate_predelete(self, now: datetime | None = None) -> list[Path]:
+        """清理过期删前快照；**永远保留最新一份**（数据安全兜底）。"""
+        now = now or datetime.now(timezone.utc)
+        cutoff = now - timedelta(days=max(1, int(self.rotation_days)))
+        rows = []
+        for p in sorted(self.local_dir.glob("predelete-*.sqlite")):
+            m = _PREDELETE_RE.match(p.name)
+            if not m:
+                continue
+            try:
+                born = datetime.strptime(m.group(1), _TS_FMT).replace(tzinfo=timezone.utc)
+                mtime = datetime.fromtimestamp(p.stat().st_mtime, timezone.utc)
+            except (ValueError, OSError):
+                continue
+            rows.append((p, min(born, mtime)))
+        if len(rows) < 2:
+            return []
+        rows.sort(key=lambda x: x[1])
+        removed = []
+        for p, born in rows[:-1]:
+            if born < cutoff:
+                p.unlink(missing_ok=True)
+                removed.append(p)
+        return removed
 
     def _resolve_work_root(self) -> Path:
         """CH-437：原实现 chmod 的是 local_dir.parent（即 work/reports），
@@ -306,7 +362,65 @@ class BackupPlan:
         return dst
 
 
-    def rotate(self, now: datetime | None = None) -> list[Path]:
+    def restore_safe(self, src: Path, dst: Path, passphrase: str, *,
+                     force: bool = False) -> Path:
+        """恢复的安全序列（CH-483 / R8-OPS-2）。
+
+        与 `restore` 的区别：目标已存在默认拒绝；强制时先备份旧库；无论明文
+        快照还是加密容器都先落到 `.part` 并跑 `integrity_check`；替换前清理
+        目标旁的 `-wal`/`-shm`，避免旧 WAL 帧污染新库；替换后复核完整性。
+        """
+        import secrets
+        import sqlite3
+
+        src, dst = Path(src), Path(dst)
+        if dst.exists() and not force:
+            raise FileExistsError(f"target exists: {dst} (use --force)")
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dst.parent / (dst.name + ".part")
+        try:
+            with src.open("rb") as fh:
+                head = fh.read(len(MAGIC_V2))
+            if head in (MAGIC, MAGIC_V2):
+                if not passphrase:
+                    raise ValueError("passphrase required for encrypted backup")
+                with src.open("rb") as r, tmp.open("wb") as w:
+                    decrypt_stream(r, w, passphrase)
+                    _fsync(w)
+            else:
+                sqlite_backup(src, tmp)
+            con = sqlite3.connect(f"file:{tmp}?mode=ro", uri=True)
+            try:
+                got = str(con.execute("PRAGMA integrity_check").fetchone()[0])
+            finally:
+                con.close()
+            if got != "ok":
+                raise ValueError(f"integrity_check failed: {got}")
+            if dst.exists():
+                ts = datetime.now(timezone.utc).strftime(_TS_FMT)
+                backup = dst.parent / f"pre-restore-{ts}-{secrets.token_hex(4)}.sqlite"
+                sqlite_backup(dst, backup)
+            # 目标旁的旧 WAL/SHM 属于被替换的库；保留会让新库打开时尝试应用旧帧。
+            for suffix in ("-wal", "-shm"):
+                Path(str(dst) + suffix).unlink(missing_ok=True)
+            tmp.replace(dst)
+            _fsync_dir(dst.parent)
+            _chmod600(dst, self.mode_warnings)
+        except Exception:
+            tmp.unlink(missing_ok=True)
+            raise
+        con = sqlite3.connect(f"file:{dst}?mode=ro", uri=True)
+        try:
+            if str(con.execute("PRAGMA integrity_check").fetchone()[0]) != "ok":
+                raise ValueError("restored db failed integrity_check")
+        finally:
+            con.close()
+        return dst
+
+
+    def rotate(self, now: datetime | None = None, *,
+               include_external: bool = True,
+               keep_newest: bool = False) -> list[Path]:
         """轮出：> rotation_days 的本工具副本删除（FR-128「已删数据 ≤14 天轮出」）。
 
         CH-469（O-2）：原实现 `glob("*")` + mtime 判定，会删掉备份目录里**任何**
@@ -316,11 +430,20 @@ class BackupPlan:
 
         过期判据取两个信号中更早者：文件名内嵌的生成时刻（跨卷拷贝后 mtime 会变，
         生成时刻不会）与磁盘 mtime（老副本可能没有可解析的名字时刻）。
+
+        CH-483（R8-OPS-3）：
+        - `include_external=False` 时完全不碰外置目录——外置备份失败/跳过的轮次
+          不得删除外置旧副本（否则连续失败超过保留期会删掉最后一份）；
+        - `keep_newest=True` 时每个目录永远保留生成时间最新的一份。
         """
         now = now or datetime.now(timezone.utc)
-        cutoff = now - timedelta(days=self.rotation_days)
+        cutoff = now - timedelta(days=max(1, int(self.rotation_days)))
+        bases = [self.local_dir]
+        if include_external:
+            bases.append(self.external_dir)
         removed: list[Path] = []
-        for base in filter(None, [self.local_dir, self.external_dir]):
+        for base in filter(None, bases):
+            rows: list[tuple[Path, datetime]] = []
             for p in sorted(Path(base).glob("*")):
                 if not p.is_file():
                     continue
@@ -336,8 +459,12 @@ class BackupPlan:
                     mtime = datetime.fromtimestamp(p.stat().st_mtime, timezone.utc)
                 except OSError:
                     continue
-                expired = (born is not None and born < cutoff) or mtime < cutoff
-                if expired:
+                rows.append((p, min(born, mtime) if born is not None else mtime))
+            protected = max(rows, key=lambda x: x[1])[0] if (keep_newest and rows) else None
+            for p, stamp in rows:
+                if p is protected:
+                    continue
+                if stamp < cutoff:
                     p.unlink()
                     removed.append(p)
         return removed

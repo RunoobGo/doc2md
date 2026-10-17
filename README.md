@@ -1,6 +1,6 @@
 # Doc2md
 
-文本型 PDF / DOCX → Markdown 的**离线**转换管线（v2.4）。
+文本型 PDF / DOCX → Markdown 的**离线**转换管线（v2.6）。
 单机、无出站网络、无云端依赖；LLM 修补助手同样只连本地 `127.0.0.1`。
 
 ## 安装
@@ -48,7 +48,7 @@ curl -s "localhost:8090/search?q=例外" -H "X-Doc2md-Token: $TOK"
 ## 配置
 
 内置默认值见 `doc2md/config/default_toml.py`；部署样例见 `config/doc2md.example.toml`；逐键语义与默认值见方案 附录 A。
-读取顺序：默认 → `--config` → `./doc2md.toml` → `$DOC2MD_HOME/doc2md.toml`。
+读取顺序（后者覆盖前者）：默认 → `$DOC2MD_HOME/doc2md.toml` → `./doc2md.toml` → 显式 `--config`。
 
 相对路径（`work/out`、`work/reports/backups` 等）会随 `[paths].root` / `--root` 一起迁移（CH-432）。
 
@@ -94,11 +94,17 @@ Windows 中文控制台（cp936）下含 emoji 的文件名不再崩进程，`--
 ## 定时任务（launchd）
 
 ```bash
+mkdir -p work/logs                    # launchd 在 spawn 阶段就要打开重定向文件
 cp ops/launchd/md.doc2md.cron*.plist ~/Library/LaunchAgents/
+# 资产里的 /Users/you/doc2md 是示例前缀，安装前必须改成实际仓库路径
+sed -i '' "s#/Users/you/doc2md#$PWD#g" ~/Library/LaunchAgents/md.doc2md.cron*.plist
+plutil -lint ~/Library/LaunchAgents/md.doc2md.cron*.plist
 launchctl load ~/Library/LaunchAgents/md.doc2md.cron.plist
 launchctl load ~/Library/LaunchAgents/md.doc2md.cron.weekly.plist
 launchctl list | grep doc2md          # 校验（R6）：应列出两个标签
 ```
+
+> GNU sed 用户把 `sed -i ''` 写成 `sed -i`；路径替换后 `grep /Users/you` 应为空。
 
 `--daily` = 日报 → 本地快照（磁盘门禁是它的前置检查，不是独立步骤）→ 轮出 → tmp 清理 → 日志轮转检查
 → events / 终态 tasks 保留期清理 → 搜索索引对账；`--weekly` = 同一序列，只在本地快照成功后、**轮出之前**插入
@@ -109,7 +115,12 @@ launchctl list | grep doc2md          # 校验（R6）：应列出两个标签
 ## 常驻服务（launchd，CH-480 / T12）
 
 ```bash
+mkdir -p work/logs
 cp ops/launchd/md.doc2md.serve.plist ops/launchd/md.doc2md.work.plist ~/Library/LaunchAgents/
+sed -i '' "s#/Users/you/doc2md#$PWD#g" ~/Library/LaunchAgents/md.doc2md.serve.plist \
+    ~/Library/LaunchAgents/md.doc2md.work.plist
+plutil -lint ~/Library/LaunchAgents/md.doc2md.serve.plist \
+    ~/Library/LaunchAgents/md.doc2md.work.plist
 launchctl load ~/Library/LaunchAgents/md.doc2md.serve.plist
 launchctl load ~/Library/LaunchAgents/md.doc2md.work.plist
 launchctl list | grep doc2md          # 校验：定时 + 常驻四个标签齐全
@@ -177,7 +188,7 @@ Windows 任务计划不捕获标准输出，日志目录里没有 `launchd-*` �
 | `ops/backup.md` | 备份介质与恢复演练细则 |
 | `ops/windows/install-doc2md-tasks.ps1` | Windows 任务计划安装 / 校验 / 卸载（与 launchd 同等能力） |
 
-跟踪约定：契约变更、缺陷、更优做法一律按登记流写入方案 第十一章（当前编号至 `CH-482`，下一条自 `CH-483`），实测数字进第十二章并标注语料与测量方法；规格发生变化时同步主题篇章节与本文相应小节，并递增 `doc2md.PLAN_VERSION`（管线契约变化另递增 `PIPELINE_VERSION`；状态库结构变化另递增 `DB_VERSION`，CH-469 起为 `5`、CH-476 起为 `6`）。
+跟踪约定：契约变更、缺陷、更优做法一律按登记流写入方案 第十一章（当前编号至 `CH-483`，下一条自 `CH-484`），实测数字进第十二章并标注语料与测量方法；规格发生变化时同步主题篇章节与本文相应小节，并递增 `doc2md.PLAN_VERSION`（管线契约变化另递增 `PIPELINE_VERSION`；状态库结构变化另递增 `DB_VERSION`，CH-469 起为 `5`、CH-476 起为 `6`、CH-483 起为 `7`）。
 
 ## 验收与测试
 

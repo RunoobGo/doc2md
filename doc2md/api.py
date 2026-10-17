@@ -28,6 +28,7 @@ from .errors import (
     E4091_DocOverwrite,
     E5031_StorageError,
 )
+from .ops.backup import BackupPlan
 from .ops.logging import RotatingJsonlWriter, scrub_record
 from .pipeline.convert import convert
 from .scheduler import Scheduler
@@ -75,6 +76,31 @@ _MODES = ("auto", "single", "two_phase")
 # 键集差校验三处，收益不抵 churn）。
 _SYNC_GATE_WAIT_S = 60
 _SYNC_RETRY_AFTER_S = 60
+
+
+def _predelete_snapshot(cfg: dict, root: Path) -> Path | None:
+    """CH-483（R8-OPS-1）：删除前整库快照；失败即 E5031，删除不得继续。
+
+    与 cron 的本地快照同目录、同保留期；删除是低频操作，O(DB) 拷贝换取
+    「误删可恢复」是明确的数据安全取舍。
+    """
+    state = Path(root) / "state.sqlite"
+    if not state.is_file():
+        return None
+    plan = BackupPlan(
+        local_dir=config.path_setting(cfg, "ops.backup_local_dir", root,
+                                      str(Path(root) / "reports/backups")),
+        external_dir=None,
+        rotation_days=int(config.get(cfg, "ops.backup_rotation_days", 14)),
+        work_root=Path(root),
+        work_dir_mode=str(config.get(cfg, "ops.work_dir_mode", "700")),
+        cfg=cfg)
+    try:
+        return plan.predelete_snapshot(state)
+    except Exception as exc:                    # noqa: BLE001 — 任何失败都不得放行删除
+        raise E5031_StorageError(
+            "pre-delete snapshot failed; delete aborted",
+            detail={"reason": type(exc).__name__}) from exc
 
 
 def create_app(cfg: dict | None = None, root: Path | None = None):
@@ -152,7 +178,14 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
         return auth.check(store, tok(), action)
 
     def body() -> dict:
-        return request.get_json(silent=True) or {}
+        # CH-483（R8-API-1）：数组/字符串/数字 JSON 会让调用方 `.get()` 抛
+        # AttributeError → 500；请求体契约只接受 JSON 对象。
+        data = request.get_json(silent=True)
+        if data is None:
+            return {}
+        if not isinstance(data, dict):
+            raise E4001_BadRequest("JSON object required")
+        return data
 
     def err(exc: Doc2mdError):
         return jsonify(exc.to_body()), exc.http
@@ -215,6 +248,9 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
     @app.post("/jobs")
     def post_job():
         need("submit_job")
+        # CH-483（R8-SVC-1）：转换窗口的删除守护基准。记录请求开始时 deletions
+        # 的最大自增 id；落库事务内只要出现更大的墓碑，就拒绝落库。
+        since_seq = store.q1("SELECT COALESCE(MAX(id),0) AS m FROM deletions")["m"]
         b = body()
         path = b.get("path", "")
         idem = request.headers.get("Idempotency-Key") or b.get("idempotency_key")
@@ -290,7 +326,7 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
 
         out = []
 
-        def _finish_one(f, ir, doc_id, source_key):
+        def _finish_one(f, ir, doc_id, source_key, since):
             j = sched.submit(doc_id, source_key, idem_key=_idem_for(f))
             # R6-SVC-3（CH-475，决策 D1）：幂等命中 / 附着既有作业时，该 doc_id 已由
             # 在途或既往作业负责落库——不再重跑 save_ir。既省一次全量写（性能优先），
@@ -313,14 +349,27 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
             # 杜绝「docs 有、tasks 无」的半复活态（FR-128 轮出语义）。
             try:
                 with store.tx() as tx:
+                    # CH-483（R8-SVC-1）：同一个写事务内先看墓碑。删除与落库
+                    # 由 BEGIN IMMEDIATE 串行化——要么本事务先提交、随后删除
+                    # 级联收走；要么删除先提交、本事务看到墓碑并回滚。
+                    dead = tx.execute(
+                        "SELECT 1 FROM deletions WHERE (doc_id=? OR doc_id=?)"
+                        " AND id>? LIMIT 1",
+                        (doc_id, f"source:{source_key}", since)).fetchone()
+                    if dead is not None:
+                        raise E4041_NotFound("doc deleted during conversion")
                     if not sched.mark(j.job_id, "done", tx=tx):
                         raise E4041_NotFound(f"task row gone: {j.job_id}")
                     save_ir(store, ir, tx=tx, force=force)
                     _emit(store, "job_done", doc_id, j.job_id,
                           {"blocks": len(ir.blocks)}, logw(), tx=tx)
             except E4041_NotFound:
-                # 行已不在（被删除级联收走）——不再补 mark/rejected 事件，
-                # 对不存在的行写入只会留孤儿行；响应里给本文件明确终态即可。
+                # 行可能已被删除级联收走，也可能是 submit 新建后被墓碑拦截。
+                # 后者补 rejected 终态（mark 返回 False 时不再写事件，避免孤儿行）。
+                if sched.mark(j.job_id, "rejected", "E4041",
+                              {"reason": "doc_deleted_during_conversion"}):
+                    _emit(store, "job_rejected", doc_id, j.job_id,
+                          {"code": "E4041", "source": "api"}, logw())
                 out.append({"file": f.name, "job_id": j.job_id, "doc_id": doc_id,
                             "status": "rejected", "code": "E4041",
                             "reason": "doc_deleted_during_conversion"})
@@ -384,7 +433,8 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
                             out.append({"file": f.name, "doc_id": r.get("doc_id", ""),
                                         "status": "error", "code": "E5031"})
                             continue
-                        _finish_one(f, ir, r.get("doc_id", ""), r.get("source_key", ""))
+                        _finish_one(f, ir, r.get("doc_id", ""),
+                                    r.get("source_key", ""), since_seq)
             finally:
                 _SYNC_POOL_GATE.release()
             return jsonify({"jobs": out}), 202
@@ -414,7 +464,7 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
                     out.append({"file": f.name, "status": "error", "code": e.code})
                     continue
                 raise
-            _finish_one(f, res.ir, res.doc_id, res.source_key)
+            _finish_one(f, res.ir, res.doc_id, res.source_key, since_seq)
         return jsonify({"jobs": out}), 202
 
     @app.get("/jobs")
@@ -525,7 +575,12 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
         if request.args.get("confirm") != "true":
             raise E4001_BadRequest("confirm=true required for destructive delete",
                                  detail={"rule": "FR-128", "requires": "confirm=true"})
-        return jsonify(delete_doc(store, doc_id, actor_id(None, default="admin"), root))
+        cfg = cur()
+        _predelete_snapshot(cfg, root)
+        return jsonify(delete_doc(
+            store, doc_id, actor_id(None, default="admin"), root,
+            out_dir=config.path_setting(cfg, "paths.out", root, str(root / "out")),
+            tmp_dir=config.path_setting(cfg, "paths.tmp", root, str(root / "tmp"))))
 
     @app.delete("/sources/<source_key>")
     def del_src(source_key):
@@ -533,7 +588,12 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
         if request.args.get("confirm") != "true":
             raise E4001_BadRequest("confirm=true required for destructive delete",
                                  detail={"rule": "FR-128", "requires": "confirm=true"})
-        return jsonify(delete_source(store, source_key, actor_id(None, default="admin"), root))
+        cfg = cur()
+        _predelete_snapshot(cfg, root)
+        return jsonify(delete_source(
+            store, source_key, actor_id(None, default="admin"), root,
+            out_dir=config.path_setting(cfg, "paths.out", root, str(root / "out")),
+            tmp_dir=config.path_setting(cfg, "paths.tmp", root, str(root / "tmp"))))
 
     @app.get("/docs/<doc_id>/audit")
     def doc_audit(doc_id):

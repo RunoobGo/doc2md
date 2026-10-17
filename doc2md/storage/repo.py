@@ -187,11 +187,29 @@ def reconcile_search(store: Store) -> dict:
         doc_id = row["doc_id"]
         blocks_reindexed += reindex(store, doc_id, list_blocks(store, doc_id))
         docs_repaired += 1
-    # 孤儿索引行：blocks 侧已无该 doc（删除级联之外的历史残留），清掉避免命中不存在的块
+    # 孤儿索引行：blocks 侧已无该 doc（删除级联之外的历史残留），清掉避免命中不存在的块。
+    # CH-483（R8-PERF-1）：`search_blocks.doc_id` 是 UNINDEXED，旧 SQL 的
+    # `doc_id NOT IN (...)` 会全表扫 FTS 内容列。改为经 search_map（doc_id 有索引）
+    # 取 rowid；只有“FTS 行数 > 映射行数”的异常存量才做一次 rowid 兜底扫描。
     with store.tx() as tx:
-        orphans = tx.execute(
-            "DELETE FROM search_blocks WHERE doc_id NOT IN (SELECT doc_id FROM blocks)"
-        ).rowcount or 0
+        fts_n = tx.execute("SELECT COUNT(*) c FROM search_blocks").fetchone()["c"]
+        map_n = tx.execute("SELECT COUNT(*) c FROM search_map").fetchone()["c"]
+        orphans = 0
+        if fts_n > map_n:
+            orphans += tx.execute(
+                "DELETE FROM search_blocks WHERE rowid NOT IN"
+                " (SELECT fts_rowid FROM search_map)").rowcount or 0
+        # 映射侧存在“blocks 已无该 doc”的行：这已经是损坏态，允许一次
+        # `doc_id IN (...)` 扫描把对应 FTS 行清干净（map 的 fts_rowid 可能
+        # 与真实行错位，不能按映射 rowid 删）。
+        orphan_ids = [r["doc_id"] for r in tx.execute(
+            "SELECT DISTINCT doc_id FROM search_map WHERE doc_id NOT IN"
+            " (SELECT doc_id FROM blocks)")]
+        if orphan_ids:
+            marks = ",".join("?" * len(orphan_ids))
+            orphans += tx.execute(
+                f"DELETE FROM search_blocks WHERE doc_id IN ({marks})",
+                tuple(orphan_ids)).rowcount or 0
         # CH-476（R7-STOR-1）：映射同清，否则孤儿 doc 的 fts_rowid 永占位
         tx.execute("DELETE FROM search_map WHERE doc_id NOT IN (SELECT doc_id FROM blocks)")
     return {"docs_scanned": len(divergent), "docs_repaired": docs_repaired,
@@ -321,7 +339,8 @@ def search(store: Store, query: str, limit: int = 20) -> dict:
 
 
 def delete_doc(store: Store, doc_id: str, actor: str, root: Path | None = None, *,
-               files_removed: tuple[list[str], list[str]] | None = None) -> dict:
+               files_removed: tuple[list[str], list[str]] | None = None,
+               out_dir: Path | None = None, tmp_dir: Path | None = None) -> dict:
     """FR-128 级联删除：out 产物、IR/中间产物、事件、revision、编辑审计；
     删除留痕本身保留（who/when/doc_id，不含正文，NFR-20）。
 
@@ -337,7 +356,12 @@ def delete_doc(store: Store, doc_id: str, actor: str, root: Path | None = None, 
     """
     if store.q1("SELECT 1 FROM docs WHERE doc_id=?", (doc_id,)) is None:
         raise E4041_NotFound(f"doc {doc_id} not found")
-    removed, failed = files_removed if files_removed is not None else purge_files(doc_id, root)
+    if files_removed is not None:
+        removed, failed = files_removed
+    elif out_dir is None and tmp_dir is None:
+        removed, failed = purge_files(doc_id, root)
+    else:
+        removed, failed = purge_files(doc_id, root, out_dir=out_dir, tmp_dir=tmp_dir)
     if failed:
         raise E5031_StorageError(
             "artifact removal incomplete; rows kept for retry",
@@ -380,7 +404,8 @@ def delete_doc(store: Store, doc_id: str, actor: str, root: Path | None = None, 
 
 
 
-def delete_source(store: Store, source_key: str, actor: str, root: Path | None = None) -> dict:
+def delete_source(store: Store, source_key: str, actor: str, root: Path | None = None, *,
+                  out_dir: Path | None = None, tmp_dir: Path | None = None) -> dict:
     """整源删除（FR-128：同一来源所有版本）。
 
     CH-459（A-15）：无匹配文档时 404/E4041——原实现写一条空 source 留痕并
@@ -396,7 +421,10 @@ def delete_source(store: Store, source_key: str, actor: str, root: Path | None =
            store.q("SELECT doc_id FROM docs WHERE source_key=?", (source_key,))]
     if not ids:
         raise E4041_NotFound(f"source {source_key} not found")
-    removed, failed = purge_many(ids, root)
+    if out_dir is None and tmp_dir is None:
+        removed, failed = purge_many(ids, root)
+    else:
+        removed, failed = purge_many(ids, root, out_dir=out_dir, tmp_dir=tmp_dir)
     if failed:
         # 与 delete_doc 同口径 fail-closed：产物没删净就保留全部库行，整源删除可重试
         raise E5031_StorageError(
@@ -405,7 +433,9 @@ def delete_source(store: Store, source_key: str, actor: str, root: Path | None =
                     "removed": len(removed)})
     by_doc = {d: [p for p in removed if d in Path(p).name] for d in ids}
     for d in ids:
-        delete_doc(store, d, actor, None, files_removed=(by_doc.get(d, []), []))
+        delete_doc(store, d, actor, None,
+                   files_removed=(by_doc.get(d, []), []),
+                   out_dir=out_dir, tmp_dir=tmp_dir)
     with store.tx() as tx:
         tx.execute("INSERT INTO deletions(doc_id, source_key, actor, ts, kind, cascade_json)"
                    " VALUES (?,?,?,?,?,?)",
@@ -415,34 +445,82 @@ def delete_source(store: Store, source_key: str, actor: str, root: Path | None =
     return {"source_key": source_key, "docs": ids, "files": removed}
 
 
-def purge_files(doc_id: str, root: Path | None) -> tuple[list[str], list[str]]:
-    """删除 out/ 与 work/ 下该文档的产物与中间产物，返回 (已删, 失败)。"""
-    return _purge([doc_id], root)
+def purge_files(doc_id: str, root: Path | None, *,
+                out_dir: Path | None = None,
+                tmp_dir: Path | None = None) -> tuple[list[str], list[str]]:
+    """删除该文档的产物与中间产物，返回 (已删, 失败)。"""
+    return _purge([doc_id], root, out_dir=out_dir, tmp_dir=tmp_dir)
 
 
-def purge_many(doc_ids, root: Path | None) -> tuple[list[str], list[str]]:
-    """多文档共一次目录遍历（CH-469，V-6）。"""
-    return _purge([d for d in doc_ids if d], root)
+def purge_many(doc_ids, root: Path | None, *,
+               out_dir: Path | None = None,
+               tmp_dir: Path | None = None) -> tuple[list[str], list[str]]:
+    """多文档共一次删除（CH-469，V-6）。"""
+    return _purge([d for d in doc_ids if d], root,
+                  out_dir=out_dir, tmp_dir=tmp_dir)
 
 
-def _purge(ids: list[str], root: Path | None) -> tuple[list[str], list[str]]:
-    """out/ir/tmp 三棵树各一次遍历，命中任一 doc_id 即删（一次遍历服务整批）。"""
+def _purge(ids: list[str], root: Path | None, *,
+           out_dir: Path | None = None,
+           tmp_dir: Path | None = None) -> tuple[list[str], list[str]]:
+    """按“已知产物路径”删除，不再对 out/ir 全树 rglob。
+
+    CH-483（R8-PERF-2）：
+    - `paths.out` / `paths.tmp` 可配置，旧实现硬编码 root/out|tmp → 自定义路径
+      的产物永远删不掉；
+    - 单文档删除原要对三棵树各做一次 rglob，成本随目录规模线性增长；
+      现在 out/ir 直接拼 `{doc_id}.zip` / `{doc_id}.json`（含 `.part`），
+      tmp 只扫顶层（中间产物不在深层目录）。
+    - 文件名匹配改为精确前缀（`doc_id` + "."），杜绝子串误删。
+    """
     removed: list[str] = []
     failed: list[str] = []
     if not root or not ids:
         return removed, failed
-    for base in (Path(root) / "out", Path(root) / "ir", Path(root) / "tmp"):
+    out_base = Path(out_dir) if out_dir else Path(root) / "out"
+    tmp_base = Path(tmp_dir) if tmp_dir else Path(root) / "tmp"
+    ir_base = Path(root) / "ir"
+    seen: set[Path] = set()
+
+    def _kill(p: Path) -> None:
+        if p in seen:
+            return
+        seen.add(p)
+        try:
+            if p.is_dir():
+                shutil.rmtree(p)
+            else:
+                p.unlink()
+            removed.append(str(p))
+        except OSError:
+            failed.append(str(p))
+
+    id_set = set(ids)
+    for d in ids:
+        for base, exts in ((out_base, (".zip", ".zip.part")),
+                           (ir_base, (".json", ".json.part"))):
+            for ext in exts:
+                p = base / f"{d}{ext}"
+                if p.exists():
+                    _kill(p)
+    # 旧版 / 测试可能留下 `{doc_id}.*` 的变体；out/ir 只扫一层，
+    # 且整批只扫一次（旧实现 rglob 全树 × 每个文档）。
+    for base in (out_base, ir_base):
         if not base.exists():
             continue
-        for p in base.rglob("*"):
-            if not any(d in p.name for d in ids):
-                continue
-            try:
-                if p.is_dir():
-                    shutil.rmtree(p)
-                else:
-                    p.unlink()
-                removed.append(str(p))
-            except OSError:
-                failed.append(str(p))
+        try:
+            entries = list(base.iterdir())
+        except OSError:
+            entries = []
+        for p in entries:
+            if p.name.split(".", 1)[0] in id_set:
+                _kill(p)
+    if tmp_base.exists():
+        try:
+            entries = list(tmp_base.iterdir())
+        except OSError:
+            entries = []
+        for p in entries:
+            if any(p.name.startswith(f"{d}.") or p.name == d for d in ids):
+                _kill(p)
     return removed, failed

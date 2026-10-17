@@ -131,7 +131,7 @@ v2.4 轮次审查（2026-10-13）从 v2.3 自检、安全与隐私、并发编�
 
 ### 2.2 新增需求明细
 
-**FR-127 上传文件名消毒与路径安全（P1）**。入队前对文件名执行：剥离路径分隔符与控制字符、拒绝 / 重写 Windows 保留名（CON / PRN / AUX / NUL / COM1-9 / LPT1-9）、限长 128 字符、zip 条目名二次校验无 `..`。消毒后的 `source_name` 记入 IR，原始名保留在 `source_name_raw`。验收标准：恶意文件名集合（路径穿越 / 控制字符 / 保留名 / 超长 / Unicode 代理对）全部安全落库；zip 解开无越界条目；`source_name_raw` 仅用于报告展示且不进 zip。
+**FR-127 上传文件名消毒与路径安全（P1）**。入队前对文件名执行：剥离路径分隔符与控制字符、拒绝 / 重写 Windows 保留名（CON / PRN / AUX / NUL / COM1-9 / LPT1-9）、限长 128 字符、zip 条目名二次校验无 `..`。消毒后的 `source_name` 记入 IR，原始名保留在 `source_name_raw`。验收标准：恶意文件名集合（路径穿越 / 控制字符 / 保留名 / 超长 / Unicode 代理对）全部安全落库；zip 解开无越界条目；`source_name_raw` 仅用于报告展示，不进 `content.md` / `ir.json`（CH-483 起 report.html 仍做 HTML 转义展示）。
 
 **FR-128 文档删除级联（P1）**。`DELETE /docs/{doc_id}` 级联删除 out 产物、IR / 中间产物、事件、revision、编辑审计；审计的删除记录本身保留（who / when / doc_id，不含内容）。删除需 admin token + 二次确认参数 `confirm=true`；`source_key` 下所有版本可整源删除。验收标准：删除后 `GET /docs/{id}` 返回 404、全局搜索无残留、已删数据 ≤ 14 天后从全部备份副本自然轮出。
 
@@ -238,7 +238,7 @@ rotate_keep = 5
 tokenizer = "gguf-embedded"        # 从生产 GGUF 导出 vocab，manifest 记录 GGUF 文件名 + sha256 前缀
 ```
 
-**IR Schema 增补**：`meta` 新增 `source_name_raw`（消毒前原始名，仅展示用）、`sharded`、`shard_count`；`blocks[i].flags` 补齐 `shard_edge` 与 `absorbed_ids` 落点。**约定 14（文件名与内容的边界）**：`source_name` 是安全名（可进 zip / front-matter），`source_name_raw` 仅可出现在报告 HTML 的展示层（HTML 转义后）；任何文件名字段不得参与 doc_id 计算（doc_id 永远只哈希文件内容）。
+**IR Schema 增补**：`meta` 新增 `source_name_raw`（消毒前原始名，仅展示用）、`sharded`、`shard_count`；`blocks[i].flags` 补齐 `shard_edge` 与 `absorbed_ids` 落点。**约定 14（文件名与内容的边界）**：`source_name` 是安全名（可进 zip / front-matter），`source_name_raw` 仅可出现在报告 HTML 的展示层（HTML 转义后），不得进入 `content.md` / `ir.json`；任何文件名字段不得参与 doc_id 计算（doc_id 永远只哈希文件内容）。
 
 ### 3.6 API 增补与修订
 
@@ -318,7 +318,7 @@ scheduler 约束追加第 9 条：`tasks` 表对 `doc_id` 建唯一索引（进�
 **任务清单**：
 
 1. 实现文件名消毒函数（附录 B-11）：NFC 归一化、剥离路径分隔符与控制字符、Windows 保留名重写、限长 128 字符；消毒后 `source_name` 记入 IR，原始名保留在 `source_name_raw`；
-2. zip 打包时对 `source_name` 二次断言（无 `..`、无 `/`），形成双闸；`source_name_raw` 不进 zip；
+2. zip 打包时对 `source_name` 二次断言（无 `..`、无 `/`），形成双闸；`source_name_raw` 不进 `content.md` / `ir.json`（report.html 展示层转义保留）；
 3. 实现 watch folder 写入稳定性判定：文件大小 + mtime 连续 5s 无变化才入队（可配），期间只登记不计算；
 4. 实现目录递归防护：符号链接不跟随、目录深度 ≤ 20、跳过隐藏文件（`.` 开头，可配）、单目录文件数上限 5000；API 目录上传与 watch folder 共用同一实现（FR-129）；
 5. 超限目录返回 `413 / E4133`。

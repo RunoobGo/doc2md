@@ -19,7 +19,9 @@ import weakref
 from datetime import datetime, timezone
 from pathlib import Path
 
-DB_VERSION = 6   # state.sqlite 结构版本（user_version）；与 IR 的 SCHEMA_VERSION=14 是两套口径
+DB_VERSION = 7   # state.sqlite 结构版本（user_version）；与 IR 的 SCHEMA_VERSION=14 是两套口径
+# v7（CH-483 / R8-SVC-1）：新增 ix_deletions_doc_seq，同步转换窗口按
+# deletions 自增 id 查墓碑，避免删除后复活。
 # v6（CH-476 / R7-STOR-1，决策 D1）：新增 search_map（FTS 删除 rowid 映射）。
 # v5 及更早的存量库由 _migrate 无条件幂等 DDL + 版本门控回填补齐（R7-STOR-2：
 # CH-469 补 ix_events_*/ix_tasks_doc 时未 bump 版本，`if cur_ver < DB_VERSION`
@@ -76,6 +78,9 @@ CREATE TABLE IF NOT EXISTS deletions (
   kind TEXT NOT NULL DEFAULT 'doc',      -- doc | source
   cascade_json TEXT DEFAULT '{{}}'       -- 只记数量与路径指纹，不记正文
 );
+-- CH-483（R8-SVC-1）：同步转换窗口的删除守护按 (doc_id, id) 查墓碑；
+-- 用自增 id 而非秒/毫秒时间戳，避免同毫秒删除被误判为“请求开始之后”。
+CREATE INDEX IF NOT EXISTS ix_deletions_doc_seq ON deletions(doc_id, id);
 
 CREATE TABLE IF NOT EXISTS tokens (
   token TEXT PRIMARY KEY,                        -- CH-471 SVC-9：存 sha256(token) 十六进制，

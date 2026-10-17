@@ -55,6 +55,7 @@ class PageReport:
     page: int
     chars: int
     cjk_ratio: float
+    letters_ratio: float
     line_count: int
     noise_ratio: float
     ok: bool
@@ -77,7 +78,9 @@ class GateResult:
             "passed": self.passed,
             "page_detail": [
                 {"page": p.page + 1, "chars": p.chars, "lines": p.line_count,
-                 "cjk_ratio": round(p.cjk_ratio, 3), "noise_ratio": round(p.noise_ratio, 3),
+                 "cjk_ratio": round(p.cjk_ratio, 3),
+                 "letters_ratio": round(p.letters_ratio, 3),
+                 "noise_ratio": round(p.noise_ratio, 3),
                  "ok": p.ok, "reasons": p.reasons}
                 for p in self.pages
             ],
@@ -86,8 +89,8 @@ class GateResult:
         }
 
 
-def _page_metrics(page: RawPage) -> tuple[int, float, int, float]:
-    """页指标四元组（字符数 / CJK 占比 / 文本行数 / 噪声行占比）。
+def _page_metrics(page: RawPage) -> tuple[int, float, float, int, float]:
+    """页指标五元组（字符数 / CJK 占比 / 字母占比 / 文本行数 / 噪声行占比）。
 
     CH-476（R7-PERF-b）：单趟取数——原实现对同一段全文跑 4 个正则（其中 CJK
     `findall` 还被调了两次）并对每行 `strip()` 两遍；现在 `page.lines`
@@ -100,11 +103,14 @@ def _page_metrics(page: RawPage) -> tuple[int, float, int, float]:
     latin = len(text) - len(text.translate(_LATIN_DEL))
     letters = cjk + latin
     cjk_ratio = (cjk / letters) if letters else 0.0
+    # CH-483（R8-PIPE-3）：噪声页判据需要“可读字符占全部非空白字符”的比例；
+    # 旧实现算了 letters 却只用于 cjk_ratio，auto 模式因此无法区分乱码与真文本。
+    letters_ratio = (letters / chars) if chars else 0.0
     stripped = [x.strip() for x in raw_lines]
     lines = [x for x in stripped if x]
     noise = sum(1 for x in lines if _NOISE.match(x))
     noise_ratio = (noise / len(lines)) if lines else 1.0
-    return chars, cjk_ratio, len(lines), noise_ratio
+    return chars, cjk_ratio, letters_ratio, len(lines), noise_ratio
 
 
 def _page_chars(page: RawPage) -> int:
@@ -195,7 +201,7 @@ class GateCollector:
             self._seen += 1
 
     def _level(self, i: int, strict: bool) -> tuple[list[str], bool]:
-        chars, _cjk, nlines, noise = self.metrics[i]
+        chars, _cjk, letters_ratio, nlines, noise = self.metrics[i]
         r = []
         if chars < self.min_chars:
             r.append(f"chars={chars} < {self.min_chars}")
@@ -204,7 +210,12 @@ class GateCollector:
         if noise > 0.9 and nlines > 0:
             r.append(f"noise_ratio={noise:.2f}")
         empty = chars < self.empty_chars or nlines == 0
-        return r, (bool(r) if strict else empty)
+        # CH-483（R8-PIPE-3）：auto 模式把“几乎全是噪声符号、几乎没有字母/CJK”
+        # 的页也视为硬坏页；阈值保守（>95% 噪声行且可读字符 <5%），并沿用
+        # 连续页 / 占比护栏，避免图表页被误杀。strict 模式保持原口径。
+        noise_hard = (not strict and nlines > 0 and noise > 0.95
+                      and letters_ratio < 0.05)
+        return r, (bool(r) if strict else (empty or noise_hard))
 
     def finish(self, reject_on_any: bool = True) -> GateResult:
         """纯函数判定 + 拒收即抛；与旧 `check()` 逐字段同口径。"""
@@ -244,10 +255,12 @@ class GateCollector:
 
         pages_out: list[PageReport] = []
         for i in sorted(self._need):
-            chars, cjk, nlines, noise = self.metrics[i]
+            chars, cjk, letters_ratio, nlines, noise = self.metrics[i]
             r, hard = self._level(i, strict)
             in_decision = i in self._decision_set
-            pages_out.append(PageReport(page=i, chars=chars, cjk_ratio=cjk, line_count=nlines,
+            pages_out.append(PageReport(page=i, chars=chars, cjk_ratio=cjk,
+                                        letters_ratio=letters_ratio,
+                                        line_count=nlines,
                                         noise_ratio=noise, ok=not (hard and in_decision),
                                         reasons=r))
 

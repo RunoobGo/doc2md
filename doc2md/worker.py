@@ -162,7 +162,29 @@ def drain_once(store: Store, cfg: dict, root, *, workers: int | None = None,
                                  workers=n, mode=mode))
     sched = Scheduler(store)
     for res in results:
-        for job in by_path.get(res["file"], []):
+        group = by_path.get(res["file"], [])
+        # CH-483（R8-SVC-2）：同一路径可能排着多个不同 doc_id 的作业（入队后
+        # 文件被替换）。本轮只转换一次，产物只对应 consumed doc_id；其余旧作业
+        # 必须 rejected/E4092，不能全部标 done（否则旧 doc_id 查询 404）。
+        # 只有“能明确对上 consumed doc_id”时才淘汰组内其它作业；对不上
+        # （历史测试替身 / 转换端未回报 doc_id）保持原来的全组处理语义。
+        matched = None
+        if res["status"] == "ok":
+            consumed = res.get("doc_id") or ""
+            for cand in reversed(group):
+                if consumed and cand.get("doc_id") == consumed:
+                    matched = cand
+                    break
+        for job in group:
+            if res["status"] == "ok" and matched is not None and job is not matched:
+                detail = {"reason": "source_superseded",
+                          "enqueued_doc_id": job.get("doc_id") or "",
+                          "consumed_doc_id": res.get("doc_id") or ""}
+                sched.mark(job["job_id"], "rejected", "E4092", detail)
+                rep.rejected += 1
+                rep.notes.append(f"{job['job_id']}: source superseded")
+                _event(store, job, res, "job_rejected", writer)
+                continue
             if res["status"] == "ok":
                 ir = _read_ir(res["zip"])
                 if ir is None:

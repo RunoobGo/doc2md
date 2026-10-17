@@ -44,6 +44,9 @@ class WalkResult:
     files: list[str] = field(default_factory=list)
     skipped_hidden: int = 0
     skipped_symlinks: int = 0
+    # CH-483（R8-SEC-1）：follow_symlinks=True 时的实际跟随 / 越界拒绝计数。
+    followed_symlinks: int = 0
+    skipped_escaping_symlinks: int = 0
     dirs_visited: int = 0
     truncated: bool = False
     elapsed: float = 0.0
@@ -90,7 +93,21 @@ def guard_walk(root: str | os.PathLike, limits: WalkLimits | None = None) -> Wal
                         res.skipped_symlinks += 1
                         continue
                     try:
-                        if e.is_dir(follow_symlinks=False):
+                        if is_link:
+                            # CH-483（R8-SEC-1）：跟随必须限定在 root 内，且用
+                            # realpath 判 containment（链接自身路径永远在 root 下）。
+                            real = os.path.realpath(e.path)
+                            base_real = os.path.realpath(base)
+                            if not (real == base_real
+                                    or real.startswith(base_real + os.sep)):
+                                res.skipped_escaping_symlinks += 1
+                                continue
+                            res.followed_symlinks += 1
+                        is_dir = e.is_dir() if is_link else e.is_dir(
+                            follow_symlinks=False)
+                        is_file = e.is_file() if is_link else e.is_file(
+                            follow_symlinks=False)
+                        if is_dir:
                             if depth + 1 > lim.max_depth:
                                 continue
                             rp = os.path.realpath(e.path)
@@ -98,7 +115,7 @@ def guard_walk(root: str | os.PathLike, limits: WalkLimits | None = None) -> Wal
                                 continue
                             seen_real.add(rp)
                             sub_dirs.append(e.path)
-                        elif e.is_file(follow_symlinks=False):
+                        elif is_file:
                             if len(dir_files) + 1 > lim.max_files_per_dir:
                                 raise E4133_DirTooWide(
                                     f"directory {cur} exceeds max_files_per_dir="

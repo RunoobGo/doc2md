@@ -57,12 +57,15 @@ def _render_block(b: Block, **opt) -> str:
         lvl = min(6, max(1, b.level or 1))
         return "#" * lvl + " " + _inline(text, b, **opt)
     if b.type == "list_item":
+        indent = text[:len(text) - len(text.lstrip())]
         m = _ORDERED_ITEM.match(text)
         if m:
             # CH-478（R6-PIPE-1 收口）：有序项保留序号，分隔符统一为 GFM 的 `N. `
-            return m.group(1) + ". " + _inline(text[m.end():].strip(), b, **opt)
+            # CH-483（R8-PIPE-4）：保留 DOCX 自动编号的层级缩进。
+            return indent + m.group(1) + ". " + _inline(
+                text[m.end():].strip(), b, **opt)
         t = re.sub(r"^\s*[·•‣∙○●■□\-\*]\s+", "", text)
-        return "- " + _inline(t, b, **opt)
+        return indent + "- " + _inline(t, b, **opt)
     if b.type == "page_break":
         # CH-459：GFM 无分页符语法——结构信息留在 IR / 审阅页，Markdown 不落字节
         return ""

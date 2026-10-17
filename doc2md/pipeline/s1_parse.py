@@ -52,6 +52,14 @@ class Line:
     link_internal: bool = False
     link_dest: str = ""
     mono: bool = False
+    # CH-483（R8-PIPE-7）：整行所有非空文本是否统一带该格式。`bold/italic/strike`
+    # 仍是「任一 run 命中」的行级信号（旧口径），这里用于块级 marks 的保守生产。
+    uniform_bold: bool = False
+    uniform_italic: bool = False
+    uniform_strike: bool = False
+    # CH-483（R8-PIPE-4）：DOCX 自动编号（w:numPr）解析出的行首标记与层级。
+    list_marker: str = ""
+    list_level: int = -1
     row: list[str] | None = None            # CH-459：表格行单元格（非 None 即行候选）
     row_explicit: bool = False              # CH-459：行来自真实表格对象（DOCX w:tbl），
                                             # 而非 PDF 几何推断——S3 的防误判守卫只对后者生效
@@ -176,6 +184,9 @@ def read_pdf(path: str | Path, page_span: tuple[int, int] | None = None,
                     lines.append(Line(text=ln.get("text", ""), size=st[0],
                                       bold=st[1], italic=st[2], strike=st[3],
                                       mono=st[4],
+                                      uniform_bold=bool(st[1]),
+                                      uniform_italic=bool(st[2]),
+                                      uniform_strike=bool(st[3]),
                                       row=_row_cells(lchars),
                                       x0=float(ln.get("x0", 0.0) or 0.0),
                                       char_w=_char_width(lchars) if st[4] else 0.0))
@@ -370,11 +381,135 @@ class _DocxCtx:
     """
     styles: dict = field(default_factory=dict)
     has_links: bool = True
+    has_sdt: bool = False
+    has_custom_xml: bool = False
+    numbering: "_DocxNumbering | None" = None
 
 
-def _docx_ctx(root) -> _DocxCtx:
+def _docx_ctx(root, numbering=None) -> _DocxCtx:
     """按遍历容器建预检上下文（body 与各 notes part 各一份，样式缓存由调用方共享）。"""
-    return _DocxCtx(has_links=root.find(f".//{_W_NS}hyperlink") is not None)
+    return _DocxCtx(
+        has_links=root.find(f".//{_W_NS}hyperlink") is not None,
+        has_sdt=root.find(f".//{_W_NS}sdt") is not None,
+        has_custom_xml=root.find(f".//{_W_NS}customXml") is not None,
+        numbering=numbering)
+
+
+class _DocxNumbering:
+    """CH-483（R8-PIPE-4）：`numbering.xml` + 样式级 `w:numPr` 的编号解析。
+
+    只负责“第几项 / 什么标记 / 几级”；排版与缩进由 S3/S4 决定。无法解析的
+    格式回退为 decimal，绝不因为编号缺失丢掉正文。
+    """
+
+    def __init__(self, d):
+        self.levels: dict[str, dict[int, dict]] = {}
+        self.style_num: dict[str, tuple[str, int]] = {}
+        self.counters: dict[str, dict[int, int]] = {}
+        try:
+            from docx.opc.constants import RELATIONSHIP_TYPE as RT
+            from docx.oxml import parse_xml
+            part = d.part.part_related_by(RT.NUMBERING)
+        except (KeyError, ImportError):
+            return
+        try:
+            root = parse_xml(part.blob)
+        except Exception:
+            return
+        abstract: dict[str, dict[int, dict]] = {}
+        for an in root.findall(f"{_W_NS}abstractNum"):
+            aid = an.get(f"{_W_NS}abstractNumId", "")
+            lv: dict[int, dict] = {}
+            for lvl in an.findall(f"{_W_NS}lvl"):
+                try:
+                    ilvl = int(lvl.get(f"{_W_NS}ilvl", "0"))
+                except ValueError:
+                    continue
+                fmt = lvl.find(f"{_W_NS}numFmt")
+                txt = lvl.find(f"{_W_NS}lvlText")
+                start = lvl.find(f"{_W_NS}start")
+                lv[ilvl] = {
+                    "fmt": (fmt.get(f"{_W_NS}val", "decimal") if fmt is not None
+                            else "decimal"),
+                    "text": (txt.get(f"{_W_NS}val", "") if txt is not None else ""),
+                    "start": int(start.get(f"{_W_NS}val", "1")) if start is not None else 1,
+                }
+            abstract[aid] = lv
+        for num in root.findall(f"{_W_NS}num"):
+            nid = num.get(f"{_W_NS}numId", "")
+            aid_el = num.find(f"{_W_NS}abstractNumId")
+            aid = aid_el.get(f"{_W_NS}val", "") if aid_el is not None else ""
+            self.levels[nid] = abstract.get(aid, {})
+        try:
+            styles = d.styles.element
+        except Exception:
+            styles = None
+        if styles is not None:
+            for st in styles.findall(f"{_W_NS}style"):
+                sid = st.get(f"{_W_NS}styleId", "")
+                numPr = st.find(f"{_W_NS}pPr/{_W_NS}numPr")
+                if numPr is None or not sid:
+                    continue
+                nid_el = numPr.find(f"{_W_NS}numId")
+                lvl_el = numPr.find(f"{_W_NS}ilvl")
+                if nid_el is None:
+                    continue
+                self.style_num[sid] = (
+                    nid_el.get(f"{_W_NS}val", ""),
+                    int(lvl_el.get(f"{_W_NS}val", "0")) if lvl_el is not None else 0)
+
+    @staticmethod
+    def _fmt_num(n: int, fmt: str) -> str:
+        if fmt in ("lowerLetter", "upperLetter"):
+            ch = chr(ord("a") + (max(1, n) - 1) % 26)
+            return ch.upper() if fmt == "upperLetter" else ch
+        if fmt in ("lowerRoman", "upperRoman"):
+            vals = ((10, "x"), (9, "ix"), (5, "v"), (4, "iv"), (1, "i"))
+            out, k = "", max(1, n)
+            for v, s in vals:
+                while k >= v:
+                    out += s
+                    k -= v
+            return out.upper() if fmt == "upperRoman" else out
+        return str(n)
+
+    def marker(self, el, style_id: str | None) -> tuple[str, int]:
+        numPr = el.find(f".//{_W_NS}numPr")
+        nid = lvl = None
+        if numPr is not None:
+            nid_el = numPr.find(f"{_W_NS}numId")
+            lvl_el = numPr.find(f"{_W_NS}ilvl")
+            nid = nid_el.get(f"{_W_NS}val", "") if nid_el is not None else None
+            lvl = int(lvl_el.get(f"{_W_NS}val", "0")) if lvl_el is not None else 0
+        if nid is None and style_id in self.style_num:
+            nid, lvl = self.style_num[style_id]
+        if not nid or nid == "0":
+            return "", -1
+        levels = self.levels.get(nid) or {}
+        ilvl = int(lvl or 0)
+        cfg = levels.get(ilvl) or levels.get(0)
+        if not cfg:
+            return "", -1
+        counters = self.counters.setdefault(nid, {})
+        for i in range(ilvl + 1):
+            if i not in counters:
+                counters[i] = int((levels.get(i) or {}).get("start", 1)) - 1
+        counters[ilvl] += 1
+        for i in list(counters):
+            if i > ilvl:
+                counters[i] = int((levels.get(i) or {}).get("start", 1)) - 1
+        if cfg["fmt"] == "bullet":
+            return cfg["text"] or "•", ilvl
+
+        def repl(m):
+            idx = int(m.group(1)) - 1
+            lc = levels.get(idx) or {}
+            val = counters.get(idx, int(lc.get("start", 1)))
+            return self._fmt_num(val, str(lc.get("fmt", "decimal")))
+
+        import re as _re
+        marker = _re.sub(r"%(\d)", repl, cfg["text"] or "%1.")
+        return marker or f"{counters[ilvl]}.", ilvl
 
 
 def _docx_style_name(el, d, ctx: _DocxCtx) -> str:
@@ -409,7 +544,11 @@ def _docx_para_line(p, d, rels=None, ctx: _DocxCtx | None = None) -> Line | None
     if ctx is None:
         ctx = _DocxCtx()
     rev = _docx_has_revision(el)
-    if rev:
+    # CH-483（R8-PIPE-2）：只要容器里可能藏着 `w:sdt` / `w:customXml` / 超链接，
+    # 或段落本身有修订，就必须走「全部 run」的接受后视图——python-docx 的
+    # `p.text`/`p.runs` 只认 `w:p` 直接子级，sdt 内的文本会整块消失。
+    use_all = rev or ctx.has_sdt or ctx.has_custom_xml or ctx.has_links
+    if use_all:
         runs = _docx_all_runs(p)
         # `w:del` 里的文本是 `w:delText`，`Run.text` 本就不取 → 拼出来即「接受后」正文
         raw_text = "".join(r.text or "" for r in runs)
@@ -427,6 +566,10 @@ def _docx_para_line(p, d, rels=None, ctx: _DocxCtx | None = None) -> Line | None
         italic = italic or bool(r.italic)
         strike = strike or bool(r.font.strike)
         mono = mono or _name_is_mono(r.font.name)
+    nonempty = [r for r in runs if (r.text or "").strip()]
+    uniform_bold = bool(nonempty) and all(bool(r.bold) for r in nonempty)
+    uniform_italic = bool(nonempty) and all(bool(r.italic) for r in nonempty)
+    uniform_strike = bool(nonempty) and all(bool(r.font.strike) for r in nonempty)
     # CH-482：等宽段的行首空白（空格 / `w:tab`）是代码内容，DOCX 没有 x0 几何可重建，
     # 丢了就无从恢复——只对等宽行保留前导空白，散文行仍走 strip（原口径不变）。
     text = raw_text.rstrip() if mono else raw_text.strip()
@@ -437,10 +580,16 @@ def _docx_para_line(p, d, rels=None, ctx: _DocxCtx | None = None) -> Line | None
             level = max(1, min(6, int(style.split()[-1])))
         except Exception:
             level = 1
+    marker, list_level = "", -1
+    if ctx.numbering is not None and not style.lower().startswith("heading"):
+        marker, list_level = ctx.numbering.marker(el, el.style)
     link, link_internal, link_dest = _docx_para_link(p, d, text, rels, ctx.has_links)
     return Line(text=text, size=size or _style_size(style),
                 bold=bold or style.lower().startswith("heading"),
                 italic=italic, strike=strike, mono=mono,
+                uniform_bold=uniform_bold or style.lower().startswith("heading"),
+                uniform_italic=uniform_italic, uniform_strike=uniform_strike,
+                list_marker=marker, list_level=list_level,
                 link=link, link_internal=link_internal, link_dest=link_dest,
                 level_hint=level, has_revision=rev)
 
@@ -534,8 +683,8 @@ def _docx_notes_lines(d, ctx: _DocxCtx) -> list[Line]:
         except KeyError:
             continue
         root = parse_xml(part.blob)
-        local = _DocxCtx(styles=ctx.styles,
-                         has_links=root.find(f".//{_W_NS}hyperlink") is not None)
+        local = _docx_ctx(root, ctx.numbering)
+        local.styles = ctx.styles
         for note in root.findall(_NOTE_TAGS[kind]):
             if note.get(f"{_W_NS}type") in _NOTE_SEPARATORS:
                 continue
@@ -559,9 +708,15 @@ def _docx_cell_text(tc) -> str:
     （现有全部语料）与原实现逐字节相同 → 产物不变（G6）。
     嵌套 `w:tbl` 的段落仍被拍平进本格：无版面模型，本轮不表达表格嵌套。
     """
-    parts = ["".join(t.text or "" for t in p.iter(f"{_W_NS}t")).strip()
-             for p in tc.iter(f"{_W_NS}p")]
-    return " ".join(x for x in parts if x)
+    from docx.text.run import Run
+    parts = []
+    for p in tc.iter(f"{_W_NS}p"):
+        # CH-483（R8-PIPE-6）：`w:br`/`w:tab` 不是 `w:t`，旧实现只拼 `w:t`
+        # 会把 "A\nB\tC" 粘成 "ABC"。Run.text 已按 python-docx 口径映射。
+        txt = "".join(Run(r, p).text or "" for r in p.iter(f"{_W_NS}r")).strip()
+        if txt:
+            parts.append(txt)
+    return " ".join(parts)
 
 
 def _docx_table_rows(tbl) -> list[tuple[list[str], bool]]:
@@ -570,13 +725,56 @@ def _docx_table_rows(tbl) -> list[tuple[list[str], bool]]:
     CH-476（R7-GAP-1）：单元格取「接受后」视图（`w:ins` 内的 `w:t` 覆盖、`w:delText`
     不含），表格路径天然是接受口径，只需把修订信号带出来。
     CH-476（R7-GAP-3）：单元格内段落边界以单空格相连，见 `_docx_cell_text`。
+    CH-483（R8-PIPE-5）：`gridSpan` 展开为网格空位，`vMerge` 连续格置空，
+    保证每行列数与表格网格一致（GFM 无合并语义，宁可用空位对齐，不左移列）。
     """
+    grid_el = tbl.find(f"{_W_NS}tblGrid")
+    grid_n = len(grid_el.findall(f"{_W_NS}gridCol")) if grid_el is not None else 0
     rows: list[tuple[list[str], bool]] = []
     for tr in tbl.findall(f"{_W_NS}tr"):
-        cells = [_docx_cell_text(tc) for tc in tr.findall(f"{_W_NS}tc")]
+        cells: list[str] = []
+        for tc in tr.findall(f"{_W_NS}tc"):
+            tcPr = tc.find(f"{_W_NS}tcPr")
+            span = 1
+            cont = False
+            if tcPr is not None:
+                gs = tcPr.find(f"{_W_NS}gridSpan")
+                if gs is not None:
+                    try:
+                        span = max(1, int(gs.get(f"{_W_NS}val", "1")))
+                    except ValueError:
+                        span = 1
+                vm = tcPr.find(f"{_W_NS}vMerge")
+                if vm is not None:
+                    cont = vm.get(f"{_W_NS}val", "continue") != "restart"
+            cells.append("" if cont else _docx_cell_text(tc))
+            cells.extend([""] * (span - 1))
         if cells:
             rows.append((cells, _docx_has_revision(tr)))
+    width = max([grid_n] + [len(r[0]) for r in rows])
+    if width and any(len(r[0]) < width for r in rows):
+        rows = [(cells + [""] * (width - len(cells)), rev) for cells, rev in rows]
     return rows
+
+
+def _iter_docx_blocks(container):
+    """按文档顺序产出 ('p'|'tbl', element)，递归进入 sdtContent / customXml。
+
+    CH-483（R8-PIPE-2）：块级内容控件与自定义 XML 不是 `w:body` 的直接 `w:p`/
+    `w:tbl` 子级；旧实现只遍历直接子级，整块正文静默消失。
+    """
+    for child in container:
+        tag = child.tag
+        if tag == f"{_W_NS}p":
+            yield "p", child
+        elif tag == f"{_W_NS}tbl":
+            yield "tbl", child
+        elif tag == f"{_W_NS}sdt":
+            content = child.find(f"{_W_NS}sdtContent")
+            if content is not None:
+                yield from _iter_docx_blocks(content)
+        elif tag == f"{_W_NS}customXml":
+            yield from _iter_docx_blocks(child)
 
 
 def read_docx(path: str | Path, fmt: str | None = None) -> list[RawPage]:
@@ -595,17 +793,17 @@ def read_docx(path: str | Path, fmt: str | None = None) -> list[RawPage]:
     import docx.text.paragraph as _dp
 
     d = _open_source(lambda: docx.Document(str(path)), path, "docx")
-    ctx = _docx_ctx(d.element.body)
+    numbering = _DocxNumbering(d)
+    ctx = _docx_ctx(d.element.body, numbering)
     lines: list[Line] = []
-    for child in d.element.body:
-        tag = child.tag
-        if tag == f"{_W_NS}p":
+    for kind, child in _iter_docx_blocks(d.element.body):
+        if kind == "p":
             ln = _docx_para_line(_dp.Paragraph(child, d), d, ctx=ctx)
             if ln is not None:
                 lines.append(ln)
             if child.findall(f".//{_W_NS}br[@{_W_NS}type='page']"):
                 lines.append(Line(text="\x0c", size=0.0))
-        elif tag == f"{_W_NS}tbl":
+        else:
             for cells, rev in _docx_table_rows(child):
                 lines.append(Line(text=" | ".join(cells), row=cells,
                                   row_explicit=True, has_revision=rev))

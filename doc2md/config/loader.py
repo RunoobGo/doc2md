@@ -164,25 +164,42 @@ def _base() -> dict[str, Any]:
 
 
 def load(path: str | os.PathLike | None = None) -> dict:
+    """默认 → $DOC2MD_HOME → 当前目录 → 显式 --config（后者覆盖前者）。
+
+    CH-483（R8-CFG-1）：旧实现只读取“第一个命中的文件”，与 README 宣称的层叠
+    顺序不符——home 配置 + 项目配置并存时，后者会被静默忽略。现在按优先级
+    逐层深度合并；显式 --config 仍必须存在，且优先级最高。
+    """
     cfg = _base()
-    cand = Path(path) if path else None
+    home = (Path(os.environ.get("DOC2MD_HOME", "~/.doc2md")).expanduser()
+            / TOML_BASENAME)
+    cwd = Path.cwd() / TOML_BASENAME
+    sources: list[Path] = [home, cwd]
+    if path is not None:
+        explicit_path = Path(path)
+        if not explicit_path.is_file():
+            raise ConfigError(f"--config 指向的文件不存在：{path}")
+        sources.append(explicit_path)
+    seen: set[Path] = set()
     explicit: set[str] = set()
-    if cand is None:
-        for p in (Path.cwd() / TOML_BASENAME,
-                  Path(os.environ.get("DOC2MD_HOME", "~/.doc2md")).expanduser() / TOML_BASENAME):
-            if p.is_file():
-                cand = p
-                break
-    if cand is not None and not Path(cand).is_file():
-        raise ConfigError(f"--config 指向的文件不存在：{cand}")
-    if cand is not None:
-        user = _read(Path(cand))
+    for cand in sources:
+        try:
+            key = cand.resolve()
+        except OSError:
+            key = cand
+        if key in seen:
+            continue
+        seen.add(key)
+        if not cand.is_file():
+            # 未显式指定的候选缺失不是错误；显式路径已在上面拦下。
+            continue
+        user = _read(cand)
         # CH-469（O-15）：未知键 = 静默失效的拼写错误，装载期点名（不改值、不阻断启动）
         for dotted in unknown_keys(user):
             warnings.warn(f"{cand}: 未知配置键 {dotted}（不生效，请核对方案 附录 A）",
                           UserWarning, stacklevel=2)
         _deep_merge(cfg, user)
-        explicit = _dotted_keys(user)
+        explicit |= _dotted_keys(user)
     _apply_profile(cfg, explicit)
     validate(cfg)
     return cfg

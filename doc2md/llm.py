@@ -160,7 +160,8 @@ class OpValidator:
         self.blocks = {b.id: b for b in blocks}
         self._order = list(blocks)
         self._index = {b.id: i for i, b in enumerate(self._order)}
-        self.whitelist = set(whitelist or DEFAULT_OP_WHITELIST)
+        # CH-483（R8-LLM-1）：显式空列表表示“全部拒绝”，不得回退默认白名单。
+        self.whitelist = set(DEFAULT_OP_WHITELIST if whitelist is None else whitelist)
 
     def apply(self, ops: list[dict]) -> tuple[list[dict], list[dict]]:
         accepted: list[dict] = []
@@ -179,6 +180,11 @@ class OpValidator:
     def _check(self, op: dict, occupied: set[str]) -> list[str]:
         reasons: list[str] = []
         name = op.get("op")
+        # CH-483（R8-LLM-1）：畸形 JSON 可能把 op 写成 list/dict；集合查找会抛
+        # TypeError 并逃逸成整篇 500。类型不符按“非白名单”拒绝。
+        if not isinstance(name, str):
+            reasons.append("not_whitelisted")
+            return reasons
         if name not in self.whitelist:
             reasons.append("not_whitelisted")
             return reasons
@@ -460,7 +466,8 @@ def _parse_ops(resp: dict) -> list[dict]:
     except ValueError as exc:
         raise LlmServiceError(f"unparsable JSON: {exc}", stage="parse") from exc
     ops = obj.get("ops") if isinstance(obj, dict) else obj
-    if not isinstance(ops, list) or not all(isinstance(o, dict) and "op" in o for o in ops):
+    if not isinstance(ops, list) or not all(
+            isinstance(o, dict) and isinstance(o.get("op"), str) for o in ops):
         raise LlmServiceError("ops payload shape invalid", stage="parse")
     return ops[:MAX_OPS_PER_RESPONSE]
 

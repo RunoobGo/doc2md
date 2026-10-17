@@ -27,7 +27,8 @@ from ..ir import IR, Block
 from .s1_parse import RawPage
 
 _NUM = re.compile(r"^\s*(\d+(?:\.\d+)*)\s*[、\.::]?\s*")
-_CJK_HEAD = re.compile(r"^\s*(第[一二三四五六七八九十百千\d]+[章节条款项编部篇])")
+_CJK_HEAD = re.compile(
+    r"^\s*(第\s*[一二三四五六七八九十百千\d]+\s*[章节条款项编部篇])")
 _BULLET = re.compile(r"^\s*([·•‣∙○●■□\-\*])\s+")
 # CH-478（R6-PIPE-1 收口，决策「落地有序列表分支」）：PDF 有序列表项的编号形态。
 # `(?!\d)` 挡住小数（"3.5 节"），`\d{1,3}` 上限挡住年份起头的段落（"2019. 报告"），
@@ -192,11 +193,23 @@ def _mark_provenance(b: Block, lines) -> None:
       「尾部这些段落是注，不是正文」）。
     PDF 行两个信号恒为空，故 PDF 语料产物不变。
     """
-    if any(ln.has_revision for ln in lines):
+    rows = list(lines)
+    if any(ln.has_revision for ln in rows):
         b.flags.setdefault("has_revision", True)
-    kinds = [ln.note_kind for ln in lines if ln.note_kind]
+    kinds = [ln.note_kind for ln in rows if ln.note_kind]
     if kinds:
         b.flags.setdefault("note_kind", kinds[0])
+    # CH-483（R8-PIPE-7）：块级 marks 只在“所有非空来源行都统一带格式”时写入。
+    # 混合粗体的段落保持无 marks，避免把局部强调错误扩散成整段 `**...**`。
+    if b.type in ("paragraph", "list_item"):
+        nonempty = [ln for ln in rows if (ln.text or "").strip()]
+        if nonempty:
+            if all(ln.uniform_bold for ln in nonempty):
+                b.marks.setdefault("bold", True)
+            if all(ln.uniform_italic for ln in nonempty):
+                b.marks.setdefault("italic", True)
+            if all(ln.uniform_strike for ln in nonempty):
+                b.marks.setdefault("strikethrough", True)
 
 
 def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
@@ -356,8 +369,10 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
                 code_page = page.index
                 continue
             # --- 标题（CH-459：DOCX Heading 样式提示优先于启发式）---
-            lvl = _heading_level(text, ln.size, base_size, ln.bold,
-                                 hint=ln.level_hint)
+            # 自动编号是显式列表信号：不让「第一项」这类文本再被 CJK 章标记
+            # 启发式抢成标题（Heading 样式在 S1 已跳过编号解析，hint 仍可优先）。
+            lvl = None if ln.list_marker else _heading_level(
+                text, ln.size, base_size, ln.bold, hint=ln.level_hint)
             if lvl:
                 flush_para()
                 flush_quote()
@@ -367,6 +382,25 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
                 if ln.level_hint:
                     # CH-476（R7-PIPE-4）：显式样式层级留痕，`_fix_levels` 依此不改写
                     blocks[-1].flags["level_from_hint"] = True
+                _attach_link(blocks[-1], ln)
+                _mark_provenance(blocks[-1], (ln,))
+                continue
+            # --- DOCX 自动编号（CH-483 / R8-PIPE-4）---
+            if ln.list_marker:
+                flush_para()
+                flush_quote()
+                flush_rows(True)
+                marker = ln.list_marker
+                # GFM 只表达 bullet / 阿拉伯数字有序列表；其它编号格式保留
+                # “层级 + 列表”语义，标记归一为 1.，原始标记进 flags 供审阅。
+                if not (marker[:1].isdigit() or _BULLET.match(marker + " ")):
+                    marker = "1."
+                indent = "  " * max(0, ln.list_level)
+                blocks.append(Block(id="", type="list_item",
+                                    text=f"{indent}{marker} {text.strip()}",
+                                    font=_font(ln), page=page.index))
+                blocks[-1].flags["docx_numbering"] = {
+                    "marker": ln.list_marker, "level": ln.list_level}
                 _attach_link(blocks[-1], ln)
                 _mark_provenance(blocks[-1], (ln,))
                 continue

@@ -84,6 +84,15 @@ class E4091_DocOverwrite(ApiError):
     code, http = "E4091", 409
 
 
+class E4092_SourceSuperseded(ApiError):
+    """CH-483（R8-SVC-2）：同一路径的旧作业已被更新内容替代。
+
+    作业终态为 rejected，`detail` 带 enqueued/consumed doc_id；不落库旧内容，
+    避免 GET /jobs 显示 done 而 GET /docs/<旧 id> 404。
+    """
+    code, http = "E4092", 409
+
+
 # --- 5xx：内部 ----------------------------------------------------------------
 class E5031_StorageError(Doc2mdError):
     code, http = "E5031", 500
@@ -104,7 +113,7 @@ CODE_INDEX = {
         E4001_BadRequest, E4003_FileNameUnsafe, E4011_Unauthorized, E4031_Forbidden,
         E4041_NotFound, E4131_TooLarge, E4133_DirTooWide,
         E4151_UnsupportedType, E4221_GateReject, E4251_RevisionConflict,
-        E4091_DocOverwrite,
+        E4091_DocOverwrite, E4092_SourceSuperseded,
         E5031_StorageError, E5041_LlmUnavailable,
     ]
 }
