@@ -10,7 +10,7 @@ python3 -m venv env && env/bin/pip install -e ".[dev]"
 env/bin/doc2md doctor                    # 环境自检（依赖 / 目录权限 / tokenizer 口径）
 ```
 
-命名纪律：标识符一律小写 `doc2md`；launchd 标签 `md.doc2md.cron` / `md.doc2md.cron.weekly`（随包分发的两档；`serve` / `work` 常驻资产为待办 T12，尚无标签）。
+命名纪律：标识符一律小写 `doc2md`；四个常驻/定时标签 `md.doc2md.cron`、`md.doc2md.cron.weekly`、`md.doc2md.serve`、`md.doc2md.work`，macOS 的 plist 与 Windows 的任务名逐一对应（定时两档随包分发即用；常驻两档是 CH-480 / T12 补齐的资产，会长期占驻进程，需按下节显式安装）。
 
 ## CLI
 
@@ -106,19 +106,45 @@ launchctl list | grep doc2md          # 校验（R6）：应列出两个标签
 全部 10 个步骤名与失败语义见方案 附录 E。
 口令不要写进 plist；用 `launchctl setenv DOC2MD_BACKUP_PASSPHRASE …` 或 Keychain 包装脚本注入。
 
+## 常驻服务（launchd，CH-480 / T12）
+
+```bash
+cp ops/launchd/md.doc2md.serve.plist ops/launchd/md.doc2md.work.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/md.doc2md.serve.plist
+launchctl load ~/Library/LaunchAgents/md.doc2md.work.plist
+launchctl list | grep doc2md          # 校验：定时 + 常驻四个标签齐全
+```
+
+`md.doc2md.serve` 登录即拉起回环 API：ProgramArguments 显式钉 `--host 127.0.0.1`（NFR-1 离线
+单机姿态），端口不写进资产、取配置 `api.port`；要对外暴露还得同时设 `api.allow_remote_bind`，
+缺一 serve 直接拒绝启动。`md.doc2md.work` 登录即拉起 tasks 队列的常驻消费者（并发取
+`perf.workers`，队列空时 5 秒一轮；serve 不起常驻线程，异步转换归它，见 ADR-30 / CH-449）。
+
+两档均为 `RunAtLoad` + `KeepAlive{SuccessfulExit: false}` + `ThrottleInterval 30`：
+**崩溃（非零退出）自动重启，正常退出与 `launchctl unload` 不会被复活**，重启风暴由 30 秒节流兜住。
+它们会长期占用一个监听进程加一个转换进程池，8GB 机器可只装 serve、需要时手跑
+`doc2md work --once` 排空即退。实机「开机自启 + 崩溃自恢复」的行为待真机确认（方案 12.7 B-9）。
+
 ## 定时任务（Windows 任务计划）
 
 ```powershell
 pwsh ops/windows/install-doc2md-tasks.ps1 -SetPassphrase   # 安装 + 交互式设置用户级口令
+pwsh ops/windows/install-doc2md-tasks.ps1 -WithResident     # 定时两档 + 常驻两档
 pwsh ops/windows/install-doc2md-tasks.ps1 -VerifyOnly       # 校验（等价 launchctl list）
 pwsh ops/windows/install-doc2md-tasks.ps1 -Uninstall        # 卸载
 ```
 
 注册 `md.doc2md.cron`（每日 00:00）与 `md.doc2md.cron.weekly`（周日 00:30）两个任务，
 以当前用户最低权限运行，无需管理员；电池供电照跑、错过的时间窗开机补跑。
+常驻两档（`md.doc2md.serve` / `md.doc2md.work`，CH-480 / T12）**默认不装**，要显式加
+`-WithResident`：登录触发（LogonTrigger）、`ExecutionTimeLimit` 取 `PT0S`（不限时长）、
+`RestartOnFailure` 间隔 1 分钟最多 10 次、`MultipleInstancesPolicy=IgnoreNew`（重复触发让位给
+在跑的实例）。平台语义差如实保留：launchd 侧是无限重启 + 30 秒节流，Windows 侧重启次数有上界，
+超限后需手工重启任务。`-VerifyOnly` 不带该开关时，未安装的常驻档记 SKIP 不算失败；
+`-Uninstall` 不分口径，四档一律清理，常驻档先 `Stop-ScheduledTask` 再注销。
 任务定义（`ops/windows/*.xml`）不含任何口令；时间触发按**本机本地时间**解释
 （launchd 的 `StartCalendarInterval` 同样按**系统本地墙钟**触发——plist 里的 `TZ=UTC` 只设定子进程读到的时钟口径、不改触发时刻；要与 Windows 严格同频两边都按本地钟即可，需要 UTC 口径则把机器时区设为 UTC，或用 `-DailyAt` 换算）。
-排障：`Get-ScheduledTask -TaskName md.doc2md.cron* | Format-List *`。
+排障：`Get-ScheduledTask -TaskName md.doc2md.* | Format-List *`。
 
 ## 日志（NFR-19 / CH-444）
 
@@ -132,6 +158,12 @@ pwsh ops/windows/install-doc2md-tasks.ps1 -Uninstall        # 卸载
 不与服务的活动文件互踩。`doc2md work`（CH-449）同理写自己的 `work/logs/work.jsonl`——
 rename 轮转只能有一个属主，三类进程三份文件。
 
+任务计划的输出捕获另算一档：`ops/launchd/*.plist` 的 `StandardOutPath` / `StandardErrorPath` 落在
+`work/logs/launchd-<档>.out` / `.err`，由 launchd 直接追加，服务自身与日流程都不轮转这两份文件。
+定时两档每轮只写几行，可视为有界；**常驻 serve 会把 Werkzeug 的访问行一并写进 `.err`，长期常驻会
+无界增长**——现阶段需手工截断（`: > work/logs/launchd-serve.err`），处置口径已登记为方案 12.7 的
+「常驻 stderr 捕获无界」待裁定项。Windows 任务计划不捕获标准输出，没有这一份增长。
+
 ## 文档与变更跟踪
 
 | 文档 | 作用 |
@@ -141,7 +173,7 @@ rename 轮转只能有一个属主，三类进程三份文件。
 | `ops/backup.md` | 备份介质与恢复演练细则 |
 | `ops/windows/install-doc2md-tasks.ps1` | Windows 任务计划安装 / 校验 / 卸载（与 launchd 同等能力） |
 
-跟踪约定：契约变更、缺陷、更优做法一律按登记流写入方案 第十一章（当前编号至 `CH-479`，下一条自 `CH-480`），实测数字进第十二章并标注语料与测量方法；规格发生变化时同步主题篇章节与本文相应小节，并递增 `doc2md.PLAN_VERSION`（管线契约变化另递增 `PIPELINE_VERSION`；状态库结构变化另递增 `DB_VERSION`，CH-469 起为 `5`、CH-476 起为 `6`）。
+跟踪约定：契约变更、缺陷、更优做法一律按登记流写入方案 第十一章（当前编号至 `CH-480`，下一条自 `CH-481`），实测数字进第十二章并标注语料与测量方法；规格发生变化时同步主题篇章节与本文相应小节，并递增 `doc2md.PLAN_VERSION`（管线契约变化另递增 `PIPELINE_VERSION`；状态库结构变化另递增 `DB_VERSION`，CH-469 起为 `5`、CH-476 起为 `6`）。
 
 ## 验收与测试
 
@@ -156,8 +188,8 @@ rename 轮转只能有一个属主，三类进程三份文件。
 
 跨版本覆盖分两套工作流（CH-479）：上面的 `ci.yml` 是 **push 面**，`full-suite` 只在 `3.12` 单档跑一次
 （红线层本就是三档矩阵，把全量也扩成三档会让每次推送多两条 30 分钟腿，而覆盖增量只落在非红线的
-551 项用例上）；**周期面** `.github/workflows/ci-full-matrix.yml` 每周一 02:17 UTC（另有
-`workflow_dispatch` 供取证）用 3.11/3.12/3.13 三档跑全量 + 黄金逐字节复现 + `doctor`，补上那 551 项的
+551 项用例上，CH-480 后为 560 项）；**周期面** `.github/workflows/ci-full-matrix.yml` 每周一 02:17 UTC（另有
+`workflow_dispatch` 供取证）用 3.11/3.12/3.13 三档跑全量 + 黄金逐字节复现 + `doctor`，补上这些非红线项的
 跨版本空白。这个分工由 `tests/test_ch479_ci_matrix.py` 的四条红线钉住：两工作流的版本集合必须相等、
 push 面 `full-suite` 必须保持无矩阵且钉死 `3.12`、每个作业必须带 `timeout-minutes`、周期腿不得挂
 `push`/`pull_request` 触发。周期腿首证 = run `39032817663`（手动 `workflow_dispatch`，三档各 `811 passed`，含黄金逐字节复现与 `doctor` 自检），push 面 = run `39032796293`（三档各 `260 passed, 551 deselected` + `811 passed` 全量）。
@@ -169,9 +201,9 @@ push 面 `full-suite` 必须保持无矩阵且钉死 `3.12`、每个作业必须
 > 也成立，需为 `main` 打开「Require a pull request before merging」，那是改变日常工作流的决策项。
 
 ```bash
-pytest -m gate            # 红线层：六条 merge-gate + 低配机专项 + CH-469 两批安全/契约专项 + CH-473 第五轮 12 项 + CH-475 第六轮 7 项 + CH-476 第七轮 91 项 + CH-477 版本对账 4 项 + CH-478 批次① 有序列表端到端 4 项 + 批次② 等价门缩进敏感度 4 项 + CH-479 CI 版本矩阵口径 4 项（全绿方可合并）
-                          # 当前 260 项 = 256（上一轮口径：40 契约红线 + 29 低配机 + 10 服务/存储 + 54 安全/配置/运维 + 13（CH-473 12 项 + CH-474 补入 X-17 1 项）+ 7（CH-475 第六轮）+ 91（CH-476：test_ch476_fixes.py 83 + test_sharding_unit.py 8）+ 4（CH-477 版本与编号对账）+ 4（CH-478 批次①：test_ch478_fixes.py 端到端反例）+ 4（CH-478 批次②：test_ch478_gate_drift.py 度量对照））+ 4（CH-479：test_ch479_ci_matrix.py 工作流文本静态断言）
-                          # 耗时历史记录：Linux 沙箱轮次 72–110s、T8 优化后 53.0s、CH-469 本机（macOS arm64 / Py 3.15）28.7s、CH-473 62.7s、CH-475 30.0s、CH-476 33.9s、CH-477 33.25s / 31.98s、CH-478 批次① 31.54s、批次② 31.16s、CH-479 38.55s / 收口复跑 33.74s（四条新红线只读工作流文本，差值属同机负载抖动）——项数是硬口径，耗时只作历史
+pytest -m gate            # 红线层：六条 merge-gate + 低配机专项 + CH-469 两批安全/契约专项 + CH-473 第五轮 12 项 + CH-475 第六轮 7 项 + CH-476 第七轮 91 项 + CH-477 版本对账 4 项 + CH-478 批次① 有序列表端到端 4 项 + 批次② 等价门缩进敏感度 4 项 + CH-479 CI 版本矩阵口径 4 项 + CH-480 常驻资产同构 7 项（全绿方可合并）
+                          # 当前 267 项 = 260（上一轮口径：40 契约红线 + 29 低配机 + 10 服务/存储 + 54 安全/配置/运维 + 13（CH-473 12 项 + CH-474 补入 X-17 1 项）+ 7（CH-475 第六轮）+ 91（CH-476：test_ch476_fixes.py 83 + test_sharding_unit.py 8）+ 4（CH-477 版本与编号对账）+ 4（CH-478 批次①：test_ch478_fixes.py 端到端反例）+ 4（CH-478 批次②：test_ch478_gate_drift.py 度量对照）+ 4（CH-479：test_ch479_ci_matrix.py 工作流文本静态断言））+ 7（CH-480：test_ch480_resident_assets.py 常驻 plist/schtasks 资产的静态同构断言）
+                          # 耗时历史记录：Linux 沙箱轮次 72–110s、T8 优化后 53.0s、CH-469 本机（macOS arm64 / Py 3.15）28.7s、CH-473 62.7s、CH-475 30.0s、CH-476 33.9s、CH-477 33.25s / 31.98s、CH-478 批次① 31.54s、批次② 31.16s、CH-479 38.55s / 收口复跑 33.74s、CH-480 36.13s / 收口复跑 35.43s（新七条红线只做 plistlib 解析与 XML 读 DOM，差值属同机负载抖动）——项数是硬口径，耗时只作历史
 pytest tests/             # 全量（marker 实际取值：M0+M2 / M3 / M5 / M6c / M8 / M9a / DoD / PERF，见 pytest.ini）
 python3 tests/make_golden.py            # 重建黄金样本（输出目录随脚本位置，--golden 可覆盖）
 python3 tests/make_golden.py --force    # 强制重生成

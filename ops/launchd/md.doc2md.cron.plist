@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- Doc2md 日任务（附录 C-2 / ADR-30）：本地墙钟 00:00 触发 doc2md cron 的日流程（TZ=UTC 仅设定子进程时钟口径，不改触发时刻）。
+<!-- Doc2md 日任务（附录 C-2 / ADR-30 出自已归档蓝本 docs/Doc2md项目开发方案V1.0.md，现行规格见 docs/dev-plan.md 6.5 与附录 E）：本地墙钟 00:00 触发 doc2md cron 的日流程（TZ=UTC 仅设定子进程时钟口径，不改触发时刻）。
      安装：cp ops/launchd/md.doc2md.cron.plist ~/Library/LaunchAgents/
      校验：launchctl list | grep doc2md  （应列出 md.doc2md.cron 与 md.doc2md.cron.weekly）
      注：ProgramArguments / WorkingDirectory / 显式根参数（root）三处路径一律按实际部署

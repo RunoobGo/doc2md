@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Doc2md 常驻服务（T12 / CH-480，ops/launchd/md.doc2md.serve.plist 的 Windows 孪生）。
+     能力口径：登录即启动 + 崩溃自恢复，与 launchd 的 RunAtLoad + KeepAlive（仅非零退出重启）同构。
+
+     安装：pwsh ops/windows/install-doc2md-tasks.ps1 -WithResident
+     校验：Get-ScheduledTask -TaskName md.doc2md.serve | Get-ScheduledTaskInfo
+     手工导入：schtasks /Create /TN md.doc2md.serve /XML ops/windows/md.doc2md.serve.xml /F
+
+     与 cron 档的三处刻意不同（都是「常驻」语义带来的）：
+     - 触发器用 LogonTrigger（登录事件，无时间窗），不是 CalendarTrigger；对应 launchd
+       LaunchAgents 的用户登录加载，而非 StartCalendarInterval。
+     - ExecutionTimeLimit 取 PT0S：文档明确「A value of PT0S will enable the task to run
+       indefinitely」，cron 档则是 PT2H 硬上限（挂起任务不占驻）。
+     - Settings 带 RestartOnFailure（间隔 PT1M、次数 10）：launchd 侧是无限重启 +
+       ThrottleInterval 30 秒，平台语义差（超限后需手工重启任务）登记 B-9 待真机确认。
+     - 动作参数钉死回环地址（NFR-1 离线单机姿态 / 第四轮决策 D4）：要对外暴露必须同时改
+       这里的 host 参数与配置项 api.allow_remote_bind，缺一即 serve 拒绝启动。
+       端口不写进资产，取配置 api.port（默认 8090），免两处漂移。
+     - MultipleInstancesPolicy 保持 IgnoreNew：常驻任务被重复触发时必须让位给在跑的实例，
+       否则第二个 serve 只会因端口占用而失败重启（8GB 机上等于空转风暴）。
+     口令：本文件不含备份口令变量名（NFR-20）；口令只归 cron / backup 流程。
+     占位符 __DOC2MD_EXE__ / __DOC2MD_ROOT__ / __DOC2MD_USER__ 由安装脚本替换；未替换时
+     Register-ScheduledTask 会因 UserId/Command 无效而失败，不会静默装错。
+     模式口径：Settings 子元素名一律按 Microsoft settingsType 定义拼写（该复合类型是
+     xsd:all，顺序不敏感）；本轮同时把 cron 档里拼错的电池元素名改回定义名。 -->
+<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task" version="1.4">
+  <RegistrationInfo>
+    <Description>Doc2md 常驻服务：doc2md serve（回环 API，登录自启 + 失败自恢复）</Description>
+    <URI>\md.doc2md.serve</URI>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>__DOC2MD_USER__</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>false</WakeToRun>
+    <RestartOnFailure><Interval>PT1M</Interval><Count>10</Count></RestartOnFailure>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>7</Priority>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>__DOC2MD_EXE__</Command>
+      <Arguments>serve --host 127.0.0.1</Arguments>
+      <WorkingDirectory>__DOC2MD_ROOT__</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>

@@ -3,7 +3,7 @@
 # 但它只拦 PR 合并、不拦直推 main（CH-470），所以本钩子仍是直推路径上的唯一防线。
 # 启用：git config core.hooksPath ops/hooks
 # 绕过：git push --no-verify（登记在案时可用；日常不要绕）。
-# 红线口径：pytest -m gate（当前 260 项；项数随轮次变化，权威清单见方案 附录 F，
+# 红线口径：pytest -m gate（当前 267 项；项数随轮次变化，权威清单见方案 附录 F，
 # 本行只是提示，判定始终是「全绿方可推送」——与 CI merge-gate 同一断言面）。
 set -e
 cd "$(git rev-parse --show-toplevel)"

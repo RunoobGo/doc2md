@@ -125,9 +125,11 @@ def test_actions_match_cli_contract():
 @pytest.mark.parametrize("xml_path", [DAILY_XML, WEEKLY_XML])
 def test_settings_cover_windows_realities(xml_path):
     s = _find(_task_root(xml_path), "Settings")
-    # 笔记本电池供电照跑（家用 Win11 是主要目标机型，§7）
+    # 笔记本电池供电照跑（家用 Win11 是主要机型，§7）。元素名按 Microsoft settingsType
+    # 定义拼写（CH-480 核对文档后补回漏掉的 On：原写法 StopIfGoingBatteries 不是定义元素，
+    # 真机 Register-ScheduledTask 是否因此被拒未证 → 归 B-3 / B-7）。
     assert _find(s, "DisallowStartIfOnBatteries").text == "false"
-    assert _find(s, "StopIfGoingBatteries").text == "false"
+    assert _find(s, "StopIfGoingOnBatteries").text == "false"
     # 错过的时间窗开机补跑（对齐 launchd 唤醒补跑）
     assert _find(s, "StartWhenAvailable").text == "true"
     # 不并发重入（cron 各步骤幂等，但没必要叠运行例）

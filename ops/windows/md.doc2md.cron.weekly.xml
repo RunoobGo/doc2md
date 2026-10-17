@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Doc2md 周任务（方案 §539 / 附录 C-2 / ADR-30 的 Windows 侧对应物，CH-456 / T5）。
+<!-- Doc2md 周任务（附录 C-2 / ADR-30 出自已归档蓝本 docs/Doc2md项目开发方案V1.0.md，其 Windows 侧对应物，CH-456 / T5；现行规格见 docs/dev-plan.md 6.5 与附录 E）。
      与 ops/launchd/md.doc2md.cron.weekly.plist 同等能力：每周日本地时间 00:30 触发
      `doc2md cron` 的周流程（日流程的超集：先完整执行日报各步骤，再追加外置加密增量）。
 
@@ -12,6 +12,8 @@
        时外置加密步骤记 skipped，不算失败（CH-433）——与 plist 注释同口径。
      - 外置副本口令绝不写进本文件（NFR-20 密钥纪律，连变量名也不出现）；由安装脚本
        -SetPassphrase 交互式写入用户级环境变量，或改用 Credential Manager 包装。
+     - 模式拼写（CH-480）：Settings 子元素名按 Microsoft settingsType 定义写（xsd:all，
+       顺序不敏感）；本轮补回电池元素名里漏掉的 On，同 md.doc2md.cron.daily.xml。
      - 占位符 __DOC2MD_EXE__ / __DOC2MD_ROOT__ / __DOC2MD_USER__ / __DOC2MD_START__
        由安装脚本替换；未替换时注册必然失败，不会静默装错。 -->
 <Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task" version="1.4">
@@ -41,7 +43,7 @@
   <Settings>
     <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
     <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
-    <StopIfGoingBatteries>false</StopIfGoingBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
     <AllowHardTerminate>true</AllowHardTerminate>
     <StartWhenAvailable>true</StartWhenAvailable>
     <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>

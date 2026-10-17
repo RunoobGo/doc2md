@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Doc2md 常驻服务（T12 / CH-480）：登录即拉起本地 API 服务，崩溃（非零退出）自动重启。
+     安装：cp ops/launchd/md.doc2md.serve.plist ~/Library/LaunchAgents/
+           launchctl load ~/Library/LaunchAgents/md.doc2md.serve.plist
+     校验：launchctl list | grep doc2md   （应列出 md.doc2md.cron / .cron.weekly / .serve / .work）
+     语义：RunAtLoad = 登录自启；KeepAlive 的 SuccessfulExit 取 false → 只在非零退出后重启，
+           `launchctl unload` 或正常退出不会被复活（可停性优先于「永远在线」）。
+           ThrottleInterval 30 秒防崩溃风暴。Windows 孪生用 RestartOnFailure（间隔 1 分钟、
+           最多 10 次）——平台语义差（launchd 无限重启）已登记 B-9 待真机确认。
+     绑定：host 参数显式钉 127.0.0.1（NFR-1 离线单机姿态 / 第四轮决策 D4）。要对外暴露必须
+           同时改这里与配置项 api.allow_remote_bind，缺一即 serve 拒绝启动。
+           端口不写进本资产，取配置 api.port（默认 8090），免两处漂移。
+     口令：本文件不含备份口令变量名（NFR-20）——口令只归 cron / backup 流程，与常驻服务无关。
+     路径：ProgramArguments / WorkingDirectory / 显式根参数（root）三处一律按实际部署前缀改写
+           （示例为 /Users/you/doc2md）。双保险口径与 cron 档一致（CH-475 / R6-OPS-1）：launchd
+           默认 cwd 为 /，缺此二者时相对根名 work 会被解析成 /work。
+     日志：运行期真相源是 work/logs/app.jsonl（服务自身轮转，NFR-19）。StandardOutPath /
+           StandardErrorPath 只承接启动横幅与崩溃回溯；但 Werkzeug 的访问行同样落 stderr，
+           长期常驻会无界增长，而日流程不清理这两份捕获文件——处置口径见方案 12.7 的
+           「常驻 stderr 捕获无界」待裁定项。
+     注：XML 注释内不得出现连续两个连字符（XML 1.0 注释非法令牌），故注释里以「host 参数」
+         之类的说法代替命令行开关；ProgramArguments 里的开关不受影响。 -->
+<plist version="1.0"><dict>
+  <key>Label</key><string>md.doc2md.serve</string>
+  <key>ProgramArguments</key><array>
+    <string>/Users/you/doc2md/env/bin/doc2md</string>
+    <string>serve</string>
+    <string>--host</string><string>127.0.0.1</string>
+    <string>--root</string><string>/Users/you/doc2md/work</string></array>
+  <key>WorkingDirectory</key><string>/Users/you/doc2md</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+  <key>ThrottleInterval</key><integer>30</integer>
+  <key>EnvironmentVariables</key><dict><key>TZ</key><string>UTC</string></dict>
+  <key>StandardOutPath</key><string>/Users/you/doc2md/work/logs/launchd-serve.out</string>
+  <key>StandardErrorPath</key><string>/Users/you/doc2md/work/logs/launchd-serve.err</string>
+</dict></plist>

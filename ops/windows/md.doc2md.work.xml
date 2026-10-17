@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Doc2md 常驻队列消费者（T12 / CH-480，ops/launchd/md.doc2md.work.plist 的 Windows 孪生）。
+     定位：serve 不起常驻线程（ADR-30，已归档 V1.0 蓝本），异步转换由 `doc2md work` 的轮询循环承担（CH-449）。
+     低配机不想同时常驻两个进程时，可只装 serve，需要时手跑一次 work 的排空模式（带 once 开关）。
+
+     安装：pwsh ops/windows/install-doc2md-tasks.ps1 -WithResident
+     校验：Get-ScheduledTask -TaskName md.doc2md.work | Get-ScheduledTaskInfo
+     手工导入：schtasks /Create /TN md.doc2md.work /XML ops/windows/md.doc2md.work.xml /F
+
+     口径与 serve 档同（LogonTrigger / PT0S 不限时长 / RestartOnFailure / IgnoreNew /
+     InteractiveToken + LeastPrivilege，无需管理员），差别只在动作：
+     - 并发进程数与轮询间隔不写进本资产，取配置 perf.workers 与 CLI 默认 5 秒，免两处漂移。
+     - 队列消费不绑定端口，也不含任何口令变量名（NFR-20）。
+     - 常驻循环只在退出时打一份 JSON 报告，运行期日志归 work/logs/work.jsonl 自轮转
+       （NFR-19 / CH-444：app.jsonl、cron.jsonl、work.jsonl 三个进程三份文件）。
+     占位符 __DOC2MD_EXE__ / __DOC2MD_ROOT__ / __DOC2MD_USER__ 由安装脚本替换。 -->
+<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task" version="1.4">
+  <RegistrationInfo>
+    <Description>Doc2md 常驻队列消费：doc2md work（登录自启 + 失败自恢复，tasks 异步转换）</Description>
+    <URI>\md.doc2md.work</URI>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>__DOC2MD_USER__</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>false</WakeToRun>
+    <RestartOnFailure><Interval>PT1M</Interval><Count>10</Count></RestartOnFailure>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>7</Priority>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>__DOC2MD_EXE__</Command>
+      <Arguments>work</Arguments>
+      <WorkingDirectory>__DOC2MD_ROOT__</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>

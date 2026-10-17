@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Doc2md 常驻队列消费者（T12 / CH-480）：登录即拉起 `doc2md work` 的轮询常驻循环。
+     安装：cp ops/launchd/md.doc2md.work.plist ~/Library/LaunchAgents/
+           launchctl load ~/Library/LaunchAgents/md.doc2md.work.plist
+     定位：serve 不起常驻线程（ADR-30，已归档 V1.0 蓝本），异步转换由本进程承担（CH-449）。低配机不想同时常驻
+           两个进程时，可不装本档、改在需要时手跑一次 work 的排空模式（带 once 开关）即退出。
+     语义：与 serve 档同构——RunAtLoad 登录自启，KeepAlive 的 SuccessfulExit 取 false 只在
+           非零退出后重启，正常退出与 unload 不复活；ThrottleInterval 30 秒防风暴。
+           并发进程数不写进本资产，取配置 perf.workers（缺省按核数推导），免两处漂移；
+           队列空时轮询间隔用 CLI 默认 5 秒。
+     绑定：本档不涉及端口，也不含备份口令变量名（NFR-20）。
+     路径：ProgramArguments / WorkingDirectory / 显式根参数（root）三处按实际部署前缀改写
+           （示例 /Users/you/doc2md），双保险口径与 cron / serve 档一致（CH-475 / R6-OPS-1）。
+     日志：运行期真相源是 work/logs/work.jsonl（worker 自身轮转，NFR-19，与 app.jsonl /
+           cron.jsonl 分属三个进程——rename 式轮转只能有一个属主，CH-444）。常驻循环不向
+           stdout 逐行输出，只在退出时打一份 JSON 报告，故 StandardOutPath 天然有界；
+           StandardErrorPath 承接崩溃回溯。
+     注：XML 注释内不得出现连续两个连字符（XML 1.0 注释非法令牌），故注释里以文字描述开关；
+         ProgramArguments 里的开关不受影响。 -->
+<plist version="1.0"><dict>
+  <key>Label</key><string>md.doc2md.work</string>
+  <key>ProgramArguments</key><array>
+    <string>/Users/you/doc2md/env/bin/doc2md</string>
+    <string>work</string>
+    <string>--root</string><string>/Users/you/doc2md/work</string></array>
+  <key>WorkingDirectory</key><string>/Users/you/doc2md</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+  <key>ThrottleInterval</key><integer>30</integer>
+  <key>EnvironmentVariables</key><dict><key>TZ</key><string>UTC</string></dict>
+  <key>StandardOutPath</key><string>/Users/you/doc2md/work/logs/launchd-work.out</string>
+  <key>StandardErrorPath</key><string>/Users/you/doc2md/work/logs/launchd-work.err</string>
+</dict></plist>
