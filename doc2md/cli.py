@@ -535,7 +535,7 @@ def _dir_files(src: Path, cfg: dict, follow: bool) -> list[Path]:
     """
     from .security.dirguard import scan_or_raise, walk_limits
     return [Path(f) for f in scan_or_raise(src, walk_limits(cfg, follow_symlinks=follow))
-            if Path(f).suffix.lower() in (".pdf", ".docx")]
+            if Path(f).suffix.lower() in (".pdf", ".docx", ".doc")]
 
 
 def cmd_watch(args: argparse.Namespace) -> int:
@@ -569,7 +569,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
                 ready = []
             for f in ready:
                 p = Path(f)
-                if p.suffix.lower() not in (".pdf", ".docx"):
+                if p.suffix.lower() not in (".pdf", ".docx", ".doc"):
                     continue
                 if async_queue:
                     # CH-449：低配机上 watch 目录批量落文件时，稳定即入队、由
@@ -702,6 +702,12 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         from .llm import LlmClient
         ok, why = LlmClient.from_cfg(cfg).probe()
         checks["llm_server"] = "reachable" if ok else f"unreachable ({why})"
+    # CH-487：.doc 转换后端可见性（auto 不可用不判失败，显式指定才判）
+    from .pipeline.legacy_doc import available_backend
+    doc_backend_req = str(config.get(cfg, "s1.legacy_doc_backend", "auto"))
+    doc_backend = available_backend(doc_backend_req)
+    checks["legacy_doc_backend"] = doc_backend or (
+        "disabled" if doc_backend_req == "none" else "unavailable")
     print(_jline(checks, indent=2))
     # CH-473（CFG-2，LOW）：配置语义非法（冻结键校验不过）时自检必须非零退出。
     # 原实现只把 MISSING 依赖算失败——`config_frozen_keys: invalid` 照样退 0，
@@ -718,6 +724,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     unhealthy = (
         any(str(v).startswith("MISSING") for v in checks.values())
         or (llm_server_mode and str(checks.get("llm_server", "")).startswith("unreachable"))
+        or (doc_backend_req in ("libreoffice", "word") and doc_backend is None)
         or free_mb < 0 or free_mb < min_free_mb
     )
     return EXIT_SYS if unhealthy else EXIT_OK

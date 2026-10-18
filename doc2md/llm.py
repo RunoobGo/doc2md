@@ -234,7 +234,14 @@ class OpValidator:
                         f"merge_type_mismatch:{self._order[i - 1].type}->{b.type}")
                 else:
                     prev = self._order[i - 1] if i else None
-                    if (_STRUCT_HINT.match(b.text or "")
+                    if (b.provenance.get("explicit_para")
+                            or (prev is not None and prev.provenance.get("explicit_para"))):
+                        reasons.append("explicit_para_merge")
+                    elif _LIST_HINT.match(b.text or ""):
+                        reasons.append("list_target")
+                    elif prev is not None and _CAPTION.match(prev.text or ""):
+                        reasons.append("caption_merge")
+                    elif (_STRUCT_HINT.match(b.text or "")
                             or (prev is not None and _STRUCT_HINT.match(prev.text or ""))):
                         reasons.append("structural_merge")
                     elif (prev is not None
@@ -343,6 +350,10 @@ _CAPTION = re.compile(r"^\s*(图|表|figure|table)\s*[\d一二三四五六七八
 _STRUCT_HINT = re.compile(
     r"^\s*(附件\s*\d+|附录|联系人|抄送|注\s*[：:]|"
     r"[一二三四五六七八九十百千]+\s*、|[（(]\s*[\d一二三四五六七八九十百千]+\s*[）)])")
+# 长列表项可能因长度落成 paragraph；merge 仍不得把新条目并进上一条。
+_LIST_HINT = re.compile(
+    r"^\s*(?:[-*+·•‣]|(?:\d{1,3}|[a-zA-Z])[、.．)）]|"
+    r"[（(]\s*[\d一二三四五六七八九十百千]+\s*[）)])\s*\S")
 # 候选块类型 → 该类型可安全落地的 op（与 OpValidator 的类型约束同源）。
 _ALLOWED_BY_TYPE = {
     "paragraph": ["merge_block", "split_block", "mark_table_boundary"],
@@ -754,6 +765,8 @@ def _split_block(ir, b, op: dict, index: dict | None = None) -> bool:
                  flags={k: v for k, v in (b.flags or {}).items()
                         if k != "shard_edge"},
                  immutable=b.immutable)
+    if b.provenance.get("explicit_para"):
+        nb.provenance["explicit_para"] = True
     nb.provenance.setdefault("modified_by", []).append("llm:split_block")
     b.provenance.setdefault("modified_by", []).append("llm:split_block")
     # CH-469：切块搬运链接（原实现尾块 links 恒空 = 静默丢链接）。

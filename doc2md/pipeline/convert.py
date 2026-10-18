@@ -125,7 +125,11 @@ def _convert(path: str | Path, *, cfg: dict, mode: str | None,
     # 约十分之一；而分片 IR 必须全部驻留供缝合，省下的部分被抵消，还多出每片一次
     # open 的开销。故维持整读，把「不把整本文档读进内存」的纪律继续交给
     # `s1.chunk_pages`（分块 open/close）承担。
-    pages_all = read_any(p, chunk_pages=chunk_pages, fmt=fmt)
+    pages_all = read_any(
+        p, chunk_pages=chunk_pages, fmt=fmt,
+        legacy_doc_backend=str(config.get(cfg, "s1.legacy_doc_backend", "auto")),
+        legacy_doc_timeout_s=int(config.get(cfg, "s1.legacy_doc_timeout_s", 120)),
+        tmp_dir=config.path_setting(cfg, "paths.tmp", "."))
     total = len(pages_all)
     gate = s1_5_gate.check(pages_all,
                            min_chars=int(config.get(cfg, "s1_5.min_chars_per_page", 120)),

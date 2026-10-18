@@ -64,6 +64,22 @@
     "sha256": "f08138940181495cc9d57def44dcfbe02273e05b0d1fb6a919cb5d7c56519f71"
   },
   {
+    "source": "pdf_09_complex_long_8p.pdf",
+    "kind": "pdf",
+    "expected_behavior": "ok",
+    "expected_markdown": "expected/pdf_09_complex_long_8p.md",
+    "bytes": 12085,
+    "sha256": "a9c56fb427567758f74057b055166bcb8be558be50d63ece4d8dc4e355d20988"
+  },
+  {
+    "source": "pdf_10_two_column_6p.pdf",
+    "kind": "pdf",
+    "expected_behavior": "ok",
+    "expected_markdown": "expected/pdf_10_two_column_6p.md",
+    "bytes": 8781,
+    "sha256": "6772bf858772bb9de0f39f139177c05d343bbae597e5e1839bd8c4e32c672eae"
+  },
+  {
     "source": "docx_01_simple.docx",
     "kind": "docx",
     "expected_behavior": "ok",
@@ -134,5 +150,21 @@
     "expected_markdown": "expected/docx_09_mixed_cn_en.md",
     "bytes": 36818,
     "sha256": "5250ce38eff3c27ed2c8d3739e5cf2fb03d4858c32105ef4f2e6193e0f5256f4"
+  },
+  {
+    "source": "docx_10_complex_long.docx",
+    "kind": "docx",
+    "expected_behavior": "ok",
+    "expected_markdown": "expected/docx_10_complex_long.md",
+    "bytes": 39221,
+    "sha256": "8436c8f4df1deb7fa6ec3708abeb3ca69c18ec143e28d0db0dff23c80d7e9470"
+  },
+  {
+    "source": "docx_11_complex_tables.docx",
+    "kind": "docx",
+    "expected_behavior": "ok",
+    "expected_markdown": "expected/docx_11_complex_tables.md",
+    "bytes": 37327,
+    "sha256": "9bc69a6e8033c5b4def8a77b71d77ab8a4689142a7668798399a602c20dd9fdb"
   }
 ]

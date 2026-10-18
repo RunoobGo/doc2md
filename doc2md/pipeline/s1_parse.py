@@ -34,6 +34,7 @@ from pathlib import Path
 
 MAGIC_PDF = b"%PDF-"
 MAGIC_ZIP = b"PK\x03\x04"
+MAGIC_OLE = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 DOCX_REQUIRED_PART = b"word/document.xml"
 
 # CH-459：等宽字体的识别口径（PDF fontname / DOCX run.font.name，均转小写后子串匹配）。
@@ -76,6 +77,7 @@ class Line:
                                             # 反推；S3 的缩进量化用它把 x0 差换算成空格级数
     top: float = 0.0                        # PDF 行几何（pt，原点在页面左上）；DOCX 为 0
     bottom: float = 0.0                     # 供页眉页脚带判定，S3 段落分段亦用
+    explicit_para: bool = False             # DOCX `w:p` 段落边界：S3 不得跨段续接
 
 
 @dataclass
@@ -115,6 +117,11 @@ def sniff(path: str | Path) -> str:
                 return "docx"
         except Exception:
             pass
+    if head.startswith(MAGIC_OLE) and p.suffix.lower() == ".doc":
+        # Legacy Word binary. Parsing needs an external converter (S1
+        # `read_legacy_doc`); magic is checked here so unsupported OLE files
+        # (xls/ppt) still fail fast with E4151.
+        return "doc"
     raise E4151_UnsupportedType(f"unsupported magic for {p.name}",
                                 detail={"file": p.name, "magic": head.hex()})
 
@@ -178,29 +185,125 @@ def read_pdf(path: str | Path, page_span: tuple[int, int] | None = None,
                 page = pdf.pages[i]
                 chars = page.chars or []
                 cs_index = _char_index(chars)
-                lines: list[Line] = []
-                geoms: list[tuple[float, float]] = []
-                for ln in (page.extract_text_lines() or []):
-                    top = float(ln.get("top", 0.0) or 0.0)
-                    bottom = float(ln.get("bottom", 0.0) or 0.0)
-                    lchars = _slice_chars(chars, cs_index, top, bottom)
-                    st = _line_style(lchars)
-                    lines.append(Line(text=ln.get("text", ""), size=st[0],
-                                      bold=st[1], italic=st[2], strike=st[3],
-                                      mono=st[4],
-                                      uniform_bold=st[5],
-                                      uniform_italic=st[6],
-                                      uniform_strike=st[7],
-                                      row=_row_cells(lchars),
-                                      x0=float(ln.get("x0", 0.0) or 0.0),
-                                      char_w=_char_width(lchars) if st[4] else 0.0,
-                                      top=top, bottom=bottom))
-                    geoms.append((top, bottom))
-                _attach_links(lines, geoms, page)
+                raw_lines = page.extract_text_lines() or []
+                geometry = _detect_two_column(page, chars, raw_lines)
+                if geometry:
+                    lines = _extract_two_column(page, raw_lines, *geometry)
+                else:
+                    lines = _lines_single_column(raw_lines, chars, cs_index)
+                _attach_links(lines, [(ln.top, ln.bottom) for ln in lines], page)
                 out.append(RawPage(index=i, lines=lines,
                                    height=float(getattr(page, "height", 0.0) or 0.0)))
                 page.flush_cache()
     return out
+
+
+def _line_from_raw(raw: dict, lchars: list[dict]) -> Line:
+    st = _line_style(lchars)
+    return Line(text=raw.get("text", ""), size=st[0],
+                bold=st[1], italic=st[2], strike=st[3], mono=st[4],
+                uniform_bold=st[5], uniform_italic=st[6], uniform_strike=st[7],
+                row=_row_cells(lchars),
+                x0=float(raw.get("x0", 0.0) or 0.0),
+                char_w=_char_width(lchars) if st[4] else 0.0,
+                top=float(raw.get("top", 0.0) or 0.0),
+                bottom=float(raw.get("bottom", 0.0) or 0.0))
+
+
+def _lines_single_column(raw_lines: list[dict], chars: list[dict],
+                         cs_index) -> list[Line]:
+    lines: list[Line] = []
+    for ln in raw_lines:
+        top = float(ln.get("top", 0.0) or 0.0)
+        bottom = float(ln.get("bottom", 0.0) or 0.0)
+        lines.append(_line_from_raw(ln, _slice_chars(chars, cs_index, top, bottom)))
+    return lines
+
+
+def _detect_two_column(page, chars: list[dict], raw_lines: list[dict]) -> tuple[float, float] | None:
+    """Detect a two-column body from a low-density central gutter.
+
+    Full-width title/header bands are excluded from the gutter density so a
+    spanning title does not hide the columns underneath it.
+    """
+    height = float(getattr(page, "height", 0.0) or 0.0)
+    width = float(getattr(page, "width", 0.0) or 0.0)
+    if height <= 0 or width <= 0:
+        return None
+    body = [c for c in chars if (c.get("text") or "").strip()
+            and height * 0.08 <= float(c.get("top", 0.0)) <= height * 0.92]
+    if len(body) < 40:
+        return None
+    mid, gutter = width / 2, 12.0
+    left = [c for c in body if float(c.get("x0", 0.0)) < mid - gutter / 2]
+    right = [c for c in body if float(c.get("x0", 0.0)) > mid + gutter / 2]
+    if len(left) < 0.2 * len(body) or len(right) < 0.2 * len(body):
+        return None
+    def y_span(cs: list[dict]) -> float:
+        return (max(float(c.get("bottom", 0.0)) for c in cs)
+                - min(float(c.get("top", 0.0)) for c in cs))
+    if y_span(left) < max(40.0, 0.10 * height) or y_span(right) < max(40.0, 0.10 * height):
+        return None
+    # A real gutter is a consistent horizontal gap between left and right text
+    # runs. A single-column line may leave the exact centre band empty because
+    # CJK glyph boxes do not cover it, so density alone is not enough.
+    bands: dict[int, list[dict]] = {}
+    for c in body:
+        bands.setdefault(round(float(c.get("top", 0.0)) / 2), []).append(c)
+    both = large = contiguous = 0
+    for cs in bands.values():
+        if any(float(c.get("x0", 0.0)) < mid < float(c.get("x1", 0.0)) for c in cs):
+            contiguous += 1
+            both += 1
+            continue
+        left_cs = [c for c in cs if float(c.get("x1", 0.0)) <= mid]
+        right_cs = [c for c in cs if float(c.get("x0", 0.0)) >= mid]
+        if not left_cs or not right_cs:
+            continue
+        both += 1
+        gap = (min(float(c.get("x0", 0.0)) for c in right_cs)
+               - max(float(c.get("x1", 0.0)) for c in left_cs))
+        if gap >= gutter / 2:
+            large += 1
+        elif gap < 3.0:
+            contiguous += 1
+    if both < 6 or large < 0.6 * both or contiguous > 0.2 * both:
+        return None
+    return mid, gutter
+
+
+def _extract_two_column(page, raw_lines: list[dict], mid: float,
+                        gutter: float) -> list[Line]:
+    """Extract left/right crops and concatenate in column reading order."""
+    bbox = page.bbox
+    left_raw = page.crop((bbox[0], bbox[1], mid - gutter / 2, bbox[3])).extract_text_lines() or []
+    right_raw = page.crop((mid + gutter / 2, bbox[1], bbox[2], bbox[3])).extract_text_lines() or []
+    height = float(page.height)
+    body_raw = [ln for ln in left_raw + right_raw
+                if float(ln.get("top", 0.0)) >= height * 0.08]
+    col_top = min((float(ln.get("top", 0.0)) for ln in body_raw), default=0.0)
+    col_bottom = max((float(ln.get("bottom", 0.0)) for ln in body_raw), default=height)
+    full_raw = [ln for ln in raw_lines
+                if float(ln.get("x0", 0.0)) < mid - gutter / 2
+                and float(ln.get("x1", 0.0)) > mid + gutter / 2
+                and (float(ln.get("top", 0.0)) < col_top - 2.0
+                     or float(ln.get("bottom", 0.0)) > col_bottom + 2.0)]
+    full_tops = [float(ln.get("top", 0.0)) for ln in full_raw]
+    def keep(ln) -> bool:
+        top = float(ln.get("top", 0.0))
+        return all(abs(top - t) > 2.0 for t in full_tops)
+    left = [_line_from_raw(ln, ln.get("chars") or []) for ln in left_raw if keep(ln)]
+    right = [_line_from_raw(ln, ln.get("chars") or []) for ln in right_raw if keep(ln)]
+    full = [_line_from_raw(ln, ln.get("chars") or []) for ln in full_raw]
+    col = left + right
+    if not col:
+        return full
+    min_top = min(ln.top for ln in col)
+    max_bottom = max(ln.bottom for ln in col)
+    prefix = [ln for ln in full if ln.top < min_top]
+    suffix = [ln for ln in full if ln.top > max_bottom]
+    middle = [ln for ln in full if min_top <= ln.top <= max_bottom]
+    return prefix + left + middle + right + suffix
 
 
 def _attach_links(lines: list[Line], geoms: list[tuple[float, float]], page) -> None:
@@ -635,7 +738,7 @@ def _docx_para_line(p, d, rels=None, ctx: _DocxCtx | None = None,
                 uniform_italic=uniform_italic, uniform_strike=uniform_strike,
                 list_marker=marker, list_level=list_level,
                 link=link, link_internal=link_internal, link_dest=link_dest,
-                level_hint=level, has_revision=rev)
+                level_hint=level, has_revision=rev, explicit_para=True)
 
 
 def _docx_has_revision(el) -> bool:
@@ -930,10 +1033,26 @@ def _style_size(style_name: str) -> float:
 
 
 def read_any(path: str | Path, page_span: tuple[int, int] | None = None,
-             chunk_pages: int | None = None, fmt: str | None = None) -> list[RawPage]:
+             chunk_pages: int | None = None, fmt: str | None = None,
+             *, legacy_doc_backend: str = "auto",
+             legacy_doc_timeout_s: int = 120,
+             tmp_dir: str | Path | None = None) -> list[RawPage]:
     fmt = fmt or sniff(path)
     if fmt == "pdf":
         return read_pdf(path, page_span, chunk_pages=chunk_pages, fmt=fmt)
+    if fmt == "doc":
+        from ..errors import E4151_UnsupportedType
+        from .legacy_doc import LegacyDocError, read_legacy_doc
+        try:
+            return read_legacy_doc(
+                path, page_span=page_span, backend=legacy_doc_backend,
+                timeout_s=legacy_doc_timeout_s, tmp_dir=tmp_dir)
+        except LegacyDocError as exc:
+            raise E4151_UnsupportedType(
+                "cannot convert legacy .doc",
+                detail={"file": Path(path).name, "stage": exc.stage,
+                        "hint": "install LibreOffice or Microsoft Word, or set "
+                                "s1.legacy_doc_backend"}) from exc
     if page_span:
         return read_docx(path)[page_span[0]:page_span[1]]
     return read_docx(path)

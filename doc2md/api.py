@@ -407,7 +407,7 @@ def create_app(cfg: dict | None = None, root: Path | None = None,
             # 与 CLI 同口径：目录里的 README/图片不是输入，直接忽略；否则整批
             # 第一个非 PDF/DOCX 就会 E4151，导致 0 入队。
             files = [Path(f) for f in scan_or_raise(p, lim)
-                     if Path(f).suffix.lower() in (".pdf", ".docx")]
+                     if Path(f).suffix.lower() in (".pdf", ".docx", ".doc")]
         elif p.is_file():
             files = [p]
         else:

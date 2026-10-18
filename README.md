@@ -1,6 +1,6 @@
 # Doc2md
 
-文本型 PDF / DOCX → Markdown 的**离线**转换管线（v2.9.2）。
+文本型 PDF / DOCX / 旧版 DOC → Markdown 的**离线**转换管线（v2.10.0）。
 单机、无出站网络、无云端依赖；LLM 修补助手同样只连本地 `127.0.0.1`。
 
 ## 安装
@@ -9,6 +9,10 @@
 python3 -m venv env && env/bin/pip install -e ".[dev]"
 env/bin/doc2md doctor                    # 环境自检（依赖 / 目录权限 / tokenizer 口径）
 ```
+
+输入格式：文本型 PDF、DOCX 与旧版 `.doc`。`.doc` 通过 `s1.legacy_doc_backend`
+（`auto`/`libreoffice`/`word`/`none`，默认 `auto`）调用本机 LibreOffice 或 Microsoft Word
+转换为临时 DOCX 后解析；无可用后端时按 E4151 拒收，临时文件只落在私有 `work/tmp`。
 
 命名纪律：标识符一律小写 `doc2md`；四个常驻/定时标签 `md.doc2md.cron`、`md.doc2md.cron.weekly`、`md.doc2md.serve`、`md.doc2md.work`，macOS 的 plist 与 Windows 的任务名逐一对应（定时两档随包分发即用；常驻两档是 CH-480 / T12 补齐的资产，会长期占驻进程，需按下节显式安装）。
 
@@ -191,7 +195,7 @@ Windows 任务计划不捕获标准输出，日志目录里没有 `launchd-*` �
 | `ops/backup.md` | 备份介质与恢复演练细则 |
 | `ops/windows/install-doc2md-tasks.ps1` | Windows 任务计划安装 / 校验 / 卸载（与 launchd 同等能力） |
 
-跟踪约定：契约变更、缺陷、更优做法一律按登记流写入方案 第十一章（当前编号至 `CH-487`，下一条自 `CH-488`），实测数字进第十二章并标注语料与测量方法；规格发生变化时同步主题篇章节与本文相应小节，并递增 `doc2md.PLAN_VERSION`（管线契约变化另递增 `PIPELINE_VERSION`；状态库结构变化另递增 `DB_VERSION`，CH-476 起为 `6`、CH-483 起为 `7`、CH-485 起为 `8`、CH-486 起为 `9`）。
+跟踪约定：契约变更、缺陷、更优做法一律按登记流写入方案 第十一章（当前编号至 `CH-488`，下一条自 `CH-489`），实测数字进第十二章并标注语料与测量方法；规格发生变化时同步主题篇章节与本文相应小节，并递增 `doc2md.PLAN_VERSION`（管线契约变化另递增 `PIPELINE_VERSION`；状态库结构变化另递增 `DB_VERSION`，CH-476 起为 `6`、CH-483 起为 `7`、CH-485 起为 `8`、CH-486 起为 `9`）。
 
 ## 验收与测试
 
@@ -236,7 +240,7 @@ python3 tests/make_golden.py --force    # 强制重生成
 都保留符号链接；`unzip -y` 在 Info-ZIP 6.00 上不是合法选项（直接吐 usage 并退出码 10），
 `python -m zipfile -e` 会把链接**降级成普通文件**（防护用例随即失真）——两者都不要用。
 
-综合语料（效果回归）：`tests/corpus/` 提供 17 份 PDF/DOCX 源文件（1–40 页）与 16 份目标
+综合语料（效果回归）：`tests/corpus/` 提供 21 份 PDF/DOCX/DOC 源文件（1–40 页）与 20 份目标
 Markdown，覆盖标题/段落/列表/表格/链接/代码/扫描件/10.5pt 编号/脚注尾注/修订/域代码/
 smartTag/sdt/文本框/图片/页眉页脚/大文档。独立运行：
 

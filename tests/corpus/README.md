@@ -6,8 +6,8 @@
 ## 目录
 
 ```text
-sources/       17 份源文件（PDF 8 / DOCX 9）
-expected/      16 份目标 Markdown（正文，不含 YAML frontmatter）
+sources/       21 份源文件（PDF 10 / DOCX 11）
+expected/      20 份目标 Markdown（正文，不含 YAML frontmatter）
 manifest.json  源文件 sha256、字节数、期望行为（ok / reject:E4221）
 make_corpus.py 确定性生成器（reportlab / python-docx / pypdf）
 run_corpus.py  转换并与 expected/*.md 比对

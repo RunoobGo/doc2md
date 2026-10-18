@@ -39,6 +39,10 @@ _CJK_ORD = re.compile(r"^\s*[一二三四五六七八九十百千]+\s*、")
 _PAREN_HEAD = re.compile(r"^\s*[（(]\s*(\d{1,3}|[一二三四五六七八九十百千]+)\s*[）)]")
 # 字母列表项：“a.”“b）”。有序列表的拉丁变体，常见于技术文档。
 _ALPHA_ITEM = re.compile(r"^\s*([a-zA-Z])\s*[.．、）)]\s*(?=\S)")
+_DATE_LINE = re.compile(
+    r"^\s*\d{4}\s*年(?:\s*(?:\d{1,2})?\s*月)?(?:\s*(?:\d{1,2})?\s*日)?\s*$")
+_CN_DIGITS = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
+              "六": 6, "七": 7, "八": 8, "九": 9}
 # 结构起始信号：即使上一行没有句末标点，也必须另起一段/一块。
 _STRUCT_START = re.compile(
     r"^\s*(附件\s*\d+|附录\s*[A-Za-z一二三四五六七八九十\d]+|"
@@ -165,6 +169,35 @@ def _is_alpha_item(text: str) -> bool:
     return not t.endswith(("。", "！", "？", ".", "!", "?"))
 
 
+def _cn_number(text: str) -> int:
+    if text == "十":
+        return 10
+    if "十" in text:
+        left, right = text.split("十", 1)
+        tens = _CN_DIGITS.get(left, 1) if left else 1
+        ones = _CN_DIGITS.get(right, 0) if right else 0
+        return tens * 10 + ones
+    return _CN_DIGITS.get(text, 1)
+
+
+def _normalize_marker(marker: str) -> str:
+    """DOCX 自动编号 → GFM 有序列表标记。
+
+    “第3条/第十二条”这类中文条款编号不能退化成所有行都写 “1.”；转成
+    阿拉伯序号即可保留 GFM 有序列表语义。
+    """
+    m = re.match(r"^\s*第\s*(\d+)\s*[条项款节章]\s*$", marker or "")
+    if m:
+        return f"{int(m.group(1))}."
+    m = re.match(r"^\s*第\s*([一二三四五六七八九十]+)\s*[条项款节章]\s*$",
+                 marker or "")
+    if m:
+        return f"{_cn_number(m.group(1))}."
+    if marker and (marker[:1].isdigit() or _BULLET.match(marker + " ")):
+        return marker
+    return "1."
+
+
 # --- PDF 页眉页脚 / 页码 ------------------------------------------------------
 
 def _in_margin(ln, height: float) -> bool:
@@ -193,15 +226,24 @@ def _strip_page_furniture(pages: list[RawPage], base_size: float) -> list[RawPag
     if not pages or not any(p.height > 0 for p in pages):
         return pages
     counts: dict[str, int] = {}
+    body_sizes: dict[float, int] = {}
     for page in pages:
         seen: set[str] = set()
         for ln in page.lines:
+            t = (ln.text or "").strip()
+            if not t:
+                continue
+            if not _in_margin(ln, page.height) and ln.size > 0:
+                key_size = round(ln.size, 1)
+                body_sizes[key_size] = body_sizes.get(key_size, 0) + max(1, len(t))
             if not _in_margin(ln, page.height):
                 continue
-            key = _furniture_key(ln.text)
+            key = _furniture_key(t)
             if key and key not in seen:
                 seen.add(key)
                 counts[key] = counts.get(key, 0) + 1
+    body_hint = (max(body_sizes.items(), key=lambda kv: kv[1])[0]
+                 if body_sizes else base_size)
     out: list[RawPage] = []
     for page in pages:
         kept = []
@@ -211,7 +253,9 @@ def _strip_page_furniture(pages: list[RawPage], base_size: float) -> list[RawPag
                 if _PAGE_NUM.fullmatch(t) or _PAGE_NUM_INLINE.search(t):
                     continue
                 if counts.get(_furniture_key(t), 0) >= 2 and (
-                        ln.size <= 0 or ln.size <= base_size + 0.5):
+                        ln.size <= 0
+                        or ln.size < body_hint - 0.5
+                        or len(_furniture_key(t)) <= 24):
                     continue
             kept.append(ln)
         out.append(RawPage(index=page.index, lines=kept, height=page.height))
@@ -256,6 +300,8 @@ def _continues_paragraph(prev: str, ln, layout: dict | None) -> bool:
     p = (prev or "").rstrip()
     if not p:
         return False
+    if getattr(ln, "explicit_para", False):
+        return False
     t = (ln.text or "").strip()
     if _continuation_led(t):
         return True
@@ -273,6 +319,8 @@ def _continues_paragraph(prev: str, ln, layout: dict | None) -> bool:
 def _join_list_continuation(blocks: list[Block], text: str, ln,
                             layout: dict | None) -> bool:
     """列表项折行续文并回列表项本身（原实现落入新段落，产生半句块）。"""
+    if getattr(ln, "explicit_para", False):
+        return False
     if _STRUCT_START.match(text) or _BULLET.match(text) or _is_ordered_item(text) or _is_alpha_item(text):
         return False
     if layout and layout["has_indent"] and _is_indented(ln, layout):
@@ -305,9 +353,14 @@ def _join_heading_continuation(blocks: list[Block], text: str, ln,
     """
     if not (layout and layout["has_indent"]):
         return False
+    if getattr(ln, "explicit_para", False):
+        return False
     if _is_indented(ln, layout):
         return False
     if _STRUCT_START.match(text) or _BULLET.match(text) or _is_ordered_item(text) or _is_alpha_item(text):
+        return False
+    if "：" in text or ":" in text:
+        # “副标题：…”/“摘要：…”是新的块，不是标题折行。
         return False
     if len(text.strip()) > 20:
         return False
@@ -399,6 +452,9 @@ def _mark_provenance(b: Block, lines, *, merge: bool = False) -> None:
     PDF 行两个信号恒为空，故 PDF 语料产物不变。
     """
     rows = list(lines)
+    if any(getattr(ln, "explicit_para", False) for ln in rows):
+        # DOCX `w:p` 是显式段落边界；模型不得跨段 merge。
+        b.provenance.setdefault("explicit_para", True)
     if any(ln.has_revision for ln in rows):
         b.flags.setdefault("has_revision", True)
     kinds = [ln.note_kind for ln in rows if ln.note_kind]
@@ -611,6 +667,19 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
                 # 这里并入标题文本，避免“1. 方法”退化成“方法”。
                 head_text = (f"{ln.list_marker} {text.strip()}"
                              if ln.list_marker else text.strip())
+                prev = blocks[-1] if blocks else None
+                if (prev is not None and prev.type == "heading"
+                        and prev.page == page.index
+                        and abs(float(prev.font.get("size", 0.0)) - float(ln.size or 0.0)) < 0.6
+                        and len(prev.text or "") >= 12
+                        and not (prev.text or "").rstrip().endswith(_HARD_END)
+                        and not _STRUCT_START.match(text)
+                        and not _NUM.match(text) and not _CJK_HEAD.match(text)
+                        and not _CJK_ORD.match(text) and not _PAREN_HEAD.match(text)):
+                    # 大字号标题在 PDF 折行后被判成两个 heading，拼回一个。
+                    prev.text = _append_line(prev.text or "", head_text)
+                    _mark_provenance(prev, (ln,), merge=True)
+                    continue
                 blocks.append(Block(id="", type="heading", text=head_text,
                                     level=lvl, font=_font(ln), page=page.index))
                 if ln.level_hint:
@@ -624,11 +693,7 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
                 flush_para()
                 flush_quote()
                 flush_rows(True)
-                marker = ln.list_marker
-                # GFM 只表达 bullet / 阿拉伯数字有序列表；其它编号格式保留
-                # “层级 + 列表”语义，标记归一为 1.，原始标记进 flags 供审阅。
-                if not (marker[:1].isdigit() or _BULLET.match(marker + " ")):
-                    marker = "1."
+                marker = _normalize_marker(ln.list_marker)
                 indent = "  " * max(0, ln.list_level)
                 blocks.append(Block(id="", type="list_item",
                                     text=f"{indent}{marker} {text.strip()}",
@@ -727,7 +792,7 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
                 _mark_provenance(blocks[-1], (ln,))
                 continue
             # CH-430：续句标点起头 → 无条件并回上一个内容块（可跨标题/空行打断）
-            if _continuation_led(text) and not para_buf:
+            if _continuation_led(text) and not para_buf and not ln.explicit_para:
                 back = _join_back(blocks, text, _font(ln))
                 if back is not None:
                     if (ln.link or ln.link_internal) and not back.links:
@@ -803,6 +868,8 @@ def _heading_level(text: str, size: float, base: float, bold: bool,
         return hint
     t = text.strip()
     if not t or len(t) > 80:
+        return None
+    if _DATE_LINE.match(t):
         return None
     # 中文序号只认“短标题”形态：长句/带句末标点的是正文，不是标题。
     if _CJK_ORD.match(t) and (len(t) > 30 or t.endswith(_SENT_END)):
@@ -905,6 +972,9 @@ def _join_line(a: str, b: str) -> str:
         return b
     last = a[-1] if a else ""
     first = b[0] if b else ""
+    if last.isdigit() and first.isdigit():
+        # 折行把同一个数字切开（"2" + "026"）时不得插空格。
+        return b
     if _CJK_HEAD.match(b) or ord(last) > 0x2E80 or ord(first) > 0x2E80:
         return b
     return (" " + b) if (last.isalnum() and first.isalnum()) else b

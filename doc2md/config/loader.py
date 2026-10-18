@@ -91,6 +91,8 @@ SPEC: dict[str, tuple[str, Any]] = {
     "run.offline_assert": BOOL,
     # [s1] —— chunk_pages = 0 是合法口径（整本一次读完）
     "s1.chunk_pages": _int(0, 100_000),
+    "s1.legacy_doc_backend": _enum("auto", "libreoffice", "word", "none"),
+    "s1.legacy_doc_timeout_s": _int(1, 600),
     # [s1_5]
     "s1_5.sample_pages": _enum("auto", "even5", "legacy3"),
     "s1_5.min_chars_per_page": _int(0, 1_000_000),

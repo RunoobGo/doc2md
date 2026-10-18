@@ -117,6 +117,11 @@ def test_unindented_wrapped_line_continues_after_terminal_punctuation():
     assert _texts(ir) == ["第一句结束。第二句仍在同一段。", "另一段首行另一段续行。"]
 
 
+def test_number_split_across_lines_is_rejoined_without_space():
+    from doc2md.pipeline.s3_structure import _append_line
+    assert _append_line("正文包含数字 2", "026 和标点。") == "正文包含数字 2026 和标点。"
+
+
 def test_list_item_continuation_is_joined_back():
     ir = analyze([_page(
         _line("1. 项目说明用于验证列表项折行续文必须并回同一列表项",
@@ -150,6 +155,50 @@ def test_wrapped_heading_continuation_joins_heading():
     assert "继续部分" not in [b.text for b in ir.blocks if b.type == "paragraph"]
 
 
+def test_heading_subtitle_with_colon_is_not_joined():
+    ir = analyze([_page(
+        _line("一、章节标题", size=16.0, x0=70.9, top=100.0, bottom=114.0),
+        _line("副标题：说明文字", size=12.0, x0=70.9, top=130.0, bottom=144.0),
+        _line("正文首行。", size=16.0, x0=94.9, top=160.0, bottom=174.0),
+        _line("正文续行。", size=16.0, x0=70.9, top=190.0, bottom=204.0),
+    )], base_size=16.0)
+    heads = [b for b in ir.blocks if b.type == "heading"]
+    assert [h.text for h in heads] == ["一、章节标题"]
+    assert "副标题：说明文字" in _texts(ir)
+
+
+def test_repeated_body_line_near_top_is_kept():
+    repeated = "这是一行重复出现的正文内容，不应因为靠近页顶而被当成页眉删除。"
+    pages = [
+        _page(
+            _line("小页眉", size=9.0, x0=200.0, top=30.0, bottom=40.0),
+            _line(repeated, size=12.0, x0=70.0, top=54.0, bottom=68.0),
+            _line("第一页正文。", size=12.0, x0=70.0, top=100.0, bottom=114.0),
+            index=0,
+        ),
+        _page(
+            _line("小页眉", size=9.0, x0=200.0, top=30.0, bottom=40.0),
+            _line(repeated, size=12.0, x0=70.0, top=54.0, bottom=68.0),
+            _line("第二页正文。", size=12.0, x0=70.0, top=100.0, bottom=114.0),
+            index=1,
+        ),
+    ]
+    texts = _texts(analyze(pages))
+    assert not any("小页眉" in t for t in texts)
+    assert sum(1 for t in texts if repeated in t) == 2
+
+
+def test_wrapped_title_headings_are_merged():
+    ir = analyze([_page(
+        _line("一、关于印发企业安全生产费用管理办法的通", size=18.0, x0=70.9),
+        _line("知财资〔2022〕136 号", size=18.0, x0=70.9),
+        _line("正文开始。", size=12.0, x0=70.9),
+    )], base_size=12.0)
+    heads = [b for b in ir.blocks if b.type == "heading"]
+    assert len(heads) == 1
+    assert heads[0].text == "一、关于印发企业安全生产费用管理办法的通知财资〔2022〕136 号"
+
+
 def test_centered_caption_breaks_paragraph():
     ir = analyze([_page(
         _line("正文没有句号", size=12.0, x0=70.9, top=100.0, bottom=114.0),
@@ -177,6 +226,33 @@ def test_alpha_list_item_is_structured():
         _line("b. 取消原方案", size=12.0, x0=94.9),
     )], base_size=12.0)
     assert [b.type for b in ir.blocks] == ["list_item", "list_item"]
+
+
+def test_chinese_article_marker_becomes_ordered_number():
+    ir = analyze([_page(
+        _line("根据相关规定制定本办法。", size=12.0, x0=94.9, list_marker="第3条"),
+        _line("这里是第二条内容。", size=12.0, x0=94.9, list_marker="第 12 条"),
+    )], base_size=12.0)
+    texts = [b.text for b in ir.blocks]
+    assert texts[0].startswith("3. ")
+    assert texts[1].startswith("12. ")
+
+
+def test_date_line_is_not_promoted_to_heading():
+    ir = analyze([_page(
+        _line("2025年  月  日", size=16.0, x0=70.9),
+        _line("这是正文段落，用于建立正文基准。", size=10.5, x0=70.9),
+    )], base_size=10.5)
+    assert not [b for b in ir.blocks if b.type == "heading"]
+    assert any("2025年" in b.text for b in ir.blocks)
+
+
+def test_docx_explicit_paragraphs_do_not_merge():
+    ir = analyze([_page(
+        _line("日期行没有句末标点", size=12.0, explicit_para=True),
+        _line("下一段是独立段落。", size=12.0, explicit_para=True),
+    )], base_size=12.0)
+    assert _texts(ir) == ["日期行没有句末标点", "下一段是独立段落。"]
 
 
 # ---------------------------------------------------------------- 本地模型输入
@@ -266,11 +342,47 @@ def test_llm_rejects_merge_after_complete_sentence():
     blocks = [Block(id="b1", type="paragraph",
                     text="上一段已经完整收句，且长度足以跳过短独立行判断。", page=0),
               Block(id="b2", type="paragraph",
-                    text="5. 新的条目名称", page=0)]
+                    text="新的条目名称", page=0)]
     accepted, rejected = OpValidator(blocks).apply(
         [{"op": "merge_block", "target": "b2"}])
     assert accepted == []
     assert "merge_after_sentence" in rejected[0]["reasons"]
+
+
+def test_llm_rejects_merge_of_numbered_paragraph():
+    from doc2md.llm import OpValidator
+    blocks = [Block(id="b1", type="paragraph",
+                    text="4.上一年度营业收入超过十亿元的部分按照比例提取费用。", page=0),
+              Block(id="b2", type="paragraph",
+                    text="5.上一年度营业收入超过五十亿元的部分按照比例提取费用。", page=0)]
+    accepted, rejected = OpValidator(blocks).apply(
+        [{"op": "merge_block", "target": "b2"}])
+    assert accepted == []
+    assert "list_target" in rejected[0]["reasons"]
+
+
+def test_llm_rejects_merge_into_caption():
+    from doc2md.llm import OpValidator
+    blocks = [Block(id="b1", type="paragraph",
+                    text="表 1 综合数据表", page=0),
+              Block(id="b2", type="paragraph",
+                    text="列一 列二", page=0)]
+    accepted, rejected = OpValidator(blocks).apply(
+        [{"op": "merge_block", "target": "b2"}])
+    assert accepted == []
+    assert "caption_merge" in rejected[0]["reasons"]
+
+
+def test_llm_rejects_merge_across_explicit_docx_paragraphs():
+    from doc2md.llm import OpValidator
+    blocks = [Block(id="b1", type="paragraph", text="标题行", page=0,
+                    provenance={"explicit_para": True}),
+              Block(id="b2", type="paragraph", text="接收单位名单", page=0,
+                    provenance={"explicit_para": True})]
+    accepted, rejected = OpValidator(blocks).apply(
+        [{"op": "merge_block", "target": "b2"}])
+    assert accepted == []
+    assert "explicit_para_merge" in rejected[0]["reasons"]
 
 
 def test_llm_accepts_merge_when_earlier_neighbor_is_structural():
