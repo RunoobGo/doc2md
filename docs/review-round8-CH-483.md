@@ -1518,7 +1518,7 @@ def body() -> dict:
 | B-1 | 真实 ToUnicode 损坏/高密度乱码 PDF 语料，验证噪声判据误杀面 | 实现 R8-PIPE-3 后用真实语料评估；不得用合成样本替代 | HIGH（数据质量） |
 | B-2 | 真实双栏/页眉带链接 PDF 语料 | geoms 扩为横向重叠会改变产物字节；需语料评估 | MED |
 | B-3 | 真实注入语料 + `_attribute` 归因去循环 | 词表已扩，循环归因未改 | MED |
-| B-4 | 并发压测（同步 serve + 常驻 worker + 并发删除） | R8-SVC-1 的墓碑守护需多进程压测复现 | HIGH（数据安全） |
+| B-4 | 并发压测（常驻 worker + 并发删除） | **已本机多进程实跑（2026-10-18，真实 WAL + 独立 worker/delete 进程）**：R8-SVC-1 复活守护 5/5 落在在途 running 窗口的删除均零复活泄漏（`_finish_ok` 稳定 `mark rowcount=0→E4041→回滚`）；4 worker 并发 claim `dup_docs=0` 无双重消费；R6-SVC-4 实证——NULL-path 遗留行被 claim 抢走后一律 `failed/E4001`、零误转、`reclaim_stale` 按设计不碰，支持 CH-475 延期。**新发现**：删除×在途转换下 `out/{doc}.zip` 文件孤儿 5/5 复现（池在删除后重写产物；库已清、内容不可寻址，仅字节滞留磁盘），拟 `_finish_ok` E4041 回滚时 unlink 本轮 zip/.part 修复，待决策 | **HIGH→已验，附 1 新小缺口** |
 | B-5 | macOS 真机 launchd 实跑 cron（serve/work 见 B-9） | **cron 部分已实机验证（2026-10-18，本机 arm64）**：`plutil -lint` 四档全绿；临时 label `bootstrap`+`kickstart` 拉起日任务 exit 0、stderr 空，`WorkingDirectory`+`--root` 生效、产物与 `launchd-daily.{out,err}` 落在指定根；对照实验证实 CH-475 堵住「相对根名解析成 `/work`」的失败面。serve/work 常驻运行时（自启/崩溃自愈/unload 不复活）已于 2026-10-18 于 B-9 本机 macOS 验证，仅 Windows 腿待验 | **HIGH→已验 cron** |
 | B-6 | Win11 spawn 平台池策略实测 | T6 数字全部来自 Linux fork | MED |
 | B-7 | CI 增 Windows 腿 | 现三档均 ubuntu-latest | MED |
@@ -1751,4 +1751,4 @@ tests/test_golden*.py（H1/heading/raw 断言）
 
 本轮的 7 项 HIGH 中，有 4 项集中在删除/备份/恢复链路，说明“数据安全承诺”已经从设计问题转化为实现与运维入口问题；另外 3 项分别指向中文标题、DOCX 内容控件和文档失真。建议严格按 Batch 0→1→2→3→4 推进：先把“删除不会复活、恢复有安全入口、轮出不会删最后副本”做实，再做 DOCX 功能补全，最后处理性能与文档收口。
 
-**B 类提醒**：B-10（外置卷恢复演练）、B-4（并发删除/转换压测）、B-1/B-13/B-15（真实语料）需要本机以外环境或人工参与，请优先安排；**B-5（cron 日任务）与 B-9（serve/work 常驻运行时：自启/崩溃自愈/`bootout` 不复活/`--once` 正常退出不重启）已于 2026-10-18 本机 macOS launchd 实机验证，唯余 Windows 腿（`Register-ScheduledTask` + `.ps1` 真机执行，本机无 `pwsh`）待验，并入 B-6/B-7**。其余 B 项在每批完成后继续提醒。
+**B 类提醒**：B-10（外置卷恢复演练）、B-1/B-13/B-15（真实语料）需要本机以外环境或人工参与，请优先安排；**B-4（并发删除/转换压测）、B-5（cron 日任务）与 B-9（serve/work 常驻运行时：自启/崩溃自愈/`bootout` 不复活/`--once` 正常退出不重启）已于 2026-10-18 本机实跑**（复活守护 5/5 零泄漏 + 4 worker claim 原子性 + R6-SVC-4 实证 + launchd 三态），唯余 Windows 腿（`Register-ScheduledTask` + `.ps1` 真机执行，本机无 `pwsh`）待验，并入 B-6/B-7。**B-4 压测冒出一条新小缺口待你决策**：删除 × 在途转换的 `out/{doc}.zip` 文件孤儿（库不复活、内容不可寻址，仅字节滞留磁盘），是否落地 `_finish_ok`/`_finish_one` 回滚时顺带 unlink 本轮产物（可转 A 类小修）。其余 B 项在每批完成后继续提醒。
