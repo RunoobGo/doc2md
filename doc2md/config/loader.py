@@ -43,6 +43,9 @@ RUNTIME_IMMUTABLE_KEYS: dict[str, tuple[Any, ...]] = {
     # 让旧产物在删除与 `/docs/<id>/markdown` 两侧同时失联。与 paths.root 同口径，
     # 改输出根必须改配置文件后重启。
     "paths.out": (),
+    # `paths.logs` 在 create_app 时绑定 RotatingJsonlWriter；运行期改值不会切换
+    # 已打开的文件，只会让 /settings 与实际写入位置不一致。与 out 同口径。
+    "paths.logs": (),
     # CH-473（R5-SEC-1 / D4 闭环）：opt-in 键本身也不许在线改。原集合只冻结
     # offline_assert，于是两步 PUT 即可掏空 D4——先 `PUT {"api":{"allow_remote_bind":true}}`
     # （单步合法），再 `PUT {"api":{"bind":"0.0.0.0"}}`（candidate 里 opt-in 已为真，

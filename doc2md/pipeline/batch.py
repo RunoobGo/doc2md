@@ -43,7 +43,7 @@ class Summary:
     """跨进程回传的紧凑结果（不回传 IR 对象：pickle 大对象是内存与延迟的额外成本）。"""
 
     file: str
-    status: str                      # ok | rejected | error
+    status: str                      # ok | rejected | conflict | error
     doc_id: str = ""
     source_key: str = ""
     blocks: int = 0
@@ -52,6 +52,7 @@ class Summary:
     code: str = ""
     message: str = ""
     gate: dict | None = None
+    edited_blocks: int = 0
     meta: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
@@ -64,6 +65,8 @@ class Summary:
             d["message"] = self.message
         if self.gate:
             d["gate"] = self.gate
+        if self.edited_blocks:
+            d["edited_blocks"] = self.edited_blocks
         if self.meta:
             d["meta"] = self.meta
         return d
@@ -79,9 +82,17 @@ def _convert_one(path: str, cfg: dict | None, mode: str | None,
                       precheck_edits=precheck_edits)
     except Doc2mdError as exc:              # 含 E4221 门禁拒收，跨进程按 code 分类
         detail = exc.detail or {}
-        return Summary(file=str(path), status="rejected" if exc.code == "E4221" else "error",
+        # CH-490：预检命中的编辑冲突是「明确的业务终态」，不是内部错误；
+        # 与 E4221 一样回传可判定 status，API 侧保持 conflict/202 语义。
+        status = ("rejected" if exc.code == "E4221"
+                  else "conflict" if exc.code == "E4091" else "error")
+        return Summary(file=str(path), status=status,
+                       doc_id=str(detail.get("doc_id", "")),
+                       source_key=str(detail.get("source_key", "")),
                        code=exc.code, message=str(exc),
-                       gate=_gate(detail) if exc.code == "E4221" else None).to_dict()
+                       gate=_gate(detail) if exc.code == "E4221" else None,
+                       edited_blocks=int(detail.get("edited_blocks", 0) or 0)
+                       if exc.code == "E4091" else 0).to_dict()
     except Exception as exc:                # noqa: BLE001 — 解析层未预期异常不得拖垮整批
         # CH-485（R9-PIPE-9）：第三方解析异常的消息可能夹带页正文；任务明细会
         # 经 GET /jobs 暴露给 reader。只留类名，与 worker died 同口径。

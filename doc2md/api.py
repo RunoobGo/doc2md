@@ -16,6 +16,7 @@ import json
 import os
 import threading
 import time
+import uuid
 from pathlib import Path
 
 from . import PIPELINE_VERSION, SCHEMA_VERSION, auth, config
@@ -141,38 +142,70 @@ def _doc_lock(doc_id: str) -> threading.Lock:
 
 
 @contextlib.contextmanager
-def _artifact_lock(out_dir: Path, doc_id: str, *, timeout: float = 30.0):
-    """跨进程按 doc 串行重建（B-18）。
+def _artifact_lock(out_dir: Path, doc_id: str, *, timeout: float = 30.0,
+                   stale_seconds: float = 60.0,
+                   heartbeat_seconds: float = 10.0):
+    """跨进程按 doc 串行重建（B-18；CH-490 心跳与所有权）。
 
     进程内已有分片锁；API 与 worker 是两个进程，仍可能同时 package 同一
-    doc。锁文件放 out/.locks，O_EXCL 建锁；崩溃遗留锁 60s 后视为陈旧。
+    doc。锁文件放 out/.locks，O_EXCL 建锁。CH-490 起：
+    - 持锁期间后台线程周期性刷新 mtime；重建超过 60s 不再被误判为陈旧；
+    - 锁文件带唯一 token，释放时只清自己的锁——即使发生陈旧回收，旧持有者
+      也不会删掉新持有者的锁；
+    - 心跳/文件消失时心跳线程自行退出，不影响主流程。
     """
     lock_dir = Path(out_dir) / ".locks"
     lock_dir.mkdir(parents=True, exist_ok=True)
     path = lock_dir / f"{doc_id}.lock"
     deadline = time.monotonic() + timeout
+    token = uuid.uuid4().hex
+    payload = f"{os.getpid()} {time.time():.0f} {token}".encode("ascii")
+    stale_seconds = max(0.05, float(stale_seconds))
+    heartbeat_seconds = max(0.01, min(float(heartbeat_seconds), stale_seconds / 2))
     while True:
         try:
             fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-            os.write(fd, f"{os.getpid()} {time.time():.0f}".encode("ascii"))
-            os.close(fd)
+            try:
+                os.write(fd, payload)
+            finally:
+                os.close(fd)
             break
         except FileExistsError:
             try:
                 age = time.time() - path.stat().st_mtime
             except OSError:
                 age = 0.0
-            if age > 60:
+            if age > stale_seconds:
                 path.unlink(missing_ok=True)
                 continue
             if time.monotonic() >= deadline:
                 raise E5031_StorageError(
                     "artifact rebuild busy", detail={"doc_id": doc_id})
             time.sleep(0.05)
+    stop = threading.Event()
+
+    def heartbeat() -> None:
+        while not stop.wait(heartbeat_seconds):
+            try:
+                if token not in path.read_text(encoding="ascii"):
+                    return
+                os.utime(path, None)
+            except OSError:
+                return
+
+    beat = threading.Thread(target=heartbeat, name="doc2md-artifact-lock",
+                            daemon=True)
+    beat.start()
     try:
         yield
     finally:
-        path.unlink(missing_ok=True)
+        stop.set()
+        beat.join(timeout=max(1.0, heartbeat_seconds * 3))
+        try:
+            if token in path.read_text(encoding="ascii"):
+                path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def _rebuild_artifact(store: Store, doc_id: str, cfg: dict, root: Path) -> Path | None:
@@ -476,6 +509,48 @@ def create_app(cfg: dict | None = None, root: Path | None = None,
 
         out = []
 
+        def _idem_preflight(f) -> bool:
+            """有幂等键时先复用既有作业，避免转换/预检改变 CH-475 的重放语义。
+
+            只在请求显式带 Idempotency-Key 时计算内容哈希；普通请求不为此多读
+            一遍源文件。同键同 doc 命中（含终态）直接回既有状态，不再转换。
+            """
+            key = _idem_for(f)
+            if not key:
+                return False
+            from .ir import hash_of_path
+            try:
+                doc_id, _source_key = hash_of_path(f)
+            except OSError:
+                return False                 # 留给 convert 统一映射 E4151
+            row = store.q1(
+                "SELECT job_id, doc_id, status FROM tasks"
+                " WHERE idem_key=? AND doc_id=? ORDER BY created_at DESC LIMIT 1",
+                (key, doc_id))
+            if row is None:
+                return False
+            out.append({"file": f.name, "job_id": row["job_id"],
+                        "doc_id": row["doc_id"], "attached": True,
+                        "idempotency_hit": True, "status": row["status"]})
+            return True
+
+        def _conflict_one(f, doc_id, source_key, edited_blocks, source):
+            """预检命中：不转换、不触碰产物，只留一条 rejected 任务与事件。
+
+            CH-490：预检发生在 package 之前，旧 zip 仍是编辑后的正确产物；
+            与竞态路径（转换后 save_ir 才撞 E4091）不同，这里不需要重建。
+            """
+            detail = {"reason": "edited_blocks_present",
+                      "edited_blocks": edited_blocks,
+                      "doc_id": doc_id, "source_key": source_key}
+            j = sched.submit_rejected(f.name, "E4091", detail,
+                                      idem_key=_idem_for(f))
+            _emit(store, "job_rejected", doc_id or None, j.job_id,
+                  {"code": "E4091", "source": source}, logw())
+            return {"file": f.name, "job_id": j.job_id, "doc_id": doc_id,
+                    "status": "conflict", "code": "E4091",
+                    "edited_blocks": edited_blocks}
+
         def _finish_one(f, ir, doc_id, source_key, since, *, meta=None, gate=None):
             j = sched.submit(doc_id, source_key, idem_key=_idem_for(f),
                              source_path=str(f), mode=mode, del_seq=since,
@@ -557,6 +632,9 @@ def create_app(cfg: dict | None = None, root: Path | None = None,
 
         if not files:
             return jsonify({"jobs": out}), 202
+        pending = [f for f in files if not _idem_preflight(f)]
+        if not pending:
+            return jsonify({"jobs": out}), 202
 
         # SVC-3（CH-471）：多文件目录原为「一个请求线程内串行 convert 全部」，
         # 吞吐随文件数线性恶化（正是 queue_async 要避免、但它默认关）。大批量改走
@@ -566,7 +644,7 @@ def create_app(cfg: dict | None = None, root: Path | None = None,
         # 并保留「错误按 HTTP 码传播」既有契约（413/E4131、415/E4151…）与即时 doc_id。
         # 并行阈值可调（perf.sync_min_parallel，见决策/登记 B）。
         parallel_min = max(2, int(config.get(cur(), "perf.sync_min_parallel", 8) or 0))
-        if len(files) >= parallel_min:
+        if len(pending) >= parallel_min:
             from .pipeline.batch import default_workers, run_batch
             from .worker import _read_ir
             # CH-473（R5-SVC-7）：进程池全局信号量——见 _SYNC_POOL_GATE 注释。
@@ -581,13 +659,17 @@ def create_app(cfg: dict | None = None, root: Path | None = None,
                     "Retry-After": str(_SYNC_RETRY_AFTER_S)}
             try:
                 by_file = {r["file"]: r for r in run_batch(
-                    files, cfg=cur(), mode=mode,
+                    pending, cfg=cur(), mode=mode,
                     out_dir=config.path_setting(cur(), "paths.out", root,
                                                 str(root / "out")),
-                    workers=default_workers(cfg))}
-                for f in files:
+                    workers=default_workers(cfg), precheck_edits=True)}
+                for f in pending:
                     r = by_file.get(str(f)) or {"status": "error", "code": "E5000"}
-                    if r["status"] == "rejected":
+                    if r["status"] == "conflict":
+                        out.append(_conflict_one(
+                            f, r.get("doc_id", ""), r.get("source_key", ""),
+                            r.get("edited_blocks"), "api_batch_precheck"))
+                    elif r["status"] == "rejected":
                         j = sched.submit_rejected(f.name, r.get("code", "E4221"),
                                                   {"reason": r.get("message", "")},
                                                   idem_key=_idem_for(f))
@@ -612,7 +694,7 @@ def create_app(cfg: dict | None = None, root: Path | None = None,
                 _SYNC_POOL_GATE.release()
             return jsonify({"jobs": out}), 202
 
-        for f in files:
+        for f in pending:
             try:
                 # CH-476（R7-SVC-2）：同步分支同样吃 `mode`。原实现只在异步分支读这个
                 # 字段，`queue_async=false`（默认）下 `{"mode":"single"}` 被静默忽略——
@@ -620,7 +702,13 @@ def create_app(cfg: dict | None = None, root: Path | None = None,
                 res = convert(f, cfg=cur(), mode=mode,
                               out_dir=config.path_setting(cur(), "paths.out", root,
                                                           str(root / "out")),
-                              force=force)
+                              force=force, precheck_edits=True)
+            except E4091_DocOverwrite as e:
+                out.append(_conflict_one(
+                    f, str(e.detail.get("doc_id", "")),
+                    str(e.detail.get("source_key", "")),
+                    e.detail.get("edited_blocks"), "api_precheck"))
+                continue
             except Doc2mdError as e:
                 if e.code == "E4221":
                     j = sched.submit_rejected(f.name, e.code, e.detail,
@@ -960,6 +1048,11 @@ def create_app(cfg: dict | None = None, root: Path | None = None,
                 current_out = config.get(app.config["doc2md"]["cfg"], "paths.out")
                 if current_out is not None:
                     merged.setdefault("paths", {})["out"] = current_out
+                # CH-490：日志写入器在启动时已绑定 paths.logs，reload 不能
+                # 换目录（否则 /settings 与实际写入位置分离）。
+                current_logs = config.get(app.config["doc2md"]["cfg"], "paths.logs")
+                if current_logs is not None:
+                    merged.setdefault("paths", {})["logs"] = current_logs
             else:
                 # 程序化 create_app(cfg) / 测试没有显式文件来源：以启动基线为
                 # 基准重放 override。退回 config.load() 会按当前 cwd 重新找

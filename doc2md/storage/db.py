@@ -20,6 +20,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 DB_VERSION = 9   # state.sqlite 结构版本（user_version）；与 IR 的 SCHEMA_VERSION=14 是两套口径
+# CH-490：SQLite 页缓存是**每连接私有**的。serve 按请求线程建连接，原 64MB/连接
+# 在 50MB 扫描表上实测 8/16/32 线程驻留 473/867/2144MB。改为 8MB 页缓存并关闭
+# mmap：16 线程并发扫描实测 807MB（mmap=64MB）→ 164MB（mmap=0）；读路径仍由
+# OS page cache 兜底，单机自用不需要每连接映射整个库文件。
+SQLITE_CACHE_KB = 8192
+SQLITE_MMAP_BYTES = 0
 # v9（CH-486）：新增 ix_tasks_created，覆盖 /jobs 无状态过滤的 created_at DESC。
 # v8（CH-485 / R9-SVC-1 / R9-SVC-2）：tasks 增加 del_seq/force；blocks 增加
 # links/font/provenance JSON；docs 增加 gate_json——异步 drift 删除守护与
@@ -241,8 +247,8 @@ class Store:
         # 的一次提交。原默认 FULL 每提交一次 fsync，是文档自称「每任务固定开销主因」。
         # mmap_size/cache_size 供读密集检索（大/分片库）走内存映射，免反复系统调用。
         conn.execute("PRAGMA synchronous=NORMAL")
-        conn.execute("PRAGMA mmap_size=268435456")   # 256MB
-        conn.execute("PRAGMA cache_size=-65536")     # 64MB（负值=KB）
+        conn.execute(f"PRAGMA mmap_size={SQLITE_MMAP_BYTES}")   # 0 = 关闭每连接整库映射
+        conn.execute(f"PRAGMA cache_size=-{SQLITE_CACHE_KB}")   # 8MB（负值=KB，每连接私有）
         holder = _ConnRef(conn)
         self._local.holder = holder          # 线程独占持有：线程死 → holder 死 → 出表
         with self._lock:

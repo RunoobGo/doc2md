@@ -289,12 +289,13 @@ def test_missing_golden_hard_fails(tmp_path, monkeypatch):
 
 def test_db_pragmas_tuned(tmp_path):
     """STOR-1 / 决策 D1：连接建立即套 WAL+NORMAL+mmap+cache（每提交 fsync 是吞吐主因）。"""
+    from doc2md.storage import db as dbmod
     s = Store(tmp_path / "state.sqlite")
     c = s._conn
     assert str(c.execute("PRAGMA journal_mode").fetchone()[0]).lower() == "wal"
     assert int(c.execute("PRAGMA synchronous").fetchone()[0]) == 1        # NORMAL
-    assert int(c.execute("PRAGMA mmap_size").fetchone()[0]) == 268435456  # 256MB
-    assert int(c.execute("PRAGMA cache_size").fetchone()[0]) == -65536    # 64MB
+    assert int(c.execute("PRAGMA mmap_size").fetchone()[0]) == dbmod.SQLITE_MMAP_BYTES
+    assert int(c.execute("PRAGMA cache_size").fetchone()[0]) == -dbmod.SQLITE_CACHE_KB
     s.close()
 
 

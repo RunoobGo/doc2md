@@ -115,7 +115,8 @@ def _convert(path: str | Path, *, cfg: dict, mode: str | None,
         if edited:
             raise E4091_DocOverwrite(
                 "document has user edits; re-conversion would overwrite the artifact",
-                detail={"doc_id": doc_id, "edited_blocks": edited,
+                detail={"doc_id": doc_id, "source_key": source_key,
+                        "edited_blocks": edited,
                         "hint": "pass force=true to overwrite"})
 
     chunk_pages = int(config.get(cfg, "s1.chunk_pages", 0)) or None

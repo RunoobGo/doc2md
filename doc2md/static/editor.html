@@ -275,7 +275,7 @@ function renderBlocks(list) {
       `<div class="meta"><b>${esc(b.id)}</b><span>${esc(b.type)}` +
       (b.level ? " h" + esc(String(b.level)) : "") + "</span>" +
       `<span>p.${b.page == null ? "-" : esc(String(b.page))}</span>` +
-      `<span>rev ${esc(String(b.revision))}</span>` +
+      `<span data-rev>rev ${esc(String(b.revision))}</span>` +
       (absorbed ? `<span title="缝合吸收">吸收 ${absorbed}</span>` : "") +
       (b.immutable ? "<span>immutable</span>" : "") + "</div>" +
       `<textarea ${b.immutable ? "disabled" : ""}>${esc(b.text || "")}</textarea>` +
@@ -327,6 +327,8 @@ async function refetch(bid, rev) {
   if (rev === undefined) rev = b.revision;
   locked.set(bid, rev);
   el.querySelector("textarea").value = b.text || "";
+  const revEl = el.querySelector("[data-rev]");
+  if (revEl) revEl.textContent = `rev ${rev}`;
   log(`${bid} 已重取（本地锁定 rev=${rev}）`);
 }
 
