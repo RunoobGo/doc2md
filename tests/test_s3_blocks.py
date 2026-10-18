@@ -346,6 +346,25 @@ def test_docx_heading_style_hint_wins_over_heuristics():
 
 # ---------------------------------------------------------------- e2e（黄金样本）
 
+def test_pdf_unnumbered_large_short_line_is_heading():
+    """真实 Word 导出的报告标题常无编号；大字号短行应识别为标题。"""
+    pages = [_page(_line("年度报告", size=20.0),
+                   _line("这是正文第一段，用于建立正文基准。", size=10.0),
+                   _line("这是正文第二段，用于建立正文基准。", size=10.0))]
+    ir = analyze(pages, base_size=10.0)
+    heads = [b for b in ir.blocks if b.type == "heading"]
+    assert heads and heads[0].text == "年度报告" and heads[0].level == 1
+
+
+def test_pdf_unnumbered_borderline_size_stays_paragraph():
+    """+6pt 阈值以下不升级，避免把页标题/大号正文误判为标题。"""
+    pages = [_page(_line("页标题", size=15.5),
+                   _line("这是正文第一段，用于建立正文基准。", size=10.0),
+                   _line("这是正文第二段，用于建立正文基准。", size=10.0))]
+    ir = analyze(pages, base_size=10.0)
+    assert not [b for b in ir.blocks if b.type == "heading"]
+
+
 def test_links_pdf_markdown_carries_both_links(golden_dir):
     from doc2md.pipeline.convert import convert
     r = convert(golden_dir / "links_pdf.pdf")

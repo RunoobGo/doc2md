@@ -72,19 +72,33 @@
       10.6,
       11.0
     ],
-    "files_with_detected_headings": 2,
+    "files_with_detected_headings": 8,
+    "heading_counts": {
+      "AdjacencyReport.pdf": 2,
+      "ApothecaryLetter.pdf": 0,
+      "ApothecaryNewsletter.pdf": 2,
+      "EssentialReport.pdf": 3,
+      "OriginReport.pdf": 1,
+      "OriginResume.pdf": 1,
+      "RedAndBlackLetter.pdf": 2,
+      "RedAndBlackReport.pdf": 32,
+      "TimelessReport.pdf": 23
+    },
     "numeric_table_blocks": 2
   },
   "pairs": [
     {
       "stem": "AdjacencyReport",
-      "docx_headings": 2,
-      "pdf_headings": 0,
+      "docx_headings": 3,
+      "pdf_headings": 1,
       "matched": 0,
       "recall": 0.0,
-      "precision": null,
-      "extra_pdf_headings": [],
+      "precision": 0.0,
+      "extra_pdf_headings": [
+        "键入文档标题"
+      ],
       "missing_pdf_headings": [
+        "[键入提要栏标题]",
         "小标题2",
         "小标题3"
       ]
@@ -101,24 +115,25 @@
     },
     {
       "stem": "ApothecaryNewsletter",
-      "docx_headings": 1,
-      "pdf_headings": 0,
-      "matched": 0,
-      "recall": 0.0,
-      "precision": null,
+      "docx_headings": 2,
+      "pdf_headings": 2,
+      "matched": 2,
+      "recall": 1.0,
+      "precision": 1.0,
       "extra_pdf_headings": [],
-      "missing_pdf_headings": [
-        "文章标题"
-      ]
+      "missing_pdf_headings": []
     },
     {
       "stem": "EssentialReport",
-      "docx_headings": 2,
-      "pdf_headings": 0,
-      "matched": 0,
-      "recall": 0.0,
-      "precision": null,
-      "extra_pdf_headings": [],
+      "docx_headings": 3,
+      "pdf_headings": 3,
+      "matched": 1,
+      "recall": 0.333,
+      "precision": 0.333,
+      "extra_pdf_headings": [
+        "[键入文档副标题]",
+        "标题]"
+      ],
       "missing_pdf_headings": [
         "小标题2",
         "小标题3"
@@ -126,13 +141,17 @@
     },
     {
       "stem": "OriginReport",
-      "docx_headings": 3,
-      "pdf_headings": 0,
+      "docx_headings": 5,
+      "pdf_headings": 1,
       "matched": 0,
       "recall": 0.0,
-      "precision": null,
-      "extra_pdf_headings": [],
+      "precision": 0.0,
+      "extra_pdf_headings": [
+        "[键入文档标题]"
+      ],
       "missing_pdf_headings": [
+        "[文档标题]",
+        "[键入文档标题]",
         "标题1",
         "标题2",
         "标题3"
@@ -141,74 +160,76 @@
     {
       "stem": "OriginResume",
       "docx_headings": 0,
-      "pdf_headings": 0,
+      "pdf_headings": 1,
       "matched": 0,
       "recall": null,
-      "precision": null,
-      "extra_pdf_headings": [],
+      "precision": 0.0,
+      "extra_pdf_headings": [
+        "[键入您的姓名]"
+      ],
       "missing_pdf_headings": []
     },
     {
       "stem": "RedAndBlackLetter",
       "docx_headings": 0,
-      "pdf_headings": 0,
+      "pdf_headings": 2,
       "matched": 0,
       "recall": null,
-      "precision": null,
-      "extra_pdf_headings": [],
+      "precision": 0.0,
+      "extra_pdf_headings": [
+        "[公司]",
+        "[日期]"
+      ],
       "missing_pdf_headings": []
     },
     {
       "stem": "RedAndBlackReport",
-      "docx_headings": 20,
-      "pdf_headings": 6,
-      "matched": 0,
-      "recall": 0.0,
-      "precision": 0.0,
+      "docx_headings": 22,
+      "pdf_headings": 32,
+      "matched": 21,
+      "recall": 0.955,
+      "precision": 0.656,
       "extra_pdf_headings": [
         "1.1无保留意见",
         "1.2保留意见报告",
         "1.3否定意见报告",
         "1.4放弃表达意见报告",
         "1.5上市公司内部控制审计报告",
-        "1.6持续经营"
+        "1.6持续经营",
+        "[公司]",
+        "[在此处添加贵公司某位高级管理人员的引言或使用此空间放置文"
       ],
       "missing_pdf_headings": [
-        "会计科目",
-        "债务",
-        "全面收益表（损益）",
-        "公司信息",
-        "关键点",
-        "展望未来",
-        "或有负债",
-        "战略要点"
+        "致我们的股东"
       ]
     },
     {
       "stem": "TimelessReport",
-      "docx_headings": 20,
-      "pdf_headings": 6,
-      "matched": 0,
-      "recall": 0.0,
-      "precision": 0.0,
+      "docx_headings": 23,
+      "pdf_headings": 17,
+      "matched": 10,
+      "recall": 0.435,
+      "precision": 0.588,
       "extra_pdf_headings": [
         "1.1无保留意见",
         "1.2保留意见报告",
         "1.3否定意见报告",
         "1.4放弃表达意见报告",
         "1.5上市公司内部控制审计报告",
-        "1.6持续经营"
+        "1.6持续经营",
+        "目录"
       ],
       "missing_pdf_headings": [
         "会计科目",
         "债务",
         "全面收益表（损益）",
-        "公司信息",
         "关键点",
         "展望未来",
         "或有负债",
-        "战略要点"
+        "战略要点",
+        "持续经营"
       ]
     }
-  ]
+  ],
+  "note": "Automatic DOCX Heading comparison is a proxy; final B-15 accuracy requires manual title annotation. The +6pt unnumbered heading rule was added in PIPELINE 2.9.0."
 }

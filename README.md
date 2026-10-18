@@ -1,6 +1,6 @@
 # Doc2md
 
-文本型 PDF / DOCX → Markdown 的**离线**转换管线（v2.8）。
+文本型 PDF / DOCX → Markdown 的**离线**转换管线（v2.9）。
 单机、无出站网络、无云端依赖；LLM 修补助手同样只连本地 `127.0.0.1`。
 
 ## 安装
@@ -211,7 +211,7 @@ Windows 任务计划不捕获标准输出，日志目录里没有 `launchd-*` �
 `workflow_dispatch` 供取证）用 3.11/3.12/3.13 三档跑全量 + 黄金逐字节复现 + `doctor`，补上这些非红线项的
 跨版本空白。这个分工由 `tests/test_ch479_ci_matrix.py` 的四条红线钉住：两工作流的版本集合必须相等、
 push 面 `full-suite` 必须保持无矩阵且钉死 `3.12`、每个作业必须带 `timeout-minutes`、周期腿不得挂
-`push`/`pull_request` 触发。周期腿首证 = run `39032817663`（手动 `workflow_dispatch`，三档各 `811 passed`，含黄金逐字节复现与 `doctor` 自检），push 面 = run `39032796293`（三档各 `260 passed, 551 deselected` + `811 passed` 全量）；上一轮（CH-481）push 面 = run `39041920410`（三档各 `275 passed, 563 deselected`，全量 `838 passed` 干净退出）；上一轮（CH-482）push 面 = run `39043948338`（三档各 `285 passed, 567 deselected`，全量 `852 passed` 干净退出，`doctor` 打 `2.5.0`）；最新一轮（CH-483）push 面 = run `39050319814`（三档各 `308 passed, 575 deselected`，全量 `883 passed` 干净退出，`doctor` 打 `2.6.0`）；CH-484 push 面 = run `39092382196`（三档各 `311 passed, 575 deselected`，全量 `886 passed` 干净退出，回填 run `39092772664`）；CH-485 本机 gate **339 passed / 0 skipped（34.63s）**、全量 **920 passed / 0 skipped（71.69s）**、ruff 全绿、doctor 退 0（`pipeline 2.7.0`）；远端 CI run `39096948274` 五作业全绿（lint + 3× merge-gate + full-suite）。CH-486 Windows 本机 gate **342 项 = 341 passed / 1 平台 skip（51.18s）**、全量 **929 项 = 921 passed / 8 平台 skip（124.63s）**、ruff 全绿、doctor 退 0（`pipeline 2.8.0`）；Windows 平台 skip 均为 POSIX 专有语义（chmod/tzset/waitpid/sendmsg/symlink/ps sampler），由 `is_private`/平台分支测试补位。远端 CI run `39106866387` **六作业全绿**（lint + 3× merge-gate + full-suite + windows-suite；首轮 `39106420181` 仅 Windows checkout 因长路径失败，`7b99d00` 启用 `core.longpaths` 后复跑全绿）。
+`push`/`pull_request` 触发。周期腿首证 = run `39032817663`（手动 `workflow_dispatch`，三档各 `811 passed`，含黄金逐字节复现与 `doctor` 自检），push 面 = run `39032796293`（三档各 `260 passed, 551 deselected` + `811 passed` 全量）；上一轮（CH-481）push 面 = run `39041920410`（三档各 `275 passed, 563 deselected`，全量 `838 passed` 干净退出）；上一轮（CH-482）push 面 = run `39043948338`（三档各 `285 passed, 567 deselected`，全量 `852 passed` 干净退出，`doctor` 打 `2.5.0`）；最新一轮（CH-483）push 面 = run `39050319814`（三档各 `308 passed, 575 deselected`，全量 `883 passed` 干净退出，`doctor` 打 `2.6.0`）；CH-484 push 面 = run `39092382196`（三档各 `311 passed, 575 deselected`，全量 `886 passed` 干净退出，回填 run `39092772664`）；CH-485 本机 gate **339 passed / 0 skipped（34.63s）**、全量 **920 passed / 0 skipped（71.69s）**、ruff 全绿、doctor 退 0（`pipeline 2.7.0`）；远端 CI run `39096948274` 五作业全绿（lint + 3× merge-gate + full-suite）。CH-486 Windows 本机 gate **343 项 = 342 passed / 1 平台 skip（47.61s）**、全量 **932 项 = 924 passed / 8 平台 skip（119.79s）**、ruff 全绿、doctor 退 0（`pipeline 2.9.0`）；Windows 平台 skip 均为 POSIX 专有语义（chmod/tzset/waitpid/sendmsg/symlink/ps sampler），由 `is_private`/平台分支测试补位。远端 CI run `39106866387` **六作业全绿**（lint + 3× merge-gate + full-suite + windows-suite；首轮 `39106420181` 仅 Windows checkout 因长路径失败，`7b99d00` 启用 `core.longpaths` 后复跑全绿）。
 > 现状（CH-468 起）：仓库已公开，`main` 分支保护已配置——`merge-gate (3.11/3.12/3.13)` 为**必需检查**，
 > 三个 gate 任一失败即禁止合并（`full-suite` 因 `needs` 同样被阻断）。验收：故意失败的 PR #1 被
 > `mergeStateStatus=BLOCKED` 拦下。另有本地 pre-push 钩子双保险（见「本地红线兜底」）。
@@ -221,7 +221,7 @@ push 面 `full-suite` 必须保持无矩阵且钉死 `3.12`、每个作业必须
 
 ```bash
 pytest -m gate            # 红线层：六条 merge-gate + 低配机专项 + CH-469 两批安全/契约专项 + CH-473 第五轮 12 项 + CH-475 第六轮 7 项 + CH-476 第七轮 91 项 + CH-477 版本对账 4 项 + CH-478 批次① 有序列表端到端 4 项 + 批次② 等价门缩进敏感度 4 项 + CH-479 CI 版本矩阵口径 4 项 + CH-480 常驻资产同构 7 项 + CH-481 捕获档截断 8 项 + CH-482 代码块缩进重建 10 项（全绿方可合并）
-                          # 当前 342 项（CH-486；构成与完整耗时历史见 docs/dev-plan.md 附录 F / 12.1。项数是硬口径，耗时只作历史）
+                          # 当前 343 项（CH-486；构成与完整耗时历史见 docs/dev-plan.md 附录 F / 12.1。项数是硬口径，耗时只作历史）
                           # 耗时历史记录：Linux 沙箱轮次 72–110s、T8 优化后 53.0s、CH-469 本机（macOS arm64 / Py 3.15）28.7s、CH-473 62.7s、CH-475 30.0s、CH-476 33.9s、CH-477 33.25s / 31.98s、CH-478 批次① 31.54s、批次② 31.16s、CH-479 38.55s / 收口复跑 33.74s、CH-480 36.13s / 收口复跑 35.43s（新七条红线只做 plistlib 解析与 XML 读 DOM，差值属同机负载抖动）、CH-481 36.14s / 34.92s / 35.91s、CH-482 35.71s（`--junitxml` 35.36s）——项数是硬口径，耗时只作历史
 pytest tests/             # 全量（marker 实际取值：M0+M2 / M3 / M5 / M6c / M8 / M9a / DoD / PERF，见 pytest.ini）
 python3 tests/make_golden.py            # 重建黄金样本（输出目录随脚本位置，--golden 可覆盖）

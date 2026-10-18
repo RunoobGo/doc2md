@@ -232,6 +232,31 @@ def test_docx_textbox_content_is_preserved(tmp_path):
     assert "前后" in texts and "框内文字" in texts
 
 
+@pytest.mark.gate
+def test_docx_textbox_content_inside_sdt_is_preserved(tmp_path):
+    """真实 Office 文本框常把 w:p 包在 w:sdt 内，不能只取 direct child。"""
+    import docx
+    from docx.oxml import parse_xml
+    d = docx.Document()
+    p = d.add_paragraph()
+    p.add_run("宿主段落")
+    ns = ('xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
+          'xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" '
+          'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
+          'xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"')
+    p._p.append(parse_xml(
+        f'<w:r {ns}><w:drawing><wp:inline><a:graphic><a:graphicData '
+        'uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">'
+        '<wps:wsp><wps:txbx><w:txbxContent><w:sdt><w:sdtContent>'
+        '<w:p><w:r><w:t>控件文本框内容</w:t></w:r></w:p>'
+        '</w:sdtContent></w:sdt></w:txbxContent></wps:txbx></wps:wsp>'
+        '</a:graphicData></a:graphic></wp:inline></w:drawing></w:r>'))
+    path = tmp_path / "tb_sdt.docx"
+    d.save(str(path))
+    texts = [ln.text for ln in _lines(path)]
+    assert "控件文本框内容" in texts, texts
+
+
 def test_marks_are_and_across_continuation():
     pages = [RawPage(index=0, lines=[
         Line("无句末的粗体段落", size=10.0, bold=True, uniform_bold=True),

@@ -820,20 +820,27 @@ def _docx_table_rows(tbl) -> list[tuple[list[str], bool]]:
     return rows
 
 
-def _docx_textbox_paragraphs(container):
-    """按文档顺序产出文本框内的 w:p（AlternateContent 只取 Choice 一支）。"""
+def _docx_textbox_paragraphs(container, seen: set[int] | None = None):
+    """按文档顺序产出文本框内的 w:p（AlternateContent 只取 Choice 一支）。
+
+    Office 模板可能把文本框嵌套在另一个文本框/绘图中；对选中的 txbxContent
+    扁平遍历全部 w:p（含 sdt/customXml/嵌套文本框），并用元素 id 去重。
+    """
+    seen = seen if seen is not None else set()
     for child in container:
         if child.tag == f"{_MC_NS}AlternateContent":
             branch = child.find(f"{_MC_NS}Choice")
             if branch is None:
                 branch = child.find(f"{_MC_NS}Fallback")
             if branch is not None:
-                yield from _docx_textbox_paragraphs(branch)
+                yield from _docx_textbox_paragraphs(branch, seen)
         elif child.tag == f"{_W_NS}txbxContent":
-            for p in child.findall(f"{_W_NS}p"):
-                yield p
+            for p in child.iter(f"{_W_NS}p"):
+                if id(p) not in seen:
+                    seen.add(id(p))
+                    yield p
         else:
-            yield from _docx_textbox_paragraphs(child)
+            yield from _docx_textbox_paragraphs(child, seen)
 
 
 def _iter_docx_blocks(container):

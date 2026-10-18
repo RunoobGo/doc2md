@@ -37,11 +37,20 @@ Microsoft 许可约束、用户文档可能含隐私，不能未经确认直接�
 - 来源：用 Microsoft Word 16 将同一批 Office 中文模板导出为 PDF（不是 reportlab 合成）
 - 收集 **9 份**，全部可转换；页数 1–8，CJK 字符 114–1256
 - 正文字号分布：8.0 / 9.0 / 9.5 / 10.0 / 10.6 / 11.0pt（含真实 10.5pt 附近字号）
-- 当前只对 2 份检测到标题块；其余标题未被 S3 识别
+- PIPELINE 2.9.0 增加无编号大字号短行标题规则后，**8/9 份检出了标题块**
+  （`ApothecaryLetter` 本身没有章节标题）；自动 DOCX 对照中
+  `RedAndBlackReport` recall 0.955 / precision 0.656，`TimelessReport` 0.435 / 0.588
 - **重要口径**：自动把 DOCX 的 Heading 样式当 ground truth 不可靠——这些模板的
   Heading 是占位标题，PDF 中另有编号小节标题，二者不是同一文本集合。
   因此 `manifest.json` 中的自动 precision/recall 只能当**线索**，不能当最终准确率；
   B-15 的正式验收仍需人工标注 10–20 份真实中文 PDF 的标题集合。
+
+### 本轮顺带修复
+
+- Office 真实文本框常把段落包在 `w:sdt` 内，且可能嵌套另一个文本框；原
+  `_docx_textbox_paragraphs` 只取 direct `w:p`，会整块漏抽。已改为递归展开
+  sdt/customXml/嵌套文本框并按元素去重；模板抽查中多数文本框从 0–4/8 提升到 8/8。
+- 新增 +6pt 无编号大字号短行标题规则，避免真实 Word 报告的无编号章节标题全部漏判。
 
 ## 复现
 

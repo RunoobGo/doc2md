@@ -602,6 +602,13 @@ def _heading_level(text: str, size: float, base: float, bold: bool,
         # CH-485（R9-PIPE-2）：0.5pt 容差吸收字体测量的细微差异。
         if (size or base) > base + 0.5 or bold or multi_level or cjk_head:
             return _level_from_number(t, size or base, base)
+    # 真实 Word 报告常有无编号的大字号章节标题（PDF 无 Heading 样式可依赖）。
+    # 只认「短行 + 字号显著大于正文」：+6pt 阈值高于现有 golden 的 +5.5pt，
+    # 避免把 small_3p 这类页标题误升为标题；+10pt 以上视为一级。
+    if (not numbered and size and base and size >= base + 6.0
+            and len(t) <= 60
+            and not t.endswith(("。", "！", "？", ".", "!", "?"))):
+        return 1 if size >= base + 10.0 else 2
     return None
 
 
