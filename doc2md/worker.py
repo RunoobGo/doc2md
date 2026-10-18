@@ -201,7 +201,8 @@ def drain_once(store: Store, cfg: dict, root, *, workers: int | None = None,
                     _event(store, job, res, "job_failed", writer)
                     continue
                 try:
-                    drift = _finish_ok(store, sched, job, res, ir, writer=writer)
+                    drift = _finish_ok(store, sched, job, res, ir, writer=writer,
+                                       meta=res.get("meta"), gate=res.get("gate"))
                 except E4041_NotFound:
                     # CH-476（R7-SVC-1）：删除×在途转换竞争——任务行已被 delete_doc
                     # 级联收走，_finish_ok 已回滚（docs/blocks/search 未写回）。
@@ -224,6 +225,16 @@ def drain_once(store: Store, cfg: dict, root, *, workers: int | None = None,
                     rep.rejected += 1
                     rep.notes.append(f"{job['job_id']}: overwrite conflict (edits kept)")
                     _event(store, job, res, "job_rejected", writer)
+                    # CH-485（R9-SVC-2）：package 已覆盖旧 zip；从 DB 编辑内容重建。
+                    try:
+                        from .api import _rebuild_artifact
+                        _rebuild_artifact(store, res.get("doc_id") or job.get("doc_id") or "",
+                                          cfg, root)
+                    except Exception as exc:  # noqa: BLE001 — 补偿失败不影响终态
+                        if writer:
+                            writer.write({"code": "E_ARTIFACT_REBUILD",
+                                          "doc_id": res.get("doc_id") or job.get("doc_id") or "",
+                                          "exc": type(exc).__name__})
                     continue
                 rep.done += 1
                 rep.drift += 1 if drift else 0
@@ -241,7 +252,8 @@ def drain_once(store: Store, cfg: dict, root, *, workers: int | None = None,
 
 
 def _finish_ok(store: Store, sched: Scheduler, job: dict, res: dict, ir,
-               writer=None) -> bool:
+               writer=None, meta: dict | None = None,
+               gate: dict | None = None) -> bool:
     """入库 + 状态推进。返回是否发生内容漂移（入队后源文件被改写）。
 
     CH-459（A-4）：detail 更新 / save_ir / mark(done) / 事件原为四次独立
@@ -290,7 +302,7 @@ def _finish_ok(store: Store, sched: Scheduler, job: dict, res: dict, ir,
         if not sched.mark(job["job_id"], "done", detail=detail, tx=tx):
             raise E4041_NotFound(
                 f"task row gone (doc deleted during conversion): {job['job_id']}")
-        save_ir(store, ir, tx=tx)
+        save_ir(store, ir, tx=tx, meta=meta, gate=gate)
         _emit(store, "job_done", res.get("doc_id") or job.get("doc_id"), job["job_id"],
               {"blocks": int(res.get("blocks", 0) or 0), "source": "work",
                "file": str(job.get("path", ""))[-64:]}, writer, tx=tx)

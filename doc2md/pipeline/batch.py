@@ -15,7 +15,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Sequence
 
@@ -52,6 +52,7 @@ class Summary:
     code: str = ""
     message: str = ""
     gate: dict | None = None
+    meta: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         d = {"file": self.file, "status": self.status, "doc_id": self.doc_id,
@@ -63,6 +64,8 @@ class Summary:
             d["message"] = self.message
         if self.gate:
             d["gate"] = self.gate
+        if self.meta:
+            d["meta"] = self.meta
         return d
 
 
@@ -82,7 +85,8 @@ def _convert_one(path: str, cfg: dict | None, mode: str | None,
                        message=f"{type(exc).__name__}: {exc}").to_dict()
     return Summary(file=str(path), status="ok", doc_id=res.doc_id, source_key=res.source_key,
                    blocks=len(res.ir.blocks), chars=res.metrics.get("chars", 0),
-                   zip=str(res.zip_path) if res.zip_path else "").to_dict()
+                   zip=str(res.zip_path) if res.zip_path else "",
+                   gate=res.gate, meta=res.meta).to_dict()
 
 
 def _gate(detail: dict) -> dict:

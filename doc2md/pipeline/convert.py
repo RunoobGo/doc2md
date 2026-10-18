@@ -6,7 +6,9 @@ auto：页数 > max_pages_per_shard 时走两阶段，否则单片。
 from __future__ import annotations
 
 import json
+import os
 import time
+import uuid
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -247,10 +249,21 @@ def package(ir: IR, md: str, meta: dict, out_dir: Path, cfg: dict,
     entries = [("content.md", body),
                ("ir.json", json.dumps(ir.to_dict(for_export=True), ensure_ascii=False)),
                ("report.html", render_report(ir, meta, gate))]
-    with zipfile.ZipFile(zp, "w", zipfile.ZIP_DEFLATED) as z:
-        for name, content in entries:
-            assert_entry_safe(name)
-            z.writestr(f"{ir.doc_id}/{name}", content)
+    # CH-485（R9-SVC-2）：写唯一 .part + fsync + 原子 rename。读者不会看到
+    # 截断 zip；同一内容并发转换由“最后完成的完整文件”胜出，不再互相截断。
+    part = out_dir / f"{ir.doc_id}.{uuid.uuid4().hex}.zip.part"
+    try:
+        with zipfile.ZipFile(part, "w", zipfile.ZIP_DEFLATED) as z:
+            for name, content in entries:
+                assert_entry_safe(name)
+                z.writestr(f"{ir.doc_id}/{name}", content)
+        with part.open("rb+") as fh:
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(part, zp)
+    except Exception:
+        part.unlink(missing_ok=True)
+        raise
     return zp
 
 

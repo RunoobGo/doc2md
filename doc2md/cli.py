@@ -341,7 +341,33 @@ def cmd_backup_restore(args: argparse.Namespace) -> int:
                       "message": f"restore failed: {type(exc).__name__}"}),
               file=sys.stderr)
         return EXIT_BIZ
-    print(_jline({"restored": str(dst), "bytes": dst.stat().st_size}))
+    # CH-485（R9-SVC-2）：恢复 DB 后补齐缺失产物。只有升级后写入过
+    # gate_json 的文档可重建；旧文档没有完整块字段，保留“需重转”提示。
+    rebuilt = 0
+    rebuild_errors: list[str] = []
+    try:
+        from .api import _rebuild_artifact
+        from .storage.db import Store
+        st = Store(dst)
+        try:
+            out_dir = _out(cfg)
+            for row in st.q("SELECT doc_id, gate_json FROM docs"):
+                if (row["gate_json"] or "{}") in ("", "{}"):
+                    continue
+                if (out_dir / f"{row['doc_id']}.zip").exists():
+                    continue
+                try:
+                    _rebuild_artifact(st, row["doc_id"], cfg, root)
+                    rebuilt += 1
+                except Exception as exc:  # noqa: BLE001 — 恢复已成功，逐篇报告
+                    rebuild_errors.append(f"{row['doc_id']}:{type(exc).__name__}")
+        finally:
+            st.close()
+    except Exception as exc:                # noqa: BLE001 — 重建失败不翻转恢复结果
+        rebuild_errors.append(f"init:{type(exc).__name__}")
+    print(_jline({"restored": str(dst), "bytes": dst.stat().st_size,
+                  "artifacts_rebuilt": rebuilt,
+                  "artifact_errors": rebuild_errors[:5]}))
     return EXIT_OK
 
 
@@ -545,7 +571,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
                     continue
                 try:
                     res = convert(p, cfg=cfg, out_dir=_out(cfg))
-                    save_ir(store, res.ir)
+                    save_ir(store, res.ir, meta=res.meta, gate=res.gate)
                     j = sched.submit(res.doc_id, res.source_key)
                     sched.mark(j.job_id, "done")
                     print(_jline({"watched": p.name, "doc_id": res.doc_id,

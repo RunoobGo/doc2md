@@ -16,7 +16,7 @@ import os
 import threading
 from pathlib import Path
 
-from . import PIPELINE_VERSION, auth, config
+from . import PIPELINE_VERSION, SCHEMA_VERSION, auth, config
 from .cron import sweep_tmp
 from .edits import patch_block, rollback
 from .errors import (
@@ -103,6 +103,56 @@ def _predelete_snapshot(cfg: dict, root: Path) -> Path | None:
         raise E5031_StorageError(
             "pre-delete snapshot failed; delete aborted",
             detail={"reason": type(exc).__name__}) from exc
+
+
+_ARTIFACT_META_KEYS = {
+    "doc_id", "source_key", "source_name", "source_name_raw", "format",
+    "pages", "sharded", "shard_count", "schema_version", "warnings",
+}
+_ARTIFACT_META_EXTRA = {"shard_stats", "llm_prompt", "notes"}
+
+
+def _rebuild_artifact(store: Store, doc_id: str, cfg: dict, root: Path) -> Path | None:
+    """CH-485（R9-SVC-2）：从 DB 重建 zip；旧文档（gate_json 为空）返回 None。
+
+    DB 已是完整事实源：blocks 保存 font/links/provenance，docs 保存 package 实际
+    使用的 meta 与 S1.5 gate。PATCH/rollback/E4091/恢复后调用，保证导出与库面
+    一致，而不是依赖初始转换留下的旧 zip。
+    """
+    from .ir import IR
+    from .pipeline import s4_render
+    from .pipeline.convert import package
+
+    d = get_doc(store, doc_id)
+    gate_raw = d.get("gate_json") or "{}"
+    if gate_raw in ("", "{}"):
+        return None
+    meta = d.get("meta") or {}
+    try:
+        gate = json.loads(gate_raw) if isinstance(gate_raw, str) else gate_raw
+    except ValueError:
+        gate = {}
+    blocks = list_blocks(store, doc_id)
+    extra = {k: v for k, v in meta.items()
+             if k not in _ARTIFACT_META_KEYS and k not in _ARTIFACT_META_EXTRA}
+    ir = IR(
+        doc_id=d["doc_id"], source_key=d["source_key"],
+        source_name=d.get("source_name", "unnamed"),
+        source_name_raw=d.get("source_name_raw", ""),
+        format=d.get("format", "pdf"), pages=int(d.get("pages", 0) or 0),
+        blocks=blocks, sharded=bool(d.get("sharded")),
+        shard_count=int(d.get("shard_count", 1) or 1),
+        warnings=list(meta.get("warnings", []) or []),
+        schema_version=int(meta.get("schema_version", SCHEMA_VERSION)),
+        extra_meta=extra,
+    )
+    md = s4_render.render(
+        ir,
+        preserve_strike=bool(config.get(cfg, "s4.preserve_marks_strike", False)),
+        link_internal=str(config.get(cfg, "s4.link_internal", "plain")),
+    )
+    out_dir = config.path_setting(cfg, "paths.out", root, str(root / "out"))
+    return package(ir, md, meta, Path(out_dir), cfg, gate=gate)
 
 
 def create_app(cfg: dict | None = None, root: Path | None = None):
@@ -328,7 +378,7 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
 
         out = []
 
-        def _finish_one(f, ir, doc_id, source_key, since):
+        def _finish_one(f, ir, doc_id, source_key, since, *, meta=None, gate=None):
             j = sched.submit(doc_id, source_key, idem_key=_idem_for(f),
                              del_seq=since)
             # R6-SVC-3（CH-475，决策 D1）：幂等命中 / 附着既有作业时，该 doc_id 已由
@@ -363,7 +413,7 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
                         raise E4041_NotFound("doc deleted during conversion")
                     if not sched.mark(j.job_id, "done", tx=tx):
                         raise E4041_NotFound(f"task row gone: {j.job_id}")
-                    save_ir(store, ir, tx=tx, force=force)
+                    save_ir(store, ir, tx=tx, force=force, meta=meta, gate=gate)
                     _emit(store, "job_done", doc_id, j.job_id,
                           {"blocks": len(ir.blocks)}, logw(), tx=tx)
             except E4041_NotFound:
@@ -388,6 +438,14 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
                             "edited_blocks": e.detail.get("edited_blocks")})
                 _emit(store, "job_rejected", doc_id, j.job_id,
                       {"code": e.code, "source": "api"}, logw())
+                # CH-485（R9-SVC-2）：本次 package 已覆盖旧 zip；从 DB 的编辑后
+                # 内容重建，恢复“导出 == 库面”。失败不改变已判定的 conflict。
+                try:
+                    _rebuild_artifact(store, doc_id, cur(), root)
+                except Exception as exc:  # noqa: BLE001 — 重建是补偿动作
+                    logw().write({"code": "E_ARTIFACT_REBUILD",
+                                  "doc_id": doc_id,
+                                  "exc": type(exc).__name__})
                 out.append({"file": f.name, "job_id": j.job_id, "doc_id": doc_id,
                             "status": "conflict", "code": e.code,
                             "edited_blocks": e.detail.get("edited_blocks")})
@@ -442,7 +500,8 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
                                         "status": "error", "code": "E5031"})
                             continue
                         _finish_one(f, ir, r.get("doc_id", ""),
-                                    r.get("source_key", ""), since_seq)
+                                    r.get("source_key", ""), since_seq,
+                                    meta=r.get("meta"), gate=r.get("gate"))
             finally:
                 _SYNC_POOL_GATE.release()
             return jsonify({"jobs": out}), 202
@@ -472,7 +531,9 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
                     out.append({"file": f.name, "status": "error", "code": e.code})
                     continue
                 raise
-            _finish_one(f, res.ir, res.doc_id, res.source_key, since_seq)
+            _finish_one(f, res.ir, res.doc_id, res.source_key, since_seq,
+                        meta=getattr(res, "meta", None),
+                        gate=getattr(res, "gate", None))
         return jsonify({"jobs": out}), 202
 
     @app.get("/jobs")
@@ -561,6 +622,10 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
                               config.get(cur(), "api.base_revision_required", True)))
         _emit(store, "text_edited", doc_id, None, {"block_id": block_id,
                                                    "revision": res["revision"]}, logw())
+        try:
+            _rebuild_artifact(store, doc_id, cur(), root)
+        except Exception as exc:            # noqa: BLE001 — 编辑已提交，回报补偿失败
+            res["artifact_rebuild_error"] = type(exc).__name__
         return jsonify(res)
 
     @app.post("/docs/<doc_id>/blocks/<block_id>/rollback")
@@ -575,7 +640,12 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
             raise E4001_BadRequest("to_revision must be an integer",
                                    detail={"field": "to_revision"})
         actor = actor_id(b)
-        return jsonify(rollback(store, doc_id, block_id, to_rev, actor))
+        res = rollback(store, doc_id, block_id, to_rev, actor)
+        try:
+            _rebuild_artifact(store, doc_id, cur(), root)
+        except Exception as exc:            # noqa: BLE001 — 回滚已提交，回报补偿失败
+            res["artifact_rebuild_error"] = type(exc).__name__
+        return jsonify(res)
 
     @app.delete("/docs/<doc_id>")
     def del_doc(doc_id):

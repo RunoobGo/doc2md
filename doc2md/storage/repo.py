@@ -64,7 +64,8 @@ def _fts_replace_block(t, doc_id: str, block_id: str, text_aux) -> None:
 
 
 def save_ir(store: Store, ir: IR, profile: str = "standard", tx=None,
-            force: bool = False) -> None:
+            force: bool = False, meta: dict | None = None,
+            gate: dict | None = None) -> None:
     """整本文档入库（docs + blocks + FTS）。
 
     CH-459（A-4/A-14）：原实现 docs/blocks 与 reindex 各起一次事务、逐块
@@ -86,6 +87,10 @@ def save_ir(store: Store, ir: IR, profile: str = "standard", tx=None,
     """
     from .fts import cjk_aux
     ts = now_iso()
+    # CH-485（R9-SVC-2）：DB 成为产物事实源——保存 package 实际使用的完整
+    # meta/gate 与块级 links/font/provenance；旧调用方可省略，缺省仍为 ir.meta()。
+    doc_meta = meta if meta is not None else ir.meta()
+    gate_json = json.dumps(gate or {}, ensure_ascii=False)
 
     def _do(t):
         cur = t.execute("SELECT created_at FROM docs WHERE doc_id=?",
@@ -108,10 +113,10 @@ def save_ir(store: Store, ir: IR, profile: str = "standard", tx=None,
         t.execute(
             "INSERT OR REPLACE INTO docs(doc_id, source_key, source_name, source_name_raw,"
             " format, pages, sharded, shard_count, status, profile, created_at, updated_at,"
-            " meta_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " meta_json, gate_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (ir.doc_id, ir.source_key, ir.source_name, ir.source_name_raw, ir.format,
              ir.pages, int(ir.sharded), ir.shard_count, "done", profile, created_at, ts,
-             json.dumps(ir.meta(), ensure_ascii=False)))
+             json.dumps(doc_meta, ensure_ascii=False), gate_json))
         t.execute("DELETE FROM blocks WHERE doc_id=?", (ir.doc_id,))
         # CH-473（R5-STOR-1 / STOR-5 的 force 半修）：覆盖时同事务清掉该 doc 的编辑
         # 审计行——edit_audit 的 before/after 与 revision 序列随块删除已失效，残留行
@@ -121,9 +126,13 @@ def save_ir(store: Store, ir: IR, profile: str = "standard", tx=None,
             "DELETE FROM edit_audit WHERE doc_id=?", (ir.doc_id,)).rowcount or 0
         t.executemany(
             "INSERT INTO blocks(doc_id, block_id, type, text, level, page,"
-            " flags_json, marks_json, immutable, revision) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            " flags_json, marks_json, links_json, font_json, provenance_json,"
+            " immutable, revision) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
             [(ir.doc_id, b.id, b.type, b.text, b.level, b.page,
               json.dumps(b.flags, ensure_ascii=False), json.dumps(b.marks, ensure_ascii=False),
+              json.dumps(b.links or [], ensure_ascii=False),
+              json.dumps(b.font or {}, ensure_ascii=False),
+              json.dumps(b.provenance or {}, ensure_ascii=False),
               int(b.immutable), b.revision) for b in ir.blocks])
         _fts_replace_doc(t, ir.doc_id, [
             (b.id, b.text[:SEARCH_INDEX_WINDOW],
@@ -270,6 +279,9 @@ def list_blocks(store: Store, doc_id: str, *, offset: int = 0,
         out.append(Block(id=r["block_id"], type=r["type"], text=r["text"], level=r["level"],
                          page=r["page"], flags=json.loads(r["flags_json"] or "{}"),
                          marks=json.loads(r["marks_json"] or "{}"),
+                         links=json.loads(r["links_json"] or "[]"),
+                         font=json.loads(r["font_json"] or "{}"),
+                         provenance=json.loads(r["provenance_json"] or "{}"),
                          immutable=bool(r["immutable"]), revision=r["revision"]))
     return out
 
