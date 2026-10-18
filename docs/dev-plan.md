@@ -989,6 +989,7 @@ T2–T11 已在 CH-456 / CH-457 轮次全部收口（逐项判据与实测证据
 | `E4011` | 401 | ApiError | 缺 token / token 不存在或已吊销 |
 | `E4031` | 403 | ApiError | 角色不足（`detail={role, required}`）；未知 action；per-job 事件端点非脚本 UA |
 | `E4041` | 404 | ApiError | 文档、产物、源路径不存在 |
+| `E4092` | 409 | ApiError | 同路径旧作业被新内容替代（source superseded，CH-483）；`detail` 带 `enqueued_doc_id` / `consumed_doc_id`，消费侧不再把旧 doc_id 标 done |
 | `E4091` | 409 | ApiError | 重复转换会覆盖已有编辑（该 `doc_id` 下存在 `revision>1` 的块）→ 默认拒绝，需 `force=true` 才放行（CH-471 / STOR-5；内容寻址 `doc_id` 让同源文件恒落同一文档行，原 `INSERT OR REPLACE` + 清块会静默丢用户编辑。**409 段位此前未占用**，与 CH-439 撤销的「缺 `confirm`」旧 `E4091` 语义无关） |
 | `E4131` | 413 | ApiError | 剩余空间不足（`detail={need_mb, free_mb, rule:"NFR-6", what}`） |
 | `E4133` | 413 | ApiError | 目录过宽（条目数或深度超 `watch.*` 上限）；**遍历被截止时间截断同样归此码**（CH-469 / O-10，`detail.reason="walk_truncated"`）——半截清单入队会让用户看到「目录里明明有，队列里没有」 |
