@@ -10,8 +10,9 @@
 ## 模型选型
 
 LLM 在管线里只做**块级修补 op**（`split_block` / `merge_block` / `fix_heading_level` /
-`fix_list_marker` / `mark_table_boundary`，白名单外一律拒绝），输入是 IR 定位摘要而非全文，
-上下文需求很小。选型建议：
+`fix_list_marker` / `mark_table_boundary`，白名单外一律拒绝）。输入不是全文，而是
+**候选块的正文片段 + 扁平前后文 + 定位元数据**；每批 ≤8 个候选、总计 ≤16 个，
+单批 JSON ≤12k 字符（CH-487）。选型建议：
 
 | 维度 | 建议 | 理由 |
 | --- | --- | --- |
@@ -59,13 +60,41 @@ auth = false
 | 4B `llama-bench` pp/tg | 134.6 / 64.1 t/s（16 token 短测） |
 | 40 页语料（18,058 prompt tokens） | server 模式 **15.35s**，成功 |
 | 3 页黄金样本 | server 模式 **1.09s**，成功 |
-| 320 页（5789 块） | prompt 超 32k，`fallback=true` 回退 offline，**13.05s** 成功 |
+| 320 页（5789 块） | 旧版整篇摘要超 32k，`fallback=true` 回退 offline；CH-487 后按候选分批，不再整篇发送 |
 | 注入探针 | `rewrite_table_to_prose`/`delete_block` 被拒，归因 `injection_candidate` |
 
-**边界**：项目 `LlmClient` 当前把整篇块摘要一次发出，不做分块；超过服务上下文的文档会收到
-http 错误。生产建议保持 `llm.fallback=true`（大文档自动 offline），或先修 LLM 层分块后再
-考虑 `fallback=false`。2B 模型虽生成更快，但 32k q8 KV 占用约 5.6GB、且会输出 fenced JSON；
-本轮以 4B 为质量/显存平衡选择。
+### PDF 结构修复的分工（CH-487，2026-10-18）
+
+真实中文 PDF 的分句/分段/页码问题**先由确定性规则处理**，模型只兜残余歧义：
+
+| 层 | 职责 | 位置 |
+| --- | --- | --- |
+| S1 | 保留行 `top/bottom`、页高，供页边距与首行缩进判断 | `pipeline/s1_parse.py` |
+| S3 | 页眉页脚/页码剔除；中文序号、括号序号、字母列表；首行缩进分段；列表/标题折行并回；图表题注与“附件/附录”结构起始切块 | `pipeline/s3_structure.py` |
+| LLM | 只对候选块输出 `merge_block` / `split_block` / `fix_heading_level` 等白名单 op | `llm.py` |
+| 校验 | 目标存在/immutable/占用之外，再拒绝：类型不符、题注 merge、跨类型 merge、结构块 merge、短独立行 merge、完整句后 merge | `llm.OpValidator` |
+
+候选窗口的实现口径：
+
+- 只选“可疑边界”：段落-段落无硬句末、超长块、页码/多章节残留、疑似漏判标题；
+  正常列表项与已识别标题不进入候选，避免模型被噪声淹没。
+- `candidates` 带 `text`（≤240 字）、`prev_id/prev_text`、`next_id/next_text`、
+  `allowed_ops`（按块类型给出可落地算子）；`target` 只接受 id 字符串。
+- 请求带 `response_format={"type":"json_object"}`；模型输出仍走同一套白名单与校验，
+  JSON 约束只是格式辅助，不是防线。
+- 单批失败按服务失败处理（`fallback` / E5041 口径不变）；批数、响应 op 数只记计数，
+  正文不落日志（NFR-20）。
+
+真实语料实测（7 份中文 PDF，同一台 RTX 3070 / Qwen3.5-4B Q4_K_M，32k ctx）：
+
+| 模式 | 总耗时 | 实际落地 op | 结果 |
+| --- | --- | --- | --- |
+| offline | 10.73s | — | 页眉块 0；5p/23p/38p 句中拆分 25→15 / 68→52 / 25→4；附件巨段消失 |
+| server | 30.76s | 4（3 个折行合并 + 1 个标题层级修正） | 其余模型 op 因类型/题注/结构/句界校验被拒；无内容回归 |
+
+**边界**：4B 模型仍会输出“把独立短行并起来”的错误建议，因此模型 merge 只允许
+“上一行未收句、非结构块、非短独立行”的边界；生产默认 `llm.mode=offline`，
+server 模式作为可选增强。大文档不再整篇发送；候选上限保证不会超 32k 上下文。
 
 ## 引入五步
 
@@ -122,7 +151,8 @@ doc2md convert 文件.pdf --llm-mode server
 | doctor `llm_server: unreachable (connect:…)` | llama-server 未启动 / 端口不符 | 起 llama-server；核对 `bind`/`port` |
 | `llm_server: unreachable (http:…)` | 端口被别的服务占用（返回非 llama-server 响应） | 换端口 |
 | E5041 / 退出码 4 | `fallback=false` 且 server 不可用（设计行为：明确失败不蒙混） | 起 server 或改回 `fallback=true` / `mode=offline` |
-| `applied_ops` 全为 0 但无报错 | offline 占位本来就只产出保守 op | 这是预期；要真实修块必须 `mode=server` |
+| `applied_ops` 全为 0 但无报错 | offline 占位本来就只产出保守 op；server 模式下 0 op 表示候选不足或模型保守（不是故障） | 这是预期；要扩大模型参与面可调候选规则，但先补真实误判样本 |
+| server 模式耗时明显高于 offline | 候选批次串行请求本地模型 | 默认保持 offline；需要模型兜底时再开 server，或减少候选上限 |
 | 模型名发现失败 | 目录内 gguf 数 ≠ 1 且 `llm.model` 为空 | 只留一个 gguf，或显式配 `llm.model` |
 
 ## 边界与纪律

@@ -74,12 +74,15 @@ class Line:
     char_w: float = 0.0                     # CH-482：等宽字符实测宽度（pt，非等宽行 0）
                                             # ——x0 含行首空白，字宽不能由 (x1-x0)/len(text)
                                             # 反推；S3 的缩进量化用它把 x0 差换算成空格级数
+    top: float = 0.0                        # PDF 行几何（pt，原点在页面左上）；DOCX 为 0
+    bottom: float = 0.0                     # 供页眉页脚带判定，S3 段落分段亦用
 
 
 @dataclass
 class RawPage:
     index: int                      # 0-based
     lines: list[Line] = field(default_factory=list)
+    height: float = 0.0             # PDF 页高（pt）；DOCX / 合成页为 0（无几何）
 
     @property
     def chars(self) -> int:
@@ -190,10 +193,12 @@ def read_pdf(path: str | Path, page_span: tuple[int, int] | None = None,
                                       uniform_strike=st[7],
                                       row=_row_cells(lchars),
                                       x0=float(ln.get("x0", 0.0) or 0.0),
-                                      char_w=_char_width(lchars) if st[4] else 0.0))
+                                      char_w=_char_width(lchars) if st[4] else 0.0,
+                                      top=top, bottom=bottom))
                     geoms.append((top, bottom))
                 _attach_links(lines, geoms, page)
-                out.append(RawPage(index=i, lines=lines))
+                out.append(RawPage(index=i, lines=lines,
+                                   height=float(getattr(page, "height", 0.0) or 0.0)))
                 page.flush_cache()
     return out
 

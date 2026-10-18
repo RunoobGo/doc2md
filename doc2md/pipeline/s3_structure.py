@@ -32,6 +32,20 @@ _CJK_HEAD = re.compile(
     # CH-485（R9-PIPE-2）：`第 1 章的内容…` / `第 1 章所述…` 是正文引用，
     # 不是标题；只对词头后**紧邻**的常见虚词做否定，不影响 `第 1 章 总则`。
     r"(?!的|所|中|里|内|是|为|规|要|内容)")
+# 中文公文最常见的章节序号形态（“一、问题描述”）。原实现只认阿拉伯数字与
+# “第X章/节”，导致标题与下一行正文粘成一段，或整段被当成正文。
+_CJK_ORD = re.compile(r"^\s*[一二三四五六七八九十百千]+\s*、")
+# 括号序号：“（一）”“（1）”。短行无句末标点时按子标题处理。
+_PAREN_HEAD = re.compile(r"^\s*[（(]\s*(\d{1,3}|[一二三四五六七八九十百千]+)\s*[）)]")
+# 字母列表项：“a.”“b）”。有序列表的拉丁变体，常见于技术文档。
+_ALPHA_ITEM = re.compile(r"^\s*([a-zA-Z])\s*[.．、）)]\s*(?=\S)")
+# 结构起始信号：即使上一行没有句末标点，也必须另起一段/一块。
+_STRUCT_START = re.compile(
+    r"^\s*(附件\s*\d+|附录\s*[A-Za-z一二三四五六七八九十\d]+|"
+    r"[一二三四五六七八九十百千]+\s*、|（\s*[一二三四五六七八九十百千\d]+\s*）)")
+# 图表题注：居中/远右排版，必须自成一块，不得粘进上一段正文。
+_CAPTION = re.compile(r"^\s*(图|表|figure|table)\s*[\d一二三四五六七八九十]+"
+                      r"(?:[\s.．\-－—]+\d+)*\s*\S", re.I)
 _BULLET = re.compile(r"^\s*([·•‣∙○●■□\-\*])\s+")
 # CH-478（R6-PIPE-1 收口，决策「落地有序列表分支」）：PDF 有序列表项的编号形态。
 # `(?!\d)` 挡住小数（"3.5 节"），`\d{1,3}` 上限挡住年份起头的段落（"2019. 报告"），
@@ -51,9 +65,27 @@ _QUOTE_PREFIX = re.compile(r"^\s{0,3}>\s?")
 _QUOTE_OPEN = "「『“‘"
 _QUOTE_CLOSE = "」』”’"
 _SENT_END = ("。", "！", "？", "；", ".", "!", "?", ";", "：", ":")
+# 冒号/分号在中文排版里常出现在折行末尾（“如下：”），句义并未结束；
+# 只有硬句末才默认切段，软句末交给几何/结构信号判断。
+_SOFT_END = ("；", ";", "：", ":")
+_HARD_END = tuple(x for x in _SENT_END if x not in _SOFT_END)
 # 表格行组约束：行首 x0 对齐容差（pt）与最少行数
 _ROW_X0_TOL = 3.0
 _ROW_MIN = 2
+
+# PDF 页眉页脚带：页面顶部/底部 10%（footer 顶部按 88% 起算，覆盖页码基线略高的情况）。
+_MARGIN_TOP = 0.10
+_MARGIN_BOTTOM = 0.88
+# 页码形态：装饰式 “— 3 —”、中文 “第 3 页 共 5 页”、英文 “Page 3 of 5”、
+# “3 / 5”。只在页边距带内生效，避免误删正文里的数字。
+_PAGE_NUM = re.compile(
+    r"^(?:[—–-]\s*\d{1,4}\s*[—–-]"
+    r"|第\s*\d{1,4}\s*页(?:\s*共\s*\d{1,4}\s*页)?"
+    r"|共\s*\d{1,4}\s*页\s*第\s*\d{1,4}\s*页"
+    r"|page\s*\d{1,4}(?:\s*of\s*\d{1,4})?"
+    r"|\d{1,4}\s*/\s*\d{1,4})$", re.I)
+_PAGE_NUM_INLINE = re.compile(
+    r"(第\s*\d{1,4}\s*页\s*共\s*\d{1,4}\s*页|[—–-]\s*\d{1,4}\s*[—–-])")
 
 # CH-482：代码块行首缩进重建（S1 几何 → Markdown 的 4 空格一级）
 _CODE_INDENT_UNIT = 4       # Markdown 代码块一级缩进
@@ -123,6 +155,172 @@ def _is_ordered_item(text: str) -> bool:
     if not _ORDERED_ITEM.match(t) or len(t) >= 30:
         return False
     return not t.endswith(("。", "！", "？", ".", "!", "?"))
+
+
+def _is_alpha_item(text: str) -> bool:
+    """字母编号列表项（“a. 保留…”）：短行、无硬句末。"""
+    t = (text or "").strip()
+    if not _ALPHA_ITEM.match(t) or len(t) >= 40:
+        return False
+    return not t.endswith(("。", "！", "？", ".", "!", "?"))
+
+
+# --- PDF 页眉页脚 / 页码 ------------------------------------------------------
+
+def _in_margin(ln, height: float) -> bool:
+    """行是否落在页面上下 10% 噪声带；无几何（DOCX/合成页）恒 False。"""
+    if height <= 0 or (ln.top <= 0 and ln.bottom <= 0):
+        return False
+    top = ln.top if ln.top > 0 else ln.bottom
+    bottom = ln.bottom if ln.bottom > 0 else ln.top
+    return bottom <= height * _MARGIN_TOP or top >= height * _MARGIN_BOTTOM
+
+
+def _furniture_key(text: str) -> str:
+    """页眉页脚归一化键：页码数字抹成 `#`，空白折叠，供跨页重复检测。"""
+    return re.sub(r"\s+", " ", _PAGE_NUM_INLINE.sub("#", text or "")).strip()
+
+
+def _strip_page_furniture(pages: list[RawPage], base_size: float) -> list[RawPage]:
+    """剔除页码与跨页重复的页眉页脚（仅在页边距带内，宁漏勿误）。
+
+    三类信号：
+    1. 行本身是页码（装饰式 / “第 N 页 共 M 页” / Page N of M）；
+    2. 行内含页码片段（页脚常把标题与页码排在同一行）；
+    3. 同一边距行在 ≥2 页重复，且字号不高于正文（页眉/保密声明）。
+    第一页居中的大标题只在单页出现，且字号通常更大 → 保留。
+    """
+    if not pages or not any(p.height > 0 for p in pages):
+        return pages
+    counts: dict[str, int] = {}
+    for page in pages:
+        seen: set[str] = set()
+        for ln in page.lines:
+            if not _in_margin(ln, page.height):
+                continue
+            key = _furniture_key(ln.text)
+            if key and key not in seen:
+                seen.add(key)
+                counts[key] = counts.get(key, 0) + 1
+    out: list[RawPage] = []
+    for page in pages:
+        kept = []
+        for ln in page.lines:
+            t = (ln.text or "").strip()
+            if t and _in_margin(ln, page.height):
+                if _PAGE_NUM.fullmatch(t) or _PAGE_NUM_INLINE.search(t):
+                    continue
+                if counts.get(_furniture_key(t), 0) >= 2 and (
+                        ln.size <= 0 or ln.size <= base_size + 0.5):
+                    continue
+            kept.append(ln)
+        out.append(RawPage(index=page.index, lines=kept, height=page.height))
+    return out
+
+
+def _page_layout(page: RawPage) -> dict | None:
+    """页级排版信号：正文左边距 + 是否存在首行缩进证据。
+
+    中文 PDF 段落首行缩进 2 字符（实测 24~32pt），续行回到左边距。没有该证据的
+    页面（DOCX、无缩进英文稿、纯列表）返回 has_indent=False，分段退回标点口径。
+    """
+    if page.height <= 0:
+        return None
+    xs = [ln.x0 for ln in page.lines
+          if (ln.text or "").strip() and ln.x0 > 0 and not ln.row and not ln.mono]
+    if not xs:
+        return None
+    base = min(xs)
+    indents = [x for x in xs if 6.0 <= x - base <= 80.0]
+    return {"base": base,
+            "has_indent": len(indents) >= 2 or bool(indents and len(xs) >= 3)}
+
+
+def _is_indented(ln, layout: dict | None) -> bool:
+    if not layout:
+        return False
+    return 6.0 <= ln.x0 - layout["base"] <= 80.0
+
+
+def _ends_sentence(text: str) -> bool:
+    p = (text or "").rstrip()
+    return bool(p) and p.endswith(_HARD_END)
+
+
+def _continues_paragraph(prev: str, ln, layout: dict | None) -> bool:
+    """几何感知的续段判断（替代只看句末标点的单信号）。
+
+    优先级：续句标点 > 首行缩进（新段）> 未硬结束（续段）> 有缩进证据时的
+    无缩进折行（续段）。无几何页面保持旧口径（硬句末即切段）。
+    """
+    p = (prev or "").rstrip()
+    if not p:
+        return False
+    t = (ln.text or "").strip()
+    if _continuation_led(t):
+        return True
+    # 居中/远右的图表题注不是段落续行；即使上一行没有句号，也另起一块。
+    # 只对题注形态生效——未识别成表格的远右数据行不能被进一步拆碎。
+    if _CAPTION.match(t) and (not layout or ln.x0 - layout["base"] > 40.0):
+        return False
+    if layout and layout["has_indent"] and _is_indented(ln, layout):
+        return False
+    if not _ends_sentence(p):
+        return True
+    return bool(layout and layout["has_indent"])
+
+
+def _join_list_continuation(blocks: list[Block], text: str, ln,
+                            layout: dict | None) -> bool:
+    """列表项折行续文并回列表项本身（原实现落入新段落，产生半句块）。"""
+    if _STRUCT_START.match(text) or _BULLET.match(text) or _is_ordered_item(text) or _is_alpha_item(text):
+        return False
+    if layout and layout["has_indent"] and _is_indented(ln, layout):
+        return False
+    for b in reversed(blocks):
+        if b.type == "list_item":
+            prev = b.text or ""
+            # 短列表项（“3. 启动服务”）语义已完整，下一行是独立段落；
+            # 只有折行迹象（长行/软标点收尾）才并回。
+            if (len(prev.rstrip()) < 20
+                    and not prev.rstrip().endswith(("：", ":", "；", ";", "，", ","))):
+                return False
+            if _can_continue(prev):
+                b.text = _append_line(prev, text.strip())
+                b.flags.setdefault("joined_across_break", True)
+                return True
+            return False
+        if b.type == "heading":
+            continue
+        return False
+    return False
+
+
+def _join_heading_continuation(blocks: list[Block], text: str, ln,
+                               layout: dict | None) -> bool:
+    """标题折行续文并回标题（“一、合肥…相关” + “工程”）。
+
+    只在有首行缩进证据的页面启用，且续行必须回到左边距、短、非结构起始；
+    正文首行通常带缩进，不会被吸进标题。
+    """
+    if not (layout and layout["has_indent"]):
+        return False
+    if _is_indented(ln, layout):
+        return False
+    if _STRUCT_START.match(text) or _BULLET.match(text) or _is_ordered_item(text) or _is_alpha_item(text):
+        return False
+    if len(text.strip()) > 20:
+        return False
+    for b in reversed(blocks):
+        if b.type == "heading":
+            if _can_continue(b.text or ""):
+                b.text = _append_line(b.text or "", text.strip())
+                return True
+            return False
+        if b.type in ("paragraph", "list_item"):
+            return False
+        return False
+    return False
 
 
 def _join_back(blocks: list[Block], text: str, font: dict) -> Block | None:
@@ -236,6 +434,9 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
     blocks: list[Block] = []
     if base_size is None:
         base_size = modal_size(pages)
+    # 页眉页脚/页码先于分段剔除：否则页脚会把跨页段落切断，页码也会被
+    # 当作普通短行进入正文。字号基准取原始页（正文仍占字符多数）。
+    pages = _strip_page_furniture(pages, base_size)
     # CH-459：跨页存续的聚集状态
     code_buf: list[str] | None = None          # None = 不在代码块内
     code_mode = ""                             # fence（显式围栏）| indent | mono
@@ -314,6 +515,7 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
         row_buf, row_x0, row_lines = [], [], []
 
     for page in pages:
+        layout = _page_layout(page)
         for ln in page.lines:
             # --- page_break（CH-459：form-feed 行，DOCX 分页符的信号形态）---
             # 必须先于 rstrip 判定：\x0c 是 Python 空白字符，rstrip 会把它剥掉，
@@ -384,6 +586,10 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
                 code_lines = [ln]
                 code_page = page.index
                 continue
+            # --- 结构起始（附件/附录/中文序号）：上一行无句末标点也另起一段 ---
+            # 放在代码块处理之后：代码内容里的“附件 1”不得被当成结构行。
+            if para_buf and _STRUCT_START.match(text):
+                flush_para()
             # --- 标题（CH-459：DOCX Heading 样式提示优先于启发式）---
             # 自动编号是显式列表信号：不让「第一项」这类文本再被 CJK 章标记
             # 启发式抢成标题（Heading 样式在 S1 已跳过编号解析，hint 仍可优先）。
@@ -454,6 +660,16 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
                 _attach_link(blocks[-1], ln)
                 _mark_provenance(blocks[-1], (ln,))
                 continue
+            # --- 字母编号列表（“a. …”）：与数字列表同口径 ---
+            if _is_alpha_item(text) and not (ln.row and len(ln.row) >= 2):
+                flush_para()
+                flush_quote()
+                flush_rows(True)
+                blocks.append(Block(id="", type="list_item", text=text.strip(),
+                                    font=_font(ln), page=page.index))
+                _attach_link(blocks[-1], ln)
+                _mark_provenance(blocks[-1], (ln,))
+                continue
             # --- 表格行候选（CH-459：S1 已聚出单元格）---
             row_ok = bool(ln.row) and len(ln.row) >= 2 and (
                 ln.row_explicit or not ln.row[-1].rstrip().endswith(_SENT_END))
@@ -518,8 +734,8 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
                         _attach_link(back, ln)
                     _mark_provenance(back, (ln,), merge=True)
                     continue
-            # 普通正文行：句子未结束则续接同段
-            if para_buf and _can_continue(para_buf[-1]):
+            # 普通正文行：几何缩进优先，其次软/硬句末与续句标点
+            if para_buf and _continues_paragraph(para_buf[-1], ln, layout):
                 para_buf.append(text.strip())
                 para_lines.append(ln)
             elif para_buf:
@@ -528,6 +744,10 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
                 para_lines = [ln]
                 para_font = _font(ln)
                 para_page = page.index
+            elif _join_heading_continuation(blocks, text, ln, layout):
+                continue
+            elif _join_list_continuation(blocks, text, ln, layout):
+                continue
             else:
                 para_buf = [text.strip()]
                 para_lines = [ln]
@@ -584,7 +804,13 @@ def _heading_level(text: str, size: float, base: float, bold: bool,
     t = text.strip()
     if not t or len(t) > 80:
         return None
-    numbered = bool(_NUM.match(t) or _CJK_HEAD.match(t))
+    # 中文序号只认“短标题”形态：长句/带句末标点的是正文，不是标题。
+    if _CJK_ORD.match(t) and (len(t) > 30 or t.endswith(_SENT_END)):
+        return None
+    if _PAREN_HEAD.match(t) and (len(t) > 40 or t.endswith(_SENT_END)):
+        return None
+    numbered = bool(_NUM.match(t) or _CJK_HEAD.match(t) or _CJK_ORD.match(t)
+                    or _PAREN_HEAD.match(t))
     # 纯 CJK 无编号的短粗体大字行不判标题（PDF 合成样本每行字号偏大时易误判）
     if size and base and size >= base + 3.5 and numbered:
         return _level_from_number(t, size, base)
@@ -598,9 +824,10 @@ def _heading_level(text: str, size: float, base: float, bold: bool,
         # 否则返回 None，留给后续段落处理（消除假阳性 H1，胜过罕见漏判一个同字号标题）。
         m_num = _NUM.match(t)
         multi_level = bool(m_num and "." in m_num.group(1))
-        cjk_head = bool(_CJK_HEAD.match(t))
+        cjk_head = bool(_CJK_HEAD.match(t) or _CJK_ORD.match(t))
+        paren_head = bool(_PAREN_HEAD.match(t))
         # CH-485（R9-PIPE-2）：0.5pt 容差吸收字体测量的细微差异。
-        if (size or base) > base + 0.5 or bold or multi_level or cjk_head:
+        if (size or base) > base + 0.5 or bold or multi_level or cjk_head or paren_head:
             return _level_from_number(t, size or base, base)
     # 真实 Word 报告常有无编号的大字号章节标题（PDF 无 Heading 样式可依赖）。
     # 只认「短行 + 字号显著大于正文」：+6pt 阈值高于现有 golden 的 +5.5pt，
@@ -616,6 +843,11 @@ def _level_from_number(t: str, size: float, base: float) -> int:
     m = _NUM.match(t)
     if m:
         return min(6, max(1, m.group(1).count(".") + 1))
+    if _CJK_ORD.match(t):
+        return 1
+    m3 = _PAREN_HEAD.match(t)
+    if m3:
+        return 3 if m3.group(1).isdigit() else 2
     m2 = _CJK_HEAD.match(t)
     if m2:
         word = m2.group(1)
@@ -627,10 +859,10 @@ def _level_from_number(t: str, size: float, base: float) -> int:
 
 
 def _can_continue(prev: str) -> bool:
-    p = prev.rstrip()
+    p = (prev or "").rstrip()
     if not p:
         return False
-    return not p.endswith(("。", "！", "？", "；", ".", "!", "?", ";", "：", ":"))
+    return not _ends_sentence(p)
 
 
 def _flush(buf: list[str], blocks: list[Block], font: dict, page: int) -> None:

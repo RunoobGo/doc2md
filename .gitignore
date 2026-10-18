@@ -23,6 +23,13 @@ vocab.jsonl
 # 可选大资产（CH-443：分发包不内置，由 tests/make_golden.py 现补）
 tests/golden/bigfile.bin
 
+# 本地模型资产（GGUF 不入库；ops/llm.md 的引入纪律）
+vendor/models/
+*.gguf
+
+# 工具/会话本地数据
+.qoder-credits/
+
 # 编辑器 / 系统
 .DS_Store
 
