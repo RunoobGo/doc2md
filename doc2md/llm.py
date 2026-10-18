@@ -519,10 +519,14 @@ class LlmClient:
         return d
 
     def _payload(self, blocks, whitelist, batch: list[int]) -> dict:
+        wanted = list(whitelist if whitelist is not None else DEFAULT_OP_WHITELIST)
+        wanted_set = set(wanted)
         items = []
         for i in batch:
             item = self._digest(blocks[i], MAX_CANDIDATE_TEXT)
-            item["allowed_ops"] = list(_ALLOWED_BY_TYPE.get(blocks[i].type, []))
+            item["allowed_ops"] = [
+                op for op in _ALLOWED_BY_TYPE.get(blocks[i].type, [])
+                if op in wanted_set]
             # 扁平前后文：原嵌套 prev/next 对象会被小模型整体回显成 target。
             if i > 0:
                 item["prev_id"] = blocks[i - 1].id
@@ -539,7 +543,7 @@ class LlmClient:
             meta = [self._digest(blocks[j]) for j in near]
         user = ("待修补候选（candidates 含正文片段与前后文；ir 为定位元数据）：\n"
                 + json.dumps({"ir": meta, "candidates": items}, ensure_ascii=False)
-                + f"\n白名单 op：{json.dumps(sorted(set(whitelist or DEFAULT_OP_WHITELIST)), ensure_ascii=False)}"
+                + f"\n白名单 op：{json.dumps(sorted(wanted_set), ensure_ascii=False)}"
                 "\n只输出 {\"ops\": [...]} JSON；target 只写 id 字符串（如 \"b12\"），"
                 "不得复制候选对象或正文。")
         return {"model": self.model or DEFAULT_MODEL_NAME,

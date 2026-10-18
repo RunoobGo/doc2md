@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import re
+import urllib.parse
 
 from ..ir import IR, Block
 from .s3_structure import _ORDERED_ITEM
@@ -33,6 +34,24 @@ def _code_fence(text: str) -> str:
 def is_external(url: str) -> bool:
     u = (url or "").strip().lower()
     return u.startswith(_EXT_SCHEMES)
+
+
+def _link_label(text: str) -> str:
+    """链接文字转义：`]` / `[` / `\\` 会提前结束或改写链接范围，换行会破坏语法。"""
+    return (str(text).replace("\\", "\\\\").replace("[", "\\[")
+            .replace("]", "\\]").replace("\r", " ").replace("\n", " "))
+
+
+def _link_dest(url: str) -> str:
+    """链接目标转义：空格 / 括号 / 尖括号会截断 Markdown 目标。
+
+    正常 URL（`https://…/x`、`mailto:…`）逐字节不变；只有会被 Markdown 解析器
+    误读的字符才百分号编码（括号编码后仍指向同一资源）。
+    """
+    u = str(url)
+    if any(ch in u for ch in " \t\r\n()<>"):
+        return urllib.parse.quote(u, safe=":/?#[]@!$&'*+,;=%")
+    return u
 
 
 def render(ir: IR, *, preserve_strike: bool = False, link_internal: str = "plain") -> str:
@@ -98,7 +117,7 @@ def _inline(text: str, b: Block, *, preserve_strike: bool, link_internal: str) -
     for lk in b.links or []:
         url, label = lk.get("url", ""), lk.get("text") or text
         if is_external(url):
-            return f"[{label}]({url})"
+            return f"[{_link_label(label)}]({_link_dest(url)})"
         if link_internal == "anchor":
             # CH-464：anchor 档**不再**产出 `](#dest)`——`assert_render_contract`
             # 明令禁止自造锚点（GFM 无自动标题锚点，产出的必然是死链），该分支

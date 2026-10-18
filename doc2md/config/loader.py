@@ -39,6 +39,10 @@ FROZEN_KEYS: dict[str, tuple[Any, ...]] = {
 # 合法 cfg 也会拦，破坏既有契约）。值 → 允许集合；PUT 命中即 400。
 RUNTIME_IMMUTABLE_KEYS: dict[str, tuple[Any, ...]] = {
     "run.offline_assert": (True,),
+    # CH-489：`paths.out` 在启动时被请求/删除/重建路径闭包读取；运行期改值会
+    # 让旧产物在删除与 `/docs/<id>/markdown` 两侧同时失联。与 paths.root 同口径，
+    # 改输出根必须改配置文件后重启。
+    "paths.out": (),
     # CH-473（R5-SEC-1 / D4 闭环）：opt-in 键本身也不许在线改。原集合只冻结
     # offline_assert，于是两步 PUT 即可掏空 D4——先 `PUT {"api":{"allow_remote_bind":true}}`
     # （单步合法），再 `PUT {"api":{"bind":"0.0.0.0"}}`（candidate 里 opt-in 已为真，
@@ -291,6 +295,20 @@ def validate(cfg: dict) -> None:
                 raise ConfigError(
                     f"{dotted}={v!r} 非本机回环：默认只允许 loopback 绑定，"
                     f"如需对外暴露请显式设 api.allow_remote_bind = true")
+    # CH-489：`sweep_tmp` 会删除 `paths.tmp` 下超过保护窗的全部条目。若 tmp
+    # 配成工作根（`work` / `.`）或其祖先，cron/serve 启动一次就会清掉 state.sqlite、
+    # out/logs 等正文数据。这里按解析后的真实路径判包含关系，拒绝这种配置。
+    root_path = root_setting(cfg).resolve()
+    tmp_path = path_setting(cfg, "paths.tmp", root_path,
+                            str(root_path / "tmp")).resolve()
+    try:
+        root_path.relative_to(tmp_path)
+    except ValueError:
+        pass
+    else:
+        raise ConfigError(
+            f"paths.tmp={get(cfg, 'paths.tmp')!r} 不得等于工作根或其祖先 "
+            f"（解析后 root={root_path}, tmp={tmp_path}）；sweep_tmp 会清空该目录")
 
 
 def check_runtime_immutable(candidate: dict, baseline: dict) -> None:

@@ -556,7 +556,10 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
         nonlocal row_buf, row_x0, row_lines
         if not row_lines:
             return
-        if as_table and len(row_buf) >= _ROW_MIN:
+        # CH-489：DOCX 的 `w:tbl` 是显式表格对象，单行表也必须是表格；
+        # PDF 的单行候选仍退回段落（无显式对象时宁可漏判，不制造假表）。
+        one_explicit_row = bool(row_lines[0].row_explicit) and len(row_buf) == 1
+        if as_table and (len(row_buf) >= _ROW_MIN or one_explicit_row):
             blocks.append(Block(id="", type="table",
                                 text=_gfm_table(row_buf), page=row_page))
             _mark_provenance(blocks[-1], row_lines)     # CH-476（R7-GAP-1）
@@ -736,7 +739,10 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
                 _mark_provenance(blocks[-1], (ln,))
                 continue
             # --- 表格行候选（CH-459：S1 已聚出单元格）---
-            row_ok = bool(ln.row) and len(ln.row) >= 2 and (
+            # CH-489：DOCX 单列表格（w:tbl 只有 gridCol=1）也是显式表格；
+            # PDF 仍要求 ≥2 个几何聚类单元格，避免把单列正文误判成表。
+            min_cells = 1 if ln.row_explicit else 2
+            row_ok = bool(ln.row) and len(ln.row) >= min_cells and (
                 ln.row_explicit or not ln.row[-1].rstrip().endswith(_SENT_END))
             if row_ok:
                 if not row_buf:

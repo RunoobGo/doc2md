@@ -588,7 +588,12 @@ def cmd_watch(args: argparse.Namespace) -> int:
                     res = convert(p, cfg=cfg, out_dir=_out(cfg), precheck_edits=True)
                     save_ir(store, res.ir, meta=res.meta, gate=res.gate)
                     j = sched.submit(res.doc_id, res.source_key)
-                    sched.mark(j.job_id, "done")
+                    # CH-489：`submit` 可能附着到已有的 queued/running 作业
+                    # （同 doc_id 的去重路径）。此时该作业的终态由它的消费者
+                    # 决定，watch 不能替对端提前写 done（会把仍在跑的作业伪装
+                    # 成已完成，并让后续消费者面对一个已终态的行）。
+                    if not (j.attached or j.idem_hit):
+                        sched.mark(j.job_id, "done")
                     print(_jline({"watched": p.name, "doc_id": res.doc_id,
                                   "job_id": j.job_id}))
                 except E4221_GateReject as exc:

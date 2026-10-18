@@ -10,7 +10,7 @@ out = "work/out"
 reports = "work/reports"
 logs = "work/logs"
 tmp = "work/tmp"
-vendor_models = "vendor/models/llm"    # 本地模型资产根（CH-456 / T2：llm.mode=server 时定位 gguf 与模型名）
+vendor_models = "vendor/models/llm"    # 本地模型资产根（相对 paths.root；默认 work/vendor/models/llm）
 
 [run]
 profile = "standard"                   # v2.1 冻结：三档 lite/standard/strict；CH-456 落地为键集覆盖

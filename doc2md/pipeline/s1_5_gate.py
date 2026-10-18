@@ -219,6 +219,11 @@ class GateCollector:
 
     def finish(self, reject_on_any: bool = True) -> GateResult:
         """纯函数判定 + 拒收即抛；与旧 `check()` 逐字段同口径。"""
+        reasons: list[str] = []
+        # CH-489：0 页文档（合法可打开但 pages=[]）此前会一路走到空 Markdown
+        # 并被当作成功产物——它不是“文本层稀疏”，而是没有可转换内容。
+        if self.total <= 0:
+            reasons.append("no_pages")
         # CH-469：构造声明的 total 大于实际喂入的页数时，原实现在
         # self.metrics[i] 处裸 KeyError（判定面与报告面两处都可能命中）。
         # 缺页属调用方契约违反，必须在判定前给出可判定的错误。
@@ -229,7 +234,6 @@ class GateCollector:
                 f"(total={self.total}, first missing page {missing[0] + 1})",
                 detail={"missing_pages": [i + 1 for i in missing[:10]]})
         strict = self.mode != "auto"
-        reasons: list[str] = []
         per_page = [(i,) + self._level(i, strict) for i in self.decision_idx]
         bad_flags = [hard for _, _, hard in per_page]
         n_bad = sum(bad_flags)

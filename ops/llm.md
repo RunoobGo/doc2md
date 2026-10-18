@@ -105,20 +105,22 @@ huggingface-cli download Qwen/Qwen2.5-3B-Instruct-GGUF \
 # ModelScope（国内更快）：
 #   modelscope download --model Qwen/Qwen2.5-3B-Instruct-GGUF <文件名> --local_dir .
 
-# ② 放入资产目录（paths.vendor_models，默认 vendor/models/llm/）
-mkdir -p vendor/models/llm && mv qwen2.5-3b-instruct-q4_k_m.gguf vendor/models/llm/
+# ② 放入资产目录（paths.vendor_models 的相对值挂在 paths.root 下；
+#    默认 root=work → work/vendor/models/llm/，不是仓库根 vendor/）
+mkdir -p work/vendor/models/llm && mv qwen2.5-3b-instruct-q4_k_m.gguf work/vendor/models/llm/
 
 # ③ 安装 llama.cpp 并启动 llama-server
-llama-server -m vendor/models/llm/qwen2.5-3b-instruct-q4_k_m.gguf \
+llama-server -m work/vendor/models/llm/qwen2.5-3b-instruct-q4_k_m.gguf \
   --host 127.0.0.1 --port 8080
 
 # ④ 验证模型资产完整性（M0 工具链，非运行必需但建议做一次）
-#   `export` 不指定 --manifest 时写到 [chunks].manifest（默认 vendor/models/llm/tokenizer.manifest.json），
+#   `export` 不指定 --manifest 时写到 [chunks].manifest（默认
+#   work/vendor/models/llm/tokenizer.manifest.json，随 paths.root 迁移），
 #   `verify` 的两个参数都是必填，路径照 export 的落点填即可（照抄旧示例的
 #   chunks.manifest.json 会因文件不存在直接退 5）。
-doc2md tokenizer export vendor/models/llm/qwen2.5-3b-instruct-q4_k_m.gguf
-doc2md tokenizer verify --manifest vendor/models/llm/tokenizer.manifest.json \
-  --gguf vendor/models/llm/qwen2.5-3b-instruct-q4_k_m.gguf
+doc2md tokenizer export work/vendor/models/llm/qwen2.5-3b-instruct-q4_k_m.gguf
+doc2md tokenizer verify --manifest work/vendor/models/llm/tokenizer.manifest.json \
+  --gguf work/vendor/models/llm/qwen2.5-3b-instruct-q4_k_m.gguf
 
 # ⑤ 自检 + 切换
 doc2md doctor        # llm_mode=server 时探测 /health → 期望 llm_server: reachable
@@ -164,5 +166,5 @@ doc2md convert 文件.pdf --llm-mode server
   大小文档 fallback 均通过；3 页 PDF 与 6 块 DOCX 的 server/offline `content.md`
   **逐字节相同**（sha 前缀 `e822313717df` / `4e976360e761`）。仍未验证：其他模型、
   跨机 GPU/驱动、320 页以上要 LLM 真正参与（当前超上下文回退 offline）。
-- 模型资产不入 git（`vendor/models/` 不进版本库）；换模型 = 换 gguf 文件 +
+- 模型资产不入 git（`work/vendor/models/` / `paths.vendor_models` 不进版本库）；换模型 = 换 gguf 文件 +
   （可选）更新 `llm.model`，无 schema / 版本常量影响。

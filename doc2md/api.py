@@ -115,6 +115,23 @@ _ARTIFACT_META_KEYS = {
 _ARTIFACT_META_EXTRA = {"shard_stats", "llm_prompt", "notes"}
 
 
+def _artifact_zip(out_dir: str | Path, doc_id: str) -> Path:
+    """产物路径的唯一构造点（CH-489）：doc_id 必须是单个路径段。
+
+    `doc_id` 在本项目内恒为内容哈希，但 URL/库面属于输入边界；`..\\x` 在
+    Windows 上会被 `Path` 当分隔符解析，绕过 out_dir。这里按解析后的父目录
+    做 containment，异常输入统一 404，不进入文件系统。
+    """
+    if (not doc_id or doc_id in (".", "..") or "/" in doc_id or "\\" in doc_id
+            or "\x00" in doc_id):
+        raise E4041_NotFound("invalid doc id")
+    base = Path(out_dir).resolve()
+    path = (base / f"{doc_id}.zip").resolve()
+    if path.parent != base:
+        raise E4041_NotFound("invalid doc id")
+    return path
+
+
 # 固定数量的分片锁：按 doc 串行、不同 doc 可并发，且不随文档数无限增长。
 _REBUILD_LOCKS = tuple(threading.Lock() for _ in range(64))
 
@@ -167,11 +184,12 @@ def _rebuild_artifact(store: Store, doc_id: str, cfg: dict, root: Path) -> Path 
 
 def _rebuild_artifact_body(store: Store, doc_id: str, cfg: dict,
                            root: Path, *, out_dir: Path | None = None) -> Path | None:
-    """CH-485（R9-SVC-2）：从 DB 重建 zip；旧文档（gate_json 为空）返回 None。
+    """CH-485（R9-SVC-2）：从 DB 重建 zip。
 
     DB 已是完整事实源：blocks 保存 font/links/provenance，docs 保存 package 实际
     使用的 meta 与 S1.5 gate。PATCH/rollback/E4091/恢复后调用，保证导出与库面
-    一致，而不是依赖初始转换留下的旧 zip。
+    一致，而不是依赖初始转换留下的旧 zip。CH-489：`gate_json` 为空只表示旧库
+    没有页级门禁明细，不表示 blocks 不可重建；报告降级为空 gate 而不是拒绝重建。
     """
     from .ir import IR
     from .pipeline import s4_render
@@ -179,8 +197,6 @@ def _rebuild_artifact_body(store: Store, doc_id: str, cfg: dict,
 
     d = get_doc(store, doc_id)
     gate_raw = d.get("gate_json") or "{}"
-    if gate_raw in ("", "{}"):
-        return None
     meta = d.get("meta") or {}
     try:
         gate = json.loads(gate_raw) if isinstance(gate_raw, str) else gate_raw
@@ -314,15 +330,18 @@ def create_app(cfg: dict | None = None, root: Path | None = None,
         return jsonify(exc.to_body()), exc.http
 
     def _window(default_limit: int = 0) -> tuple[int, int | None]:
-        """分页窗口解析（CH-469，V-5；B-20）。
+        """分页窗口解析（CH-469，V-5；B-20；CH-489）。
 
-        默认 `default_limit=0` 保持既有「不给 limit = 取全部」；大列表端点显式传
-        `_MAX_ROWS` 作为默认与硬顶，避免单请求无界物化。非数字 → 400/E4001。
+        `limit` 缺省或显式 0 都取该端点的默认窗口（大列表为 500），再统一
+        硬顶 `_MAX_ROWS`——原实现把显式 0 当“无界”，`?limit=0` 可绕过 B-20
+        的 500 行上限，把整库审计正文一次物化。非数字 / 负值 → 400/E4001。
         """
         offset = _int_arg("offset", 0)
         limit = _int_arg("limit", default_limit)
         if offset < 0 or limit < 0:
             raise E4001_BadRequest("offset/limit must be >= 0")
+        if limit == 0:
+            limit = default_limit
         return offset, (min(limit, _MAX_ROWS) if limit else None)
 
     def _int_arg(name: str, default: int) -> int:
@@ -677,9 +696,20 @@ def create_app(cfg: dict | None = None, root: Path | None = None,
         need("export")
         get_doc(store, doc_id)
         out_dir = config.path_setting(cur(), "paths.out", root, str(root / "out"))
-        zp = out_dir / f"{doc_id}.zip"
+        zp = _artifact_zip(out_dir, doc_id)
         if not zp.exists():
-            raise E4041_NotFound("artifact not found")
+            # CH-489：DB 已是产物事实源。zip 被误删/恢复流程尚未补产物时，
+            # 读面按 DB 重建一次；重建失败仍是明确的存储错误，不返回空正文。
+            try:
+                _rebuild_artifact(store, doc_id, cur(), root)
+            except Doc2mdError:
+                raise
+            except Exception as exc:            # noqa: BLE001 — 统一 E5031 契约
+                raise E5031_StorageError(
+                    "artifact rebuild failed",
+                    detail={"reason": type(exc).__name__}) from exc
+            if not zp.exists():
+                raise E4041_NotFound("artifact not found")
         import zipfile
         # CH-476（R7-PERF-k）：中央目录先校验 + 正文分块流式出。原实现 `z.read()` 把
         # 整篇 content.md 一次性读进内存、再 decode 成 str、Flask 又 encode 回 bytes，
@@ -925,6 +955,11 @@ def create_app(cfg: dict | None = None, root: Path | None = None,
                 # `serve --root` 是进程级绑定：配置文件里的相对 paths.root
                 # 不得在 reload 时把 store/writer 的根换掉（换根必须重启）。
                 merged.setdefault("paths", {})["root"] = str(root)
+                # CH-489：`paths.out` 同属进程级绑定（删除/导出/重建都用启动时
+                # 闭包），reload 时钉回当前值；改输出根必须改文件后重启。
+                current_out = config.get(app.config["doc2md"]["cfg"], "paths.out")
+                if current_out is not None:
+                    merged.setdefault("paths", {})["out"] = current_out
             else:
                 # 程序化 create_app(cfg) / 测试没有显式文件来源：以启动基线为
                 # 基准重放 override。退回 config.load() 会按当前 cwd 重新找

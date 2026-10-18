@@ -343,6 +343,10 @@ class BackupPlan:
         """
         ts = ts or datetime.now(timezone.utc)
         self.local_dir.mkdir(parents=True, exist_ok=True)
+        # CH-489：先收紧目录再写快照，避免 `.part` 在继承来的宽松 ACL 下短暂可见。
+        mode = _parse_mode(self.work_dir_mode)
+        self._enforce_mode(self.local_dir, mode)
+        self._enforce_mode(self._resolve_work_root(), mode)
         self.sweep_parts()
         dst = self.local_dir / (
             f"state-{ts.strftime(_TS_FMT)}-{secrets.token_hex(4)}.sqlite")
@@ -361,9 +365,6 @@ class BackupPlan:
             part.unlink(missing_ok=True)
             raise
         _fsync_dir(self.local_dir)
-        mode = _parse_mode(self.work_dir_mode)
-        self._enforce_mode(self.local_dir, mode)
-        self._enforce_mode(self._resolve_work_root(), mode)
         return dst
 
     def predelete_snapshot(self, state_db: Path,
@@ -378,6 +379,10 @@ class BackupPlan:
 
         ts = ts or datetime.now(timezone.utc)
         self.local_dir.mkdir(parents=True, exist_ok=True)
+        # CH-489：同 snapshot，先收紧目录再落快照。
+        mode = _parse_mode(self.work_dir_mode)
+        self._enforce_mode(self.local_dir, mode)
+        self._enforce_mode(self._resolve_work_root(), mode)
         self.sweep_parts()
         if self.cfg is not None:
             from .diskguard import assert_free_space
@@ -385,11 +390,25 @@ class BackupPlan:
                               cfg=self.cfg, what="predelete_snapshot")
         dst = self.local_dir / (
             f"predelete-{ts.strftime(_TS_FMT)}-{secrets.token_hex(4)}.sqlite")
-        sqlite_backup(state_db, dst)
+        # CH-489：与 `snapshot` 同口径——先写 `.part`、quick_check 通过后才原子
+        # 改名。原实现直接写最终名且不做完整性校验：SIGKILL/磁盘错误会留下
+        # 名字合法但内容不完整的“可恢复快照”，而删除入口拿它当安全网。
+        part = dst.with_name(dst.name + ".part")
+        try:
+            sqlite_backup(state_db, part)
+            check = _sqlite_quick_check(part)
+            if check != "ok":
+                raise ValueError(f"predelete snapshot quick_check failed: {check}")
+            _remove_sidecars(part)
+            with part.open("rb+") as fh:
+                _fsync(fh)
+            _replace_retry(part, dst)
+        except Exception:
+            part.unlink(missing_ok=True)
+            _remove_sidecars(part)
+            raise
+        _fsync_dir(self.local_dir)
         _chmod600(dst, self.mode_warnings)
-        mode = _parse_mode(self.work_dir_mode)
-        self._enforce_mode(self.local_dir, mode)
-        self._enforce_mode(self._resolve_work_root(), mode)
         self.rotate_predelete(now=ts)
         return dst
 

@@ -165,6 +165,10 @@ def drain_once(store: Store, cfg: dict, root, *, workers: int | None = None,
         results.extend(run_batch(group, cfg=cfg, out_dir=_out_dir(cfg, root),
                                  workers=n, mode=mode, force=force))
     sched = Scheduler(store)
+    # CH-489：同一路径可能排着多个作业，`run_batch` 只产出一次；IR 回读与插入
+    # 行预计算按产物 zip 缓存，避免同正文被重复读/重复预处理。
+    ir_cache: dict[str, object] = {}
+    saved_docs: set[str] = set()
     for res in results:
         group = by_path.get(res["file"], [])
         # CH-483（R8-SVC-2）：同一路径可能排着多个不同 doc_id 的作业（入队后
@@ -190,7 +194,12 @@ def drain_once(store: Store, cfg: dict, root, *, workers: int | None = None,
                 _event(store, job, res, "job_rejected", writer)
                 continue
             if res["status"] == "ok":
-                ir = _read_ir(res["zip"])
+                zip_key = str(res.get("zip", ""))
+                if zip_key in ir_cache:
+                    ir = ir_cache[zip_key]
+                else:
+                    ir = _read_ir(zip_key)
+                    ir_cache[zip_key] = ir
                 if ir is None:
                     # CH-469：产物 status=ok 但 zip 里读不到 ir.json（损坏 / 缺项 /
                     # IR 版本不符）时，原实现跳过入库却仍标 done + 发 job_done——
@@ -204,8 +213,12 @@ def drain_once(store: Store, cfg: dict, root, *, workers: int | None = None,
                     _event(store, job, res, "job_failed", writer)
                     continue
                 try:
-                    drift = _finish_ok(store, sched, job, res, ir, writer=writer,
-                                       meta=res.get("meta"), gate=res.get("gate"))
+                    skip_save = ir.doc_id in saved_docs
+                    prepared = None if skip_save else prepare_ir_rows(ir)
+                    drift = _finish_ok(
+                        store, sched, job, res, ir, writer=writer,
+                        meta=res.get("meta"), gate=res.get("gate"),
+                        prepared=prepared, skip_save=skip_save)
                 except E4041_NotFound:
                     # CH-476（R7-SVC-1）：删除×在途转换竞争——任务行已被 delete_doc
                     # 级联收走，_finish_ok 已回滚（docs/blocks/search 未写回）。
@@ -257,6 +270,7 @@ def drain_once(store: Store, cfg: dict, root, *, workers: int | None = None,
                     rep.notes.append(
                         f"{job['job_id']}: finish failed ({type(exc).__name__})")
                     continue
+                saved_docs.add(ir.doc_id)
                 rep.done += 1
                 rep.drift += 1 if drift else 0
             elif res["status"] == "rejected":
@@ -274,8 +288,13 @@ def drain_once(store: Store, cfg: dict, root, *, workers: int | None = None,
 
 def _finish_ok(store: Store, sched: Scheduler, job: dict, res: dict, ir,
                writer=None, meta: dict | None = None,
-               gate: dict | None = None) -> bool:
+               gate: dict | None = None, prepared=None,
+               skip_save: bool = False) -> bool:
     """入库 + 状态推进。返回是否发生内容漂移（入队后源文件被改写）。
+
+    `prepared` / `skip_save`（CH-489）：同一批中多个作业共用同一产物 zip 时，
+    `drain_once` 只读一次 IR、只算一次插入行；首个作业落库后其余作业只推进
+    任务状态与事件（`skip_save=True`），不再对同一正文重复写 docs/blocks/FTS。
 
     CH-459（A-4）：detail 更新 / save_ir / mark(done) / 事件原为四次独立
     提交（每次提交一次 fsync 是当时口径；`synchronous` 自 CH-471 / STOR-1 起为
@@ -306,9 +325,11 @@ def _finish_ok(store: Store, sched: Scheduler, job: dict, res: dict, ir,
     enqueued = job.get("doc_id") or ""
     drift = bool(consumed and enqueued and consumed != enqueued)
     if drift:
-        # 产物按消费时内容入库；任务留痕，不偷偷改 task.doc_id 主键语义
+        # 产物按消费时内容入库；原始入队 id 留在 detail，任务行改指实际产物
+        # （否则 `/jobs` 显示 done 而 `GET /docs/<job.doc_id>` 永久 404）。
         detail["content_drift"] = {"enqueued": enqueued, "consumed": consumed}
-    prepared = prepare_ir_rows(ir)
+    if not skip_save and prepared is None:
+        prepared = prepare_ir_rows(ir)
     with store.tx() as tx:
         # CH-485（R9-SVC-1）：与同步路径同口径的墓碑检查。drift 让任务行的
         # doc_id（入队时内容）与本次消费的 ir.doc_id 分离，不能只靠
@@ -321,11 +342,24 @@ def _finish_ok(store: Store, sched: Scheduler, job: dict, res: dict, ir,
         if dead is not None:
             raise E4041_NotFound(
                 f"doc deleted during conversion: {ir.doc_id}")
+        task_doc_update = False
+        if drift:
+            busy = tx.execute(
+                "SELECT 1 FROM tasks WHERE doc_id=? AND status IN ('queued','running')"
+                " AND job_id<>? LIMIT 1", (ir.doc_id, job["job_id"])).fetchone()
+            task_doc_update = busy is None
+            # 单独字段而不是塞进 content_drift：后者是既有契约的精确字典，
+            # 追加键会破坏按整字典断言的消费方。
+            detail["task_doc_id_updated"] = task_doc_update
         if not sched.mark(job["job_id"], "done", detail=detail, tx=tx):
             raise E4041_NotFound(
                 f"task row gone (doc deleted during conversion): {job['job_id']}")
-        save_ir(store, ir, tx=tx, meta=meta, gate=gate,
-                force=bool(job.get("force")), prepared=prepared)
+        if task_doc_update:
+            tx.execute("UPDATE tasks SET doc_id=? WHERE job_id=?",
+                       (ir.doc_id, job["job_id"]))
+        if not skip_save:
+            save_ir(store, ir, tx=tx, meta=meta, gate=gate,
+                    force=bool(job.get("force")), prepared=prepared)
         _emit(store, "job_done", res.get("doc_id") or job.get("doc_id"), job["job_id"],
               {"blocks": int(res.get("blocks", 0) or 0), "source": "work",
                "file": str(job.get("path", ""))[-64:]}, writer, tx=tx)

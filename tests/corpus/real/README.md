@@ -54,8 +54,8 @@ Microsoft 许可约束、用户文档可能含隐私，不能未经确认直接�
 文件与文件名不进入公开仓库（`.gitignore` 已排除 `tests/corpus/tests/`）：
 
 - 7 PDF + 4 DOCX + 3 旧 `.doc`
-- **11/11 个受支持文件全部转换成功**
-- 3 个 `.doc` 按预期 `E4151`（项目只支持 DOCX；不冒充已支持旧 Word）
+- **CH-489 复测 14/14 全部转换成功**（CH-488 起 `.doc` 经 LibreOffice/Word 后端转换；无可用后端时按 `E4151` 拒收）
+- 早先采集的 `manifest.json` 中 `doc_rejected: 3` 是 CH-488 前的历史口径，不代表当前能力
 - 规模：PDF 2–156 页；最大 4287 blocks、845 headings、356 tables、213,553 chars
 - 2 个最小真实样本在 LLM server 模式成功（PDF 69 blocks **1.33s**、DOCX 13 blocks **0.38s**）
 
