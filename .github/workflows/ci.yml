@@ -81,6 +81,12 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 25
     steps:
+      - name: Enable Git long paths (golden fixture path >260 chars)
+        # Windows runner 默认 MAX_PATH=260；tests/golden/dirs/deep 的夹具路径
+        # 超过该上限，checkout 会在 git read-tree 阶段失败。Git 的 core.longpaths
+        # 可在不依赖系统注册表 LongPathsEnabled 的情况下完成检出。
+        run: git config --global core.longpaths true
+
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
