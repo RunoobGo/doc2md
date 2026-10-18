@@ -140,22 +140,51 @@ def _guarded_sendmsg(self, message, *args, **kw):
     return _ORIG["sendmsg"](self, message, *args, **kw)
 
 
+_GUARDS = {
+    "connect": _guarded_connect,
+    "connect_ex": _guarded_connect_ex,
+    "sendto": _guarded_sendto,
+    "sendmsg": _guarded_sendmsg,
+}
+
+
+def sendmsg_supported() -> bool:
+    """当前解释器是否提供 `socket.socket.sendmsg`（Windows 为 False）。"""
+    return getattr(socket.socket, "sendmsg", None) is not None
+
+
 def _install(allowed: set[str]) -> None:
-    _ORIG["connect"] = socket.socket.connect
-    _ORIG["connect_ex"] = socket.socket.connect_ex
-    _ORIG["sendto"] = socket.socket.sendto
-    _ORIG["sendmsg"] = socket.socket.sendmsg
-    socket.socket.connect = _guarded_connect
-    socket.socket.connect_ex = _guarded_connect_ex
-    socket.socket.sendto = _guarded_sendto
-    socket.socket.sendmsg = _guarded_sendmsg
+    """装桩；缺失的原语跳过（Windows 无 sendmsg），失败时完整回滚。
+
+    CPython 的 `socket.sendmsg()` 只在 Unix-like 系统实现；Windows 上无此
+    属性。原实现无条件读取并写入，导致默认 `run.offline_assert=true` 的
+    Windows 转换在进入管线前就抛 AttributeError。这里的 `getattr` 是
+    平台差异的显式出口，不是静默降级：`_check` 仍覆盖 connect/connect_ex/
+    sendto，`sendmsg_supported()` 供 doctor 展示。
+    """
+    installed: dict[str, object] = {}
+    try:
+        for name, guard in _GUARDS.items():
+            orig = getattr(socket.socket, name, None)
+            if orig is None:
+                continue
+            installed[name] = orig
+            setattr(socket.socket, name, guard)
+    except Exception:
+        for name, orig in installed.items():
+            try:
+                setattr(socket.socket, name, orig)
+            except Exception:  # noqa: BLE001 — 回滚尽力而为，不掩盖原始异常
+                pass
+        installed.clear()
+        raise
+    _ORIG.clear()
+    _ORIG.update(installed)
 
 
 def _uninstall() -> None:
-    socket.socket.connect = _ORIG.pop("connect")
-    socket.socket.connect_ex = _ORIG.pop("connect_ex")
-    socket.socket.sendto = _ORIG.pop("sendto")
-    socket.socket.sendmsg = _ORIG.pop("sendmsg")
+    for name, orig in list(_ORIG.items()):
+        setattr(socket.socket, name, orig)
     _ORIG.clear()
     _STATE["resolvers"].clear()
 

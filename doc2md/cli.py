@@ -64,8 +64,27 @@ DEPENDENCY_MODULES = ("pdfplumber", "docx", "flask", "cryptography")
 
 
 def _add_common(p: argparse.ArgumentParser) -> None:
-    p.add_argument("--config", help="doc2md.toml 路径（默认 ./ 或 $DOC2MD_HOME）")
-    p.add_argument("--root", help="工作根目录（覆盖 [paths].root）")
+    # CH-485（R9-OPS-4）：两层子命令都注册同名选项时，子 parser 的默认 None
+    # 会覆盖父 parser 已解析的值——`backup --root /x restore ...` 实际 root=None。
+    # SUPPRESS 让未显式给出的子选项不写入 namespace，父值因此得以保留。
+    p.add_argument("--config", default=argparse.SUPPRESS,
+                   help="doc2md.toml 路径（默认 ./ 或 $DOC2MD_HOME）")
+    p.add_argument("--root", default=argparse.SUPPRESS,
+                   help="工作根目录（覆盖 [paths].root）")
+
+
+def _ensure_private_root(root: Path) -> None:
+    """CH-485（R9-OPS-8）：纯 CLI 入口也落实 work/ 700（NFR-20）。
+
+    原实现只有 serve 与备份快照路径 chmod；只用 convert/work/watch 的部署
+    work/ 可能是 755，正文与 state.sqlite 对其他用户可读。非 POSIX 卷
+    chmod 失败只告警，不阻断转换。
+    """
+    root.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(root, 0o700)
+    except OSError as exc:
+        print(f"warning: chmod 700 {root} failed: {type(exc).__name__}", file=sys.stderr)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -159,7 +178,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _cfg(args: argparse.Namespace) -> dict:
-    cfg = config.load(args.config)
+    cfg = config.load(getattr(args, "config", None))
     if getattr(args, "root", None):
         cfg.setdefault("paths", {})["root"] = args.root
     return cfg
@@ -181,14 +200,27 @@ def _free_mb(path: Path) -> int:
         return -1
 
 
+def _sendmsg_supported() -> bool:
+    from .security.netguard import sendmsg_supported
+    return sendmsg_supported()
+
+
+def _watch_stable_seconds(cfg: dict) -> float:
+    """watch 稳定窗口下限（CH-485 / R9-OPS-10）：0 或非法值不得让轮询自旋。"""
+    try:
+        v = float(config.get(cfg, "watch.stable_seconds", 5) or 0)
+    except (TypeError, ValueError):
+        v = 5.0
+    return v if v > 0 else 0.1
+
+
 # --- serve ------------------------------------------------------------------
 def cmd_serve(args: argparse.Namespace) -> int:
     cfg = _cfg(args)
     if getattr(args, "sub", None) == "token":
         return _cmd_token(args, cfg)
     root = _root(cfg)
-    root.mkdir(parents=True, exist_ok=True)
-    os.chmod(root, 0o700)                       # M8 任务 6：work/ 权限 700
+    _ensure_private_root(root)                  # M8 任务 6 / CH-485：work/ 权限 700
     from .api import create_app
     app = create_app(cfg, root)
     host = args.host or str(config.get(cfg, "api.bind", "127.0.0.1"))
@@ -257,6 +289,7 @@ def _token_body(args, cfg, store, auth) -> int:
 def cmd_cron(args: argparse.Namespace) -> int:
     from . import cron
     cfg = _cfg(args)
+    _ensure_private_root(_root(cfg))
     mode = "weekly" if args.weekly else "daily"
     rep = cron.run(cfg, _root(cfg), mode=mode, with_backup=not args.no_backup)
     print(_jline({"mode": rep.mode, "ok": rep.ok, "steps": rep.steps}, indent=2))
@@ -328,6 +361,7 @@ def _gate_summary(detail: dict) -> dict:
 def cmd_convert(args: argparse.Namespace) -> int:
     from .pipeline.batch import default_workers, run_batch
     cfg = _cfg(args)
+    _ensure_private_root(_root(cfg))
     # CH-456 / T2：--llm-mode / --llm-no-fallback 覆盖声明性配置（口径与配置键一致）
     if getattr(args, "llm_mode", None):
         cfg.setdefault("llm", {})["mode"] = args.llm_mode
@@ -415,7 +449,7 @@ def cmd_work(args: argparse.Namespace) -> int:
     from .storage.db import Store
     cfg = _cfg(args)
     root = _root(cfg)
-    root.mkdir(parents=True, exist_ok=True)
+    _ensure_private_root(root)
     store = Store(root / "state.sqlite")
     rc = EXIT_OK
     try:
@@ -473,13 +507,14 @@ def cmd_watch(args: argparse.Namespace) -> int:
     from .storage.repo import save_ir
     cfg = _cfg(args)
     root = _root(cfg)
+    _ensure_private_root(root)
     store = Store(root / "state.sqlite")
 
     def loop() -> int:
         sched = Scheduler(store)
         lim = walk_limits(cfg)
-        tracker = StabilityTracker(
-            stable_seconds=float(config.get(cfg, "watch.stable_seconds", 5)))
+        stable_seconds = _watch_stable_seconds(cfg)
+        tracker = StabilityTracker(stable_seconds=stable_seconds)
         interval = args.interval or tracker.stable_seconds
         async_queue = bool(config.get(cfg, "perf.queue_async", False))
         import time
@@ -509,7 +544,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
                         rc = max(rc, EXIT_BIZ)
                     continue
                 try:
-                    res = convert(p, cfg=cfg, out_dir=root / "out")
+                    res = convert(p, cfg=cfg, out_dir=_out(cfg))
                     save_ir(store, res.ir)
                     j = sched.submit(res.doc_id, res.source_key)
                     sched.mark(j.job_id, "done")
@@ -602,6 +637,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         "s4_link_internal": config.get(cfg, "s4.link_internal", "plain"),
         "s4_preserve_strike": config.get(cfg, "s4.preserve_marks_strike", False),
         "watch_stable_seconds": config.get(cfg, "watch.stable_seconds", 5),
+        # CH-485（R9-OPS-3）：Windows 无 sendmsg，离线守护需显式展示该平台差异。
+        "offline_sendmsg": "yes" if _sendmsg_supported() else "no",
     }
     # CH-441：清单一律与 pyproject 声明的运行时依赖一致（pypdf 实未使用，列出必误报 MISSING）
     for mod in DEPENDENCY_MODULES:
