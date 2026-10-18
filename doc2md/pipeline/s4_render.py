@@ -64,6 +64,12 @@ def _render_block(b: Block, **opt) -> str:
             # CH-483（R8-PIPE-4）：保留 DOCX 自动编号的层级缩进。
             return indent + m.group(1) + ". " + _inline(
                 text[m.end():].strip(), b, **opt)
+        # CH-485（R9-PIPE-3）：多级编号（2.1.）不是 GFM 有序列表语法；保留
+        # 原编号并缩进，绝不落成 `- 2.1.` 的双标记畸形。
+        m2 = re.match(r"^\s*(\d+(?:\.\d+)+)[.]?\s+(.*)$", text)
+        if m2:
+            return indent + m2.group(1) + ". " + _inline(
+                m2.group(2).strip(), b, **opt)
         t = re.sub(r"^\s*[·•‣∙○●■□\-\*]\s+", "", text)
         return indent + "- " + _inline(t, b, **opt)
     if b.type == "page_break":

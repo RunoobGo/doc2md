@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from ..errors import Doc2mdError, E4221_GateReject
 from .s1_parse import RawPage
 
-_NOISE = re.compile(r"^[\s\d\W_]+$")
+_NOISE = re.compile(r"^[\s\W_]+$")
 _WS = re.compile(r"\s")
 # CH-476（R7-PERF-b）：字符计数用 translate 表，不用 `re.findall`——后者会把每个
 # 命中的单字符都装进列表（千页级文档 = 数十万次 append）。`len(text) -

@@ -231,11 +231,11 @@ def test_attach_links_goto_internal():
 
 
 def test_paragraph_gets_first_linked_line():
-    """段缓冲冲刷时取段内首条带链接行附着（原实现只覆盖标题/列表分支）。"""
+    """CH-485：完整覆盖的链接行独立成块，避免整段被包进一个链接。"""
     lines = [_line("请看参考链接，"), _line("详见附录。", link="https://a.example/x")]
     ir = analyze([_page(*lines)])
-    para = next(b for b in ir.blocks if b.type == "paragraph")
-    assert para.links and para.links[0]["url"] == "https://a.example/x"
+    linked = next(b for b in ir.blocks if b.links)
+    assert linked.links[0]["url"] == "https://a.example/x"
 
 
 def test_one_link_per_block():

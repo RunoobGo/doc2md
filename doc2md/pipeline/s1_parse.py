@@ -184,9 +184,9 @@ def read_pdf(path: str | Path, page_span: tuple[int, int] | None = None,
                     lines.append(Line(text=ln.get("text", ""), size=st[0],
                                       bold=st[1], italic=st[2], strike=st[3],
                                       mono=st[4],
-                                      uniform_bold=bool(st[1]),
-                                      uniform_italic=bool(st[2]),
-                                      uniform_strike=bool(st[3]),
+                                      uniform_bold=st[5],
+                                      uniform_italic=st[6],
+                                      uniform_strike=st[7],
                                       row=_row_cells(lchars),
                                       x0=float(ln.get("x0", 0.0) or 0.0),
                                       char_w=_char_width(lchars) if st[4] else 0.0))
@@ -275,25 +275,50 @@ def _slice_chars(chars: list[dict], index: tuple[list[int], list[float]],
     return [chars[j] for j in sorted(order[lo:hi])]
 
 
-def _line_style(chars: list[dict]) -> tuple[float, bool, bool, bool, bool]:
-    """取**已按几何区间切好**的行内 char 的众数字号与样式多数派。
+def _line_style(chars: list[dict]) -> tuple[
+        float, bool, bool, bool, bool, bool, bool, bool]:
+    """行内众数字号 + 多数派样式 + 逐字符统一格式（uniform_*）。
 
-    CH-459：第五返回值 `mono` = 行内多数字体为等宽家族（代码块信号）。
-    CH-471（PIPE-2）：入参 `chars` 已由 `_slice_chars` 用 `[top-1.0, max(bottom,
-    top+1.0))` 同一边界切好，原此处再过滤一遍**恒等于原列表**（逐行全字符比对，
-    与 `_char_index` 的 bisect 优化自相矛盾），删除之——G6 逐字节等价。
+    CH-485（R9-PIPE-5 / R9-PERF-1）：一趟同时算 size 与四个计数，并按 fontname
+    缓存字体派生位；`uniform_*` 要求**所有非空白字符**都带该格式，而不是行级
+    60% 多数派——后者会把“局部粗体”扩散成整段 `**`。
     """
-    from collections import Counter
     cs = chars
     if not cs:
-        return (0.0, False, False, False, False)
-    size = Counter(round(float(c.get("size", 0.0)), 1) for c in cs).most_common(1)[0][0]
+        return (0.0, False, False, False, False, False, False, False)
+    sizes: dict[float, int] = {}
     n = len(cs)
-    bold = sum(1 for c in cs if _is_bold(c)) / n >= 0.6
-    italic = sum(1 for c in cs if _is_italic(c)) / n >= 0.6
-    strike = sum(1 for c in cs if c.get("strike")) / n >= 0.6
-    mono = sum(1 for c in cs if _is_mono(c)) / n >= 0.6
-    return (size, bold, italic, bool(strike), mono)
+    b = i = s = m = 0
+    ub = ui = us = 0
+    nvis = 0
+    cache: dict[str, tuple[bool, bool, bool]] = {}
+    for c in cs:
+        size = round(float(c.get("size", 0.0)), 1)
+        sizes[size] = sizes.get(size, 0) + 1
+        fn = str(c.get("fontname", "")).lower()
+        flags = cache.get(fn)
+        if flags is None:
+            flags = ("bold" in fn or "black" in fn,
+                     "italic" in fn or "oblique" in fn,
+                     any(h in fn for h in _MONO_HINTS))
+            cache[fn] = flags
+        is_b = bool(c.get("bold")) or flags[0] or c.get("weight", 0) >= 600
+        is_i = bool(c.get("italic")) or flags[1]
+        is_s = bool(c.get("strike"))
+        is_m = flags[2]
+        b += is_b
+        i += is_i
+        s += is_s
+        m += is_m
+        if (c.get("text") or "").strip():
+            nvis += 1
+            ub += is_b
+            ui += is_i
+            us += is_s
+    size = max(sizes.items(), key=lambda kv: kv[1])[0]
+    return (size, b / n >= 0.6, i / n >= 0.6, s / n >= 0.6, m / n >= 0.6,
+            nvis > 0 and ub == nvis, nvis > 0 and ui == nvis,
+            nvis > 0 and us == nvis)
 
 
 def _is_mono(c: dict) -> bool:
@@ -365,6 +390,7 @@ def _is_italic(c: dict) -> bool:
 
 _W_NS = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 _R_NS = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
+_MC_NS = "{http://schemas.openxmlformats.org/markup-compatibility/2006}"
 
 
 @dataclass
@@ -499,7 +525,9 @@ class _DocxNumbering:
             if i > ilvl:
                 counters[i] = int((levels.get(i) or {}).get("start", 1)) - 1
         if cfg["fmt"] == "bullet":
-            return cfg["text"] or "•", ilvl
+            # CH-485（R9-PIPE-3）：lvlText 可能是 "o"/"§" 等任意字形；bullet
+            # 的语义是项目符号，不能让它落入 S3 的“非数字→1.”归一。
+            return "•", ilvl
 
         def repl(m):
             idx = int(m.group(1)) - 1
@@ -526,7 +554,8 @@ def _docx_style_name(el, d, ctx: _DocxCtx) -> str:
 
 
 
-def _docx_para_line(p, d, rels=None, ctx: _DocxCtx | None = None) -> Line | None:
+def _docx_para_line(p, d, rels=None, ctx: _DocxCtx | None = None,
+                    *, text_box: bool = False) -> Line | None:
     """段落 → Line（含 CH-459 的等宽 / 超链接 / 标题层级提示 / 分页符信号）。
 
     CH-476（R7-GAP-1，决策 D4「提取而非拒收」）：含修订痕迹的段落改走「接受后」口径。
@@ -549,7 +578,7 @@ def _docx_para_line(p, d, rels=None, ctx: _DocxCtx | None = None) -> Line | None
     # `p.text`/`p.runs` 只认 `w:p` 直接子级，sdt 内的文本会整块消失。
     use_all = rev or ctx.has_sdt or ctx.has_custom_xml or ctx.has_links
     if use_all:
-        runs = _docx_all_runs(p)
+        runs = _docx_all_runs(p, include_textbox=text_box)
         # `w:del` 里的文本是 `w:delText`，`Run.text` 本就不取 → 拼出来即「接受后」正文
         raw_text = "".join(r.text or "" for r in runs)
     else:
@@ -581,7 +610,9 @@ def _docx_para_line(p, d, rels=None, ctx: _DocxCtx | None = None) -> Line | None
         except Exception:
             level = 1
     marker, list_level = "", -1
-    if ctx.numbering is not None and not style.lower().startswith("heading"):
+    if ctx.numbering is not None:
+        # CH-485（R9-PIPE-3）：Heading 的自动编号也要保留（原实现跳过，
+        # 标题文本只剩“方法”）；S3 会用 level_hint 优先，不会把它当列表。
         marker, list_level = ctx.numbering.marker(el, el.style)
     link, link_internal, link_dest = _docx_para_link(p, d, text, rels, ctx.has_links)
     return Line(text=text, size=size or _style_size(style),
@@ -600,14 +631,22 @@ def _docx_has_revision(el) -> bool:
     return any(e.tag in marks for e in el.iter())
 
 
-def _docx_all_runs(p) -> list:
+def _inside_textbox(el) -> bool:
+    tags = (_W_NS + "drawing", _W_NS + "txbxContent", _MC_NS + "AlternateContent")
+    return any(a.tag in tags for a in el.iterancestors())
+
+
+def _docx_all_runs(p, *, include_textbox: bool = False) -> list:
     """段落内**全部** run（含 `w:ins` / `w:hyperlink` 包裹者），包装成 python-docx Run。
 
     只在 `_docx_has_revision` 命中时调用；`Run.text` 沿用 python-docx 口径
     （`w:tab`→\\t、`w:br`/`w:cr`→\\n、`w:delText` 不取），故与 `p.text` 同形。
     """
     from docx.text.run import Run
-    return [Run(r, p) for r in p._element.iter(f"{_W_NS}r")]
+    # CH-485（R9-PIPE-1）：文本框/绘图里的 run 由 _docx_textbox_paragraphs 单独
+    # 产出；若在此一并拼入宿主段落，会重复（AlternateContent 双分支还会翻倍）。
+    return [Run(r, p) for r in p._element.iter(f"{_W_NS}r")
+            if include_textbox or not _inside_textbox(r)]
 
 
 def _name_is_mono(name: str | None) -> bool:
@@ -711,6 +750,8 @@ def _docx_cell_text(tc) -> str:
     from docx.text.run import Run
     parts = []
     for p in tc.iter(f"{_W_NS}p"):
+        if _inside_textbox(p):
+            continue
         # CH-483（R8-PIPE-6）：`w:br`/`w:tab` 不是 `w:t`，旧实现只拼 `w:t`
         # 会把 "A\nB\tC" 粘成 "ABC"。Run.text 已按 python-docx 口径映射。
         txt = "".join(Run(r, p).text or "" for r in p.iter(f"{_W_NS}r")).strip()
@@ -755,6 +796,22 @@ def _docx_table_rows(tbl) -> list[tuple[list[str], bool]]:
     if width and any(len(r[0]) < width for r in rows):
         rows = [(cells + [""] * (width - len(cells)), rev) for cells, rev in rows]
     return rows
+
+
+def _docx_textbox_paragraphs(container):
+    """按文档顺序产出文本框内的 w:p（AlternateContent 只取 Choice 一支）。"""
+    for child in container:
+        if child.tag == f"{_MC_NS}AlternateContent":
+            branch = child.find(f"{_MC_NS}Choice")
+            if branch is None:
+                branch = child.find(f"{_MC_NS}Fallback")
+            if branch is not None:
+                yield from _docx_textbox_paragraphs(branch)
+        elif child.tag == f"{_W_NS}txbxContent":
+            for p in child.findall(f"{_W_NS}p"):
+                yield p
+        else:
+            yield from _docx_textbox_paragraphs(child)
 
 
 def _iter_docx_blocks(container):
@@ -807,6 +864,12 @@ def read_docx(path: str | Path, fmt: str | None = None) -> list[RawPage]:
             for cells, rev in _docx_table_rows(child):
                 lines.append(Line(text=" | ".join(cells), row=cells,
                                   row_explicit=True, has_revision=rev))
+    # CH-485（R9-PIPE-1）：文本框正文不是 body 的直接 w:p；单独产出为段落，
+    # 避免宿主段落只得到“前后”或 AlternateContent 双分支重复。
+    for p_el in _docx_textbox_paragraphs(d.element.body):
+        ln = _docx_para_line(_dp.Paragraph(p_el, d), d, ctx=ctx, text_box=True)
+        if ln is not None:
+            lines.append(ln)
     lines += _docx_notes_lines(d, ctx)
     pages: list[RawPage] = []
     chunk = 40

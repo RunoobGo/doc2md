@@ -70,7 +70,10 @@ def _merge_text(a: Block, b: Block) -> str:
 
 
 # R7-PIPE-1（D3）：结构块——离散结构节点，缝合续接一律禁止吸收
-_STRUCTURAL = frozenset({"heading", "table", "code", "quote", "page_break"})
+# CH-485（R9-PIPE-8）：list_item 也是结构节点；跨片两个列表项若被“续接”，
+# 会拼成 "1. 第一项2. 第二项" 并丢掉列表边界。
+_STRUCTURAL = frozenset({"heading", "table", "code", "quote", "page_break",
+                         "list_item"})
 
 
 def _continuation(a: Block, b: Block) -> bool:
@@ -317,6 +320,10 @@ def stitch_shards(shard_irs: list[IR], max_pages: int = 300,
                 # CH-469：吸收必须搬运正文（原实现只留痕 absorbed_ids，
                 # 被吸收块文本直接消失 = 缝合即丢内容）
                 nxt.text = _merge_text(b, nxt)
+                # CH-485（R9-PIPE-5）：缝合后的块级 marks 取双方交集，避免把
+                # 一片的局部粗体扩散到吸收后的整块。
+                nxt.marks = {k: True for k in (b.marks or {})
+                             if (b.marks or {}).get(k) and (nxt.marks or {}).get(k)}
                 nxt.provenance.setdefault("modified_by", []).append("s4:shard_stitch")
                 stitched += 1
                 i += 1

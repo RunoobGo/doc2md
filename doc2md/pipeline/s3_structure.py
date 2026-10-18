@@ -28,7 +28,10 @@ from .s1_parse import RawPage
 
 _NUM = re.compile(r"^\s*(\d+(?:\.\d+)*)\s*[、\.::]?\s*")
 _CJK_HEAD = re.compile(
-    r"^\s*(第\s*[一二三四五六七八九十百千\d]+\s*[章节条款项编部篇])")
+    r"^\s*(第\s*[一二三四五六七八九十百千\d]+\s*[章节条款项编部篇])"
+    # CH-485（R9-PIPE-2）：`第 1 章的内容…` / `第 1 章所述…` 是正文引用，
+    # 不是标题；只对词头后**紧邻**的常见虚词做否定，不影响 `第 1 章 总则`。
+    r"(?!的|所|中|里|内|是|为|规|要|内容)")
 _BULLET = re.compile(r"^\s*([·•‣∙○●■□\-\*])\s+")
 # CH-478（R6-PIPE-1 收口，决策「落地有序列表分支」）：PDF 有序列表项的编号形态。
 # `(?!\d)` 挡住小数（"3.5 节"），`\d{1,3}` 上限挡住年份起头的段落（"2019. 报告"），
@@ -177,6 +180,10 @@ def _attach_link(b: Block, ln) -> None:
     内部链接（PDF GoTo / DOCX 书签）同样记录：`link_internal` 口径下 S4 默认
     不产生锚点语法（plain），`dest` 留给 anchor 模式与审阅面。
     """
+    # CH-485（R9-PIPE-7）：块级 links 无字符偏移；只有链接行完整覆盖当前块
+    # 时才附着，否则多行段落会被整段包进 [text](url)，制造错误链接范围。
+    if (b.text or "").strip() != (ln.text or "").strip():
+        return
     if ln.link:
         b.links = [{"url": ln.link, "text": (b.text or "").strip(),
                     "dest": ln.link_dest or ""}]
@@ -184,7 +191,7 @@ def _attach_link(b: Block, ln) -> None:
         b.links = [{"url": "", "text": (b.text or "").strip(), "dest": ln.link_dest or ""}]
 
 
-def _mark_provenance(b: Block, lines) -> None:
+def _mark_provenance(b: Block, lines, *, merge: bool = False) -> None:
     """CH-476（R7-GAP-1 / R7-GAP-2，决策 D4/D7）：来源行上的 DOCX 特征 → 块级留痕。
 
     - `has_revision`：正文已由 S1 按「接受后」口径提取（`w:ins` 并入、`w:del` 不入），
@@ -204,12 +211,16 @@ def _mark_provenance(b: Block, lines) -> None:
     if b.type in ("paragraph", "list_item"):
         nonempty = [ln for ln in rows if (ln.text or "").strip()]
         if nonempty:
-            if all(ln.uniform_bold for ln in nonempty):
-                b.marks.setdefault("bold", True)
-            if all(ln.uniform_italic for ln in nonempty):
-                b.marks.setdefault("italic", True)
-            if all(ln.uniform_strike for ln in nonempty):
-                b.marks.setdefault("strikethrough", True)
+            # CH-485（R9-PIPE-5）：AND 语义。新建块时全量判定；续行/并回时
+            # 只清不置——新行统一不代表已有行也统一，绝不能把局部格式扩散。
+            for key, attr in (("bold", "uniform_bold"),
+                              ("italic", "uniform_italic"),
+                              ("strikethrough", "uniform_strike")):
+                ok = all(getattr(ln, attr) for ln in nonempty)
+                if not ok:
+                    b.marks.pop(key, None)
+                elif not merge:
+                    b.marks.setdefault(key, True)
 
 
 def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
@@ -371,13 +382,25 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
             # --- 标题（CH-459：DOCX Heading 样式提示优先于启发式）---
             # 自动编号是显式列表信号：不让「第一项」这类文本再被 CJK 章标记
             # 启发式抢成标题（Heading 样式在 S1 已跳过编号解析，hint 仍可优先）。
-            lvl = None if ln.list_marker else _heading_level(
-                text, ln.size, base_size, ln.bold, hint=ln.level_hint)
+            # CH-485（R9-PIPE-4）：表格行先走表格分组，绝不能被 heading 分支
+            # 当成标题（首列“1.1 范围”会触发多级编号信号）。
+            if ln.row:
+                lvl = None
+            elif ln.level_hint is not None:
+                lvl = _heading_level(text, ln.size, base_size, ln.bold,
+                                     hint=ln.level_hint)
+            else:
+                lvl = None if ln.list_marker else _heading_level(
+                    text, ln.size, base_size, ln.bold)
             if lvl:
                 flush_para()
                 flush_quote()
                 flush_rows(True)             # 行组被结构行终止：按事实判定
-                blocks.append(Block(id="", type="heading", text=text.strip(),
+                # CH-485（R9-PIPE-3）：Heading 的自动编号在 S1 已解析出来，
+                # 这里并入标题文本，避免“1. 方法”退化成“方法”。
+                head_text = (f"{ln.list_marker} {text.strip()}"
+                             if ln.list_marker else text.strip())
+                blocks.append(Block(id="", type="heading", text=head_text,
                                     level=lvl, font=_font(ln), page=page.index))
                 if ln.level_hint:
                     # CH-476（R7-PIPE-4）：显式样式层级留痕，`_fix_levels` 依此不改写
@@ -468,13 +491,24 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
                 _attach_link(blocks[-1], ln)
                 _mark_provenance(blocks[-1], (ln,))
                 continue
+            # CH-485（R9-PIPE-7）：块级链接无法表达行内范围；完整覆盖的链接行
+            # 独立成块，既保留可点击 URL，又不把整段包进 [text](url)。
+            if ln.link or ln.link_internal:
+                flush_para()
+                flush_quote()
+                flush_rows(True)
+                blocks.append(Block(id="", type="paragraph", text=text.strip(),
+                                    font=_font(ln), page=page.index))
+                _attach_link(blocks[-1], ln)
+                _mark_provenance(blocks[-1], (ln,))
+                continue
             # CH-430：续句标点起头 → 无条件并回上一个内容块（可跨标题/空行打断）
             if _continuation_led(text) and not para_buf:
                 back = _join_back(blocks, text, _font(ln))
                 if back is not None:
                     if (ln.link or ln.link_internal) and not back.links:
                         _attach_link(back, ln)
-                    _mark_provenance(back, (ln,))
+                    _mark_provenance(back, (ln,), merge=True)
                     continue
             # 普通正文行：句子未结束则续接同段
             if para_buf and _can_continue(para_buf[-1]):
@@ -522,7 +556,9 @@ def modal_size(pages: list[RawPage]) -> float:
     for p in pages:
         for ln in p.lines:
             if ln.size:
-                c[round(ln.size, 0)] += max(1, len(ln.text.strip()))
+                # CH-485（R9-PIPE-2）：10.5pt 被 round(...,0) 抬成 10.0 后，
+                # 第三回退的“字号>正文”会把所有单级编号短行误判成标题。
+                c[round(ln.size, 1)] += max(1, len(ln.text.strip()))
     return c.most_common(1)[0][0] if c else 10.0
 
 
@@ -555,7 +591,8 @@ def _heading_level(text: str, size: float, base: float, bold: bool,
         m_num = _NUM.match(t)
         multi_level = bool(m_num and "." in m_num.group(1))
         cjk_head = bool(_CJK_HEAD.match(t))
-        if (size or base) > base or bold or multi_level or cjk_head:
+        # CH-485（R9-PIPE-2）：0.5pt 容差吸收字体测量的细微差异。
+        if (size or base) > base + 0.5 or bold or multi_level or cjk_head:
             return _level_from_number(t, size or base, base)
     return None
 

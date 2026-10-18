@@ -81,8 +81,10 @@ def _convert_one(path: str, cfg: dict | None, mode: str | None,
                        code=exc.code, message=str(exc),
                        gate=_gate(detail) if exc.code == "E4221" else None).to_dict()
     except Exception as exc:                # noqa: BLE001 — 解析层未预期异常不得拖垮整批
+        # CH-485（R9-PIPE-9）：第三方解析异常的消息可能夹带页正文；任务明细会
+        # 经 GET /jobs 暴露给 reader。只留类名，与 worker died 同口径。
         return Summary(file=str(path), status="error", code="E5000",
-                       message=f"{type(exc).__name__}: {exc}").to_dict()
+                       message=f"{type(exc).__name__}").to_dict()
     return Summary(file=str(path), status="ok", doc_id=res.doc_id, source_key=res.source_key,
                    blocks=len(res.ir.blocks), chars=res.metrics.get("chars", 0),
                    zip=str(res.zip_path) if res.zip_path else "",

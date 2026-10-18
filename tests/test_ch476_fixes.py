@@ -1556,7 +1556,8 @@ def test_perf_b_page_metrics_equal_to_regex_reference():
     cjk = _re.compile(r"[\u4e00-\u9fff]")
     latin = _re.compile(r"[A-Za-z]")
     ws = _re.compile(r"\s")
-    noise = _re.compile(r"^[\s\d\W_]+$")
+    # CH-485（R9-PIPE-6）：数字是可读内容，噪声行不再把 \d 计入。
+    noise = _re.compile(r"^[\s\W_]+$")
 
     def legacy(page):
         lines = [ln.text for ln in page.lines]
