@@ -22,6 +22,7 @@ import contextlib
 import os
 import re
 import secrets
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -59,6 +60,33 @@ MAX_V1_BYTES = 512 * 1024 * 1024        # v1 单块容器整读恢复的防御�
 
 class BackupBusy(RuntimeError):
     """另一个备份进程持有锁（cron 重入/手动补跑重叠）。"""
+
+
+_EXTERNAL_WRITE_LOCK = threading.Lock()
+
+
+def _output_lock(_path: Path) -> threading.Lock:
+    """外置副本写入的线程内串行化。
+
+    `.part` 随机后缀已经避免同名临时文件互踩，但最终 `.enc` 仍是固定名；
+    Windows 上两个线程同时 `replace` 同一目标会以 WinError 5 失败。外置备份
+    是低频磁盘任务，用一把固定锁即可；按路径建字典会让常驻进程随备份次数
+    无限增长（快照名带随机后缀，key 永不重复）。
+    """
+    return _EXTERNAL_WRITE_LOCK
+
+
+def _replace_retry(src: Path, dst: Path, *, attempts: int = 5,
+                   delay: float = 0.05) -> None:
+    """原子替换；Windows 上杀毒/索引器短暂占用目标时退避重试。"""
+    for i in range(attempts):
+        try:
+            src.replace(dst)
+            return
+        except PermissionError:
+            if i == attempts - 1:
+                raise
+            time.sleep(delay)
 
 
 @contextlib.contextmanager
@@ -243,6 +271,12 @@ def sqlite_backup(src: str | Path, dst: str | Path) -> Path:
         dst_c = sqlite3.connect(str(dst))
         src_c.backup(dst_c)
     except Exception:
+        # Windows 不允许删除仍被打开的文件；先关连接再清 `.part`，否则
+        # 「失败不留半成品」会在 PermissionError 上二次失败并掩盖原始错误。
+        for con in (dst_c, src_c):
+            if con is not None:
+                con.close()
+        dst_c = src_c = None
         dst.unlink(missing_ok=True)
         raise
     finally:
@@ -264,6 +298,26 @@ class BackupPlan:
     mode_warnings: list[str] = field(default_factory=list)   # O-12：非 POSIX 卷的 chmod 结果
 
 
+    def sweep_parts(self, max_age_seconds: float = 3600) -> list[Path]:
+        """清掉崩溃/超时遗留的 `.part` 全库副本（FR-128 的 14 天上限）。
+
+        `.part` 不在轮出正则里；SIGKILL/断电后它会带着正文永久留在备份目录。
+        只在超过年龄阈值后删除，避免与同进程/另一进程刚创建的临时件相撞。
+        """
+        removed: list[Path] = []
+        cutoff = time.time() - max(60.0, float(max_age_seconds))
+        for base in (self.local_dir, self.external_dir):
+            if not base or not Path(base).is_dir():
+                continue
+            for p in Path(base).glob("*.part"):
+                try:
+                    if p.stat().st_mtime <= cutoff:
+                        p.unlink()
+                        removed.append(p)
+                except OSError:
+                    continue
+        return removed
+
     def snapshot(self, state_db: Path, ts: datetime | None = None) -> Path:
         """本地快照（work/ 内可明文，前提是 work/ 权限 700）。
 
@@ -272,17 +326,21 @@ class BackupPlan:
         """
         ts = ts or datetime.now(timezone.utc)
         self.local_dir.mkdir(parents=True, exist_ok=True)
+        self.sweep_parts()
         dst = self.local_dir / (
             f"state-{ts.strftime(_TS_FMT)}-{secrets.token_hex(4)}.sqlite")
         part = dst.with_name(dst.name + ".part")
-        sqlite_backup(state_db, part)
-        check = _sqlite_quick_check(part)
-        if check != "ok":
+        try:
+            sqlite_backup(state_db, part)
+            check = _sqlite_quick_check(part)
+            if check != "ok":
+                raise ValueError(f"snapshot quick_check failed: {check}")
+            with part.open("rb+") as fh:
+                _fsync(fh)
+            _replace_retry(part, dst)
+        except Exception:
             part.unlink(missing_ok=True)
-            raise ValueError(f"snapshot quick_check failed: {check}")
-        with part.open("rb+") as fh:
-            _fsync(fh)
-        part.replace(dst)
+            raise
         _fsync_dir(self.local_dir)
         mode = _parse_mode(self.work_dir_mode)
         self._enforce_mode(self.local_dir, mode)
@@ -301,6 +359,7 @@ class BackupPlan:
 
         ts = ts or datetime.now(timezone.utc)
         self.local_dir.mkdir(parents=True, exist_ok=True)
+        self.sweep_parts()
         if self.cfg is not None:
             from .diskguard import assert_free_space
             assert_free_space(self.local_dir, state_db.stat().st_size,
@@ -372,23 +431,8 @@ class BackupPlan:
         吞掉，M8「work/ 700」这条隐私前提在外置卷上静默失效，运维面上无人知晓。
         现在记入 `mode_warnings`，由 cron / CLI / 演练报告如实输出。
         """
-        target = Path(path)
-        try:
-            target.chmod(mode)
-        except OSError as exc:
-            self.mode_warnings.append(
-                f"chmod {oct(mode)} failed on {target}: {type(exc).__name__}")
-            return
-        try:
-            got = target.stat().st_mode & 0o777
-        except OSError:
-            return
-        # 只判「隐私位」：mode=700 的意图是同卷其他用户读不到，而 chmod 在无 POSIX
-        # 权限的卷上会把 755/777 原样留着——这正是 M8 前提失效的形态。
-        if not mode & 0o077 and got & 0o077:
-            self.mode_warnings.append(
-                f"{target} stays {oct(got)} after chmod {oct(mode)}"
-                " (volume ignores POSIX permissions)")
+        from ..security.perms import ensure_private
+        self.mode_warnings.extend(ensure_private(path, mode))
 
     def to_external(self, snapshot: Path, passphrase: str) -> Path:
         """外置副本（CH-460 / A-11：流式加密，不再把整库读进内存）。"""
@@ -397,34 +441,36 @@ class BackupPlan:
         if not self.encrypted_external:
             raise PermissionError("NFR-18: external backup must be encrypted")
         self.external_dir.mkdir(parents=True, exist_ok=True)
-        # CH-471（OPS-4）：内部磁盘守卫——原实现只有 cron 在调用点预检，直接 to_external
-        # （手抄片段 / 未来调用方）会跳过剩余空间检查、把外置卷写满留半截容器。plan 带
-        # cfg 时这里成为唯一闸口；纯测试用裸 plan（cfg=None）保持原样直写。
-        if self.cfg is not None:
-            from .diskguard import assert_free_space
-            assert_free_space(self.external_dir, snapshot.stat().st_size,
-                              cfg=self.cfg, what="external_backup")
         out = self.external_dir / (snapshot.name + ".enc")
-        # CH-473（R5-OPS-1）：写 `.part` 完成后原子 rename——原实现直接以最终名
-        # `open("wb")`，encrypt_stream 中途失败（ENOSPC / IO 错误）留下**名字合法
-        # 的半截 .enc**：rotate() 的 _SNAPSHOT_RE 不清它，后续恢复演练可能选中
-        # 必然认证失败的容器。本地 snapshot（O-11）与 restore 早已是 tmp+rename
-        # 口径，外置侧漏修——这里补齐，失败路径 unlink 半截件。
-        part = out.with_name(out.name + f".{secrets.token_hex(4)}.part")
-        try:
-            with snapshot.open("rb") as src, part.open("wb") as dst:
-                encrypt_stream(src, dst, passphrase)
-                _fsync(dst)                      # O-14：外置卷掉电不留半截容器
-            # CH-485（R9-OPS-5）：rename 前流式解密自检，防止并发/IO 错误把
-            # 认证失败容器当成有效备份（keep_newest 否则会保护它）。
-            with part.open("rb") as chk, open(os.devnull, "wb") as sink:
-                decrypt_stream(chk, sink, passphrase)
-            part.replace(out)
-        except Exception:
-            part.unlink(missing_ok=True)
-            raise
-        _fsync_dir(self.external_dir)            # OPS-4：新文件目录项抗掉电
-        _chmod600(out, self.mode_warnings)
+        with _output_lock(out):
+            # CH-471（OPS-4）：内部磁盘守卫——原实现只有 cron 在调用点预检，直接 to_external
+            # （手抄片段 / 未来调用方）会跳过剩余空间检查、把外置卷写满留半截容器。plan 带
+            # cfg 时这里成为唯一闸口；纯测试用裸 plan（cfg=None）保持原样直写。
+            if self.cfg is not None:
+                from .diskguard import assert_free_space
+                assert_free_space(self.external_dir, snapshot.stat().st_size,
+                                  cfg=self.cfg, what="external_backup",
+                                  factor_override=1.2)
+            # CH-473（R5-OPS-1）：写 `.part` 完成后原子 rename——原实现直接以最终名
+            # `open("wb")`，encrypt_stream 中途失败（ENOSPC / IO 错误）留下**名字合法
+            # 的半截 .enc**：rotate() 的 _SNAPSHOT_RE 不清它，后续恢复演练可能选中
+            # 必然认证失败的容器。本地 snapshot（O-11）与 restore 早已是 tmp+rename
+            # 口径，外置侧漏修——这里补齐，失败路径 unlink 半截件。
+            part = out.with_name(out.name + f".{secrets.token_hex(4)}.part")
+            try:
+                with snapshot.open("rb") as src, part.open("wb") as dst:
+                    encrypt_stream(src, dst, passphrase)
+                    _fsync(dst)                      # O-14：外置卷掉电不留半截容器
+                # CH-485（R9-OPS-5）：rename 前流式解密自检，防止并发/IO 错误把
+                # 认证失败容器当成有效备份（keep_newest 否则会保护它）。
+                with part.open("rb") as chk, open(os.devnull, "wb") as sink:
+                    decrypt_stream(chk, sink, passphrase)
+                _replace_retry(part, out)
+            except Exception:
+                part.unlink(missing_ok=True)
+                raise
+            _fsync_dir(self.external_dir)            # OPS-4：新文件目录项抗掉电
+            _chmod600(out, self.mode_warnings)
         return out
 
 
@@ -444,7 +490,7 @@ class BackupPlan:
         except Exception:
             tmp.unlink(missing_ok=True)
             raise
-        tmp.replace(dst)
+        _replace_retry(tmp, dst)
         _fsync_dir(dst.parent)                   # OPS-4：rename 后落父目录项，原子性才抗掉电
         _chmod600(dst, self.mode_warnings)
         return dst
@@ -493,7 +539,7 @@ class BackupPlan:
                     _fsync(w)
             else:
                 sqlite_backup(src, tmp)
-            con = sqlite3.connect(f"file:{tmp}?mode=ro", uri=True)
+            con = sqlite3.connect(Path(tmp).resolve().as_uri() + "?mode=ro", uri=True)
             try:
                 got = str(con.execute("PRAGMA integrity_check").fetchone()[0])
             finally:
@@ -513,16 +559,17 @@ class BackupPlan:
                         side_old = Path(str(old_main) + suffix)
                         os.replace(side, side_old)
                         old_side.append((side, side_old))
-            tmp.replace(dst)
+            else:
+                # 目标主库不存在但残留 WAL/SHM：旧日志会被新库首次打开时回放，
+                # 把恢复内容改坏。无主库时这些 sidecar 没有保留价值，直接清掉。
+                for suffix in ("-wal", "-shm"):
+                    Path(str(dst) + suffix).unlink(missing_ok=True)
+            _replace_retry(tmp, dst)
             replaced = True
             _fsync_dir(dst.parent)
             _chmod600(dst, self.mode_warnings)
-            con = sqlite3.connect(f"file:{dst}?mode=ro", uri=True)
-            try:
-                if str(con.execute("PRAGMA integrity_check").fetchone()[0]) != "ok":
-                    raise ValueError("restored db failed integrity_check")
-            finally:
-                con.close()
+            # tmp 在替换前已跑过完整 integrity_check；rename 不改变内容，
+            # 不再对同一份 GB 级库做第二次全量校验（恢复耗时≈减半）。
         except Exception:
             tmp.unlink(missing_ok=True)
             # 回滚：优先恢复旧主库与 WAL/SHM；没有旧库时删掉刚替换的目标。
@@ -604,7 +651,7 @@ class BackupPlan:
 def _sqlite_quick_check(path: Path) -> str:
     import sqlite3
     try:
-        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        con = sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True)
         try:
             return str(con.execute("PRAGMA quick_check").fetchone()[0])
         finally:
@@ -640,10 +687,8 @@ def _fsync_dir(path) -> None:
 
 
 def _chmod600(path: Path, warnings: list[str]) -> None:
-    try:
-        path.chmod(0o600)
-    except OSError as exc:
-        warnings.append(f"chmod 0600 failed on {path.name}: {type(exc).__name__}")
+    from ..security.perms import ensure_private
+    warnings.extend(ensure_private(path, 0o600))
 
 
 def _parse_mode(value) -> int:

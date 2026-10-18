@@ -68,10 +68,58 @@ def test_cli_common_options_survive_nested_subparsers():
 
 
 def test_cli_private_root_mode(tmp_path):
+    from doc2md.security.perms import is_private
     root = tmp_path / "work"
     _ensure_private_root(root)
     assert root.is_dir()
-    assert (root.stat().st_mode & 0o777) == 0o700
+    if os.name == "nt":
+        assert is_private(root), "Windows 上必须落成仅当前用户 DACL"
+    else:
+        assert (root.stat().st_mode & 0o777) == 0o700
+
+
+def _mklink_junction(link: Path, target: Path) -> bool:
+    import subprocess
+    proc = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)],
+                          capture_output=True, text=True)
+    return proc.returncode == 0
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction semantics")
+def test_junction_not_followed_by_dirguard(tmp_path):
+    from doc2md.security.dirguard import WalkLimits, guard_walk
+    root = tmp_path / "root"
+    outside = tmp_path / "outside"
+    root.mkdir()
+    outside.mkdir()
+    (root / "inside.pdf").write_bytes(b"x")
+    (outside / "secret.pdf").write_bytes(b"x")
+    link = root / "jump"
+    if not _mklink_junction(link, outside):
+        pytest.skip("cannot create junction in this environment")
+    res = guard_walk(root, WalkLimits(follow_symlinks=False))
+    assert res.skipped_symlinks >= 1
+    assert not any("jump" in p or "secret" in p for p in res.files), res.files
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction semantics")
+def test_sweep_tmp_removes_junction_not_target(tmp_path):
+    from doc2md import cron
+    root = tmp_path / "work"
+    tmp = root / "tmp"
+    outside = tmp_path / "outside"
+    tmp.mkdir(parents=True)
+    outside.mkdir()
+    keep = outside / "keep.pdf"
+    keep.write_bytes(b"x")
+    link = tmp / "jump"
+    if not _mklink_junction(link, outside):
+        pytest.skip("cannot create junction in this environment")
+    cleaned = cron.sweep_tmp({"paths": {"root": str(root), "tmp": str(tmp)},
+                              "perf": {"stale_job_minutes": 0}}, root)
+    assert cleaned >= 1
+    assert not link.exists()
+    assert keep.exists(), "junction 目标内容不得被递归删除"
 
 
 def test_watch_stable_seconds_nonzero_floor():

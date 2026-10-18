@@ -70,11 +70,13 @@ class Summary:
 
 
 def _convert_one(path: str, cfg: dict | None, mode: str | None,
-                 out: str | None) -> dict:
+                 out: str | None, force: bool = False,
+                 precheck_edits: bool = False) -> dict:
     """worker 入口：必须在模块顶层、参数可 pickle（spawn 平台要求）。"""
     from .convert import convert
     try:
-        res = convert(path, cfg=cfg, mode=mode, out_dir=out)
+        res = convert(path, cfg=cfg, mode=mode, out_dir=out, force=force,
+                      precheck_edits=precheck_edits)
     except Doc2mdError as exc:              # 含 E4221 门禁拒收，跨进程按 code 分类
         detail = exc.detail or {}
         return Summary(file=str(path), status="rejected" if exc.code == "E4221" else "error",
@@ -99,7 +101,8 @@ def _gate(detail: dict) -> dict:
 def run_batch(paths: Sequence[str | Path], *, cfg: dict | None = None,
               mode: str | None = None, out_dir: str | Path | None = None,
               workers: int | None = None, start_method: str | None = None,
-              on_result: Callable[[dict], None] | None = None) -> list[dict]:
+              on_result: Callable[[dict], None] | None = None,
+              force: bool = False, precheck_edits: bool = False) -> list[dict]:
     """有界进程池批量转换；顺序不保证，完成即回调。单文件或 workers=1 走串行同一路径。
 
     start_method="spawn" 用于在 Linux 上复现 Windows 的进程启动方式（验收用）；
@@ -128,7 +131,8 @@ def run_batch(paths: Sequence[str | Path], *, cfg: dict | None = None,
     # （不设限）保持进程内零开销、零行为变化（G6 不受影响）。
     if (n == 1 or len(files) == 1) and window is None:
         for f in files:
-            r = _convert_one(f, cfg, mode, out)
+            r = _convert_one(f, cfg, mode, out, force=force,
+                             precheck_edits=precheck_edits)
             results.append(r)
             if on_result:
                 on_result(r)
@@ -149,9 +153,15 @@ def run_batch(paths: Sequence[str | Path], *, cfg: dict | None = None,
     pool = ProcessPoolExecutor(**kw)
     # CH-469：先建好完整映射再进循环——`wait()` 每轮把 pending 收敛成「未完成集」，
     # 若只留收敛后的集合，异常分支就再也取不到该件对应的文件名（记账会丢件）。
-    futs = {pool.submit(_convert_one, f, cfg, mode, out): f for f in files}
-    pending = set(futs)
+    futs: dict = {}
+    pending: set = set()
     try:
+        # submit 也要在 try 内：BrokenProcessPool / 资源耗尽时否则会跳过
+        # finally 的 shutdown+terminate，把 worker 留到解释器退出（X-17 回归面）。
+        futs = {pool.submit(_convert_one, f, cfg, mode, out, force,
+                            precheck_edits): f
+                for f in files}
+        pending = set(futs)
         while pending:
             done, pending_now = wait(pending, timeout=window, return_when=FIRST_COMPLETED)
             if not done and window is not None:

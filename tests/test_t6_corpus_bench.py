@@ -255,6 +255,8 @@ class TestSamplerPrimitives:
         编进断言，macOS 上必红（实测）。契约是：POSIX 本机必然有可用后端，
         且能采到自身 pid 与正的 RSS。
         """
+        if os.name == "nt" and bench._probe_backend() == "none":
+            pytest.skip("Windows without psutil: RSS sampling is intentionally n/a")
         pids, rss, backend = bench.sample_tree(os.getpid())
         assert backend in ("proc", "ps", "psutil")       # POSIX 探测结果因宿主而异
         assert os.getpid() in pids
@@ -289,6 +291,8 @@ class TestSamplerPrimitives:
         由 `test_proc_branch_reads_a_fake_proc_tree` 覆盖同一分支，不产生跳过。
         """
         if not os.path.isdir("/proc"):
+            if os.name == "nt":
+                pytest.skip("Windows has no /proc and no ps backend")
             assert bench._probe_backend() == "ps"       # macOS：POSIX 无 proc → ps
         else:
             pids, rss, backend = bench.sample_tree(os.getpid())
@@ -299,6 +303,8 @@ class TestSamplerPrimitives:
     def test_ps_backend_matches_proc_tree(self, monkeypatch):
         """macOS 分支在 Linux 上实测：GNU procps 与 BSD ps 的
         `ps -axo pid=,ppid=,rss=` 输出规格一致（无表头、三列 KB）。"""
+        if os.name == "nt":
+            pytest.skip("POSIX ps backend unavailable on Windows")
         monkeypatch.setenv("T6_SAMPLER", "ps")
         pids, rss, backend = bench.sample_tree(os.getpid())
         assert backend == "ps"
@@ -358,10 +364,16 @@ class TestRunDrainEndToEnd:
         # 「采样器接线正常」不由这里证明——它由 test_queue_counts_reads_db 的
         # 确定性断言 + 下面的 queue_series 非空证明；把宿主时序写进下界就是伪覆盖。
         assert 0 <= r["backlog_peak"] <= 4
-        assert r["peak_tree_mb"] > 0
-        # CH-469：sampler 后端断言平台无关（写死 proc 在 macOS 必红）
-        assert r["sampler"] in ("proc", "ps", "psutil") and r["rss_available"] is True
-        assert r["queue_series"] and r["rss_series"]
+        # Windows 未装 psutil 时驻留列按设计为 n/a；吞吐/失败账目不受影响。
+        if os.name == "nt" and r["sampler"] == "none":
+            assert r["peak_tree_mb"] is None and r["rss_available"] is False
+        else:
+            assert r["peak_tree_mb"] > 0
+            # CH-469：sampler 后端断言平台无关（写死 proc 在 macOS 必红）
+            assert r["sampler"] in ("proc", "ps", "psutil") and r["rss_available"] is True
+        assert r["queue_series"]
+        if r["rss_available"]:
+            assert r["rss_series"]
         # CH-464：小语料 drain 全程 <0.5s，0.1s 采样可能没有落在半排空区间——
         # half_drain_s 允许 None（排队曲线 queue_series 才是硬口径）
         assert r["half_drain_s"] is None or r["half_drain_s"] >= 0

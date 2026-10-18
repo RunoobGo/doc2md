@@ -81,10 +81,9 @@ def _ensure_private_root(root: Path) -> None:
     chmod 失败只告警，不阻断转换。
     """
     root.mkdir(parents=True, exist_ok=True)
-    try:
-        os.chmod(root, 0o700)
-    except OSError as exc:
-        print(f"warning: chmod 700 {root} failed: {type(exc).__name__}", file=sys.stderr)
+    from .security.perms import ensure_private
+    for warning in ensure_private(root, 0o700):
+        print(f"warning: {warning}", file=sys.stderr)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -137,6 +136,8 @@ def build_parser() -> argparse.ArgumentParser:
     cv.add_argument("--follow-symlinks", action="store_true")
     cv.add_argument("--workers", type=int,
                     help="批量进程数（CH-448）；缺省 = [perf].workers（0 自动 min(4, CPU)），1 = 串行")
+    cv.add_argument("--force", action="store_true",
+                    help="允许覆盖库内已有用户编辑（默认 E4091 拒收，产物保持可导出）")
     cv.add_argument("--llm-mode", choices=("offline", "server"),
                     help="LLM 补助实现（CH-456 / T2）：offline = 确定性占位（默认，零网络）；"
                          "server = 本地 llama-server（llm.bind:llm.port）")
@@ -222,7 +223,8 @@ def cmd_serve(args: argparse.Namespace) -> int:
     root = _root(cfg)
     _ensure_private_root(root)                  # M8 任务 6 / CH-485：work/ 权限 700
     from .api import create_app
-    app = create_app(cfg, root)
+    app = create_app(cfg, root, config_path=getattr(args, "config", None),
+                     reload_from_files=True)
     host = args.host or str(config.get(cfg, "api.bind", "127.0.0.1"))
     # CH-473（R5-SEC-2 / D4 闭环）：`--host` 与配置同口径。原实现只校验 TOML 内的
     # api.bind（loopback 检查在 config.validate 里、对 load 的文件生效），一行
@@ -246,8 +248,13 @@ def cmd_serve(args: argparse.Namespace) -> int:
 
 def _cmd_token(args: argparse.Namespace, cfg: dict) -> int:
     from . import auth
+    from .security.perms import ensure_private
     from .storage.db import Store
-    store = Store(_root(cfg) / "state.sqlite")
+    root = _root(cfg)
+    _ensure_private_root(root)
+    store = Store(root / "state.sqlite")
+    for warning in ensure_private(root / "state.sqlite", 0o600):
+        print(f"warning: {warning}", file=sys.stderr)
     try:
         return _token_body(args, cfg, store, auth)
     finally:
@@ -317,7 +324,7 @@ def cmd_backup_restore(args: argparse.Namespace) -> int:
     恢复前必须停止 serve / work；本命令不尝试探测在线进程（跨平台锁的成本
     高于收益，且真实停服流程属 B-10 真机演练）。
     """
-    from .ops.backup import BackupPlan
+    from .ops.backup import BackupBusy, BackupPlan, backup_lock
     cfg = _cfg(args)
     root = _root(cfg)
     dst = Path(args.to).expanduser() if args.to else root / "state.sqlite"
@@ -331,10 +338,15 @@ def cmd_backup_restore(args: argparse.Namespace) -> int:
         cfg=cfg)
     phrase = os.environ.get(args.passphrase_env, "")
     try:
-        plan.restore_safe(Path(args.src).expanduser(), dst, phrase,
-                          force=bool(args.force))
+        with backup_lock(plan.local_dir):
+            plan.restore_safe(Path(args.src).expanduser(), dst, phrase,
+                              force=bool(args.force))
     except FileExistsError as exc:
         print(_jline({"code": "E4001", "message": str(exc)}), file=sys.stderr)
+        return EXIT_USAGE
+    except BackupBusy:
+        print(_jline({"code": "E4001",
+                      "message": "backup/restore already running"}), file=sys.stderr)
         return EXIT_USAGE
     except Exception as exc:                    # noqa: BLE001 — CLI 统一退出码 4
         print(_jline({"code": "E5031",
@@ -410,7 +422,9 @@ def cmd_convert(args: argparse.Namespace) -> int:
     # 章吞吐表）；产物与串行逐字节一致（等价性由门禁把住）。`--workers 1` 退回串行。
     workers = args.workers if args.workers is not None else default_workers(cfg)
     if len(files) > 1 and workers > 1:
-        results = run_batch(files, cfg=cfg, mode=args.mode, out_dir=out, workers=workers)
+        results = run_batch(files, cfg=cfg, mode=args.mode, out_dir=out,
+                            workers=workers, force=bool(args.force),
+                            precheck_edits=True)
         for res in results:
             rc = max(rc, _report(res, as_json=args.json))
         return rc
@@ -419,7 +433,8 @@ def cmd_convert(args: argparse.Namespace) -> int:
     from .pipeline.convert import convert
     for f in files:
         try:
-            res = convert(f, cfg=cfg, mode=args.mode, out_dir=out)
+            res = convert(f, cfg=cfg, mode=args.mode, out_dir=out,
+                          force=bool(args.force), precheck_edits=True)
         except E4221_GateReject as exc:
             print(_jline({"file": f.name, "status": "rejected", "code": exc.code,
                           "gate": _gate_summary(exc.detail or {})}), file=sys.stderr)
@@ -570,7 +585,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
                         rc = max(rc, EXIT_BIZ)
                     continue
                 try:
-                    res = convert(p, cfg=cfg, out_dir=_out(cfg))
+                    res = convert(p, cfg=cfg, out_dir=_out(cfg), precheck_edits=True)
                     save_ir(store, res.ir, meta=res.meta, gate=res.gate)
                     j = sched.submit(res.doc_id, res.source_key)
                     sched.mark(j.job_id, "done")
@@ -622,6 +637,7 @@ def cmd_tokenizer(args: argparse.Namespace) -> int:
 
 # --- doctor ---------------------------------------------------------------------
 def cmd_doctor(args: argparse.Namespace) -> int:
+    from .security.perms import is_private
     cfg = _cfg(args)
     root = _root(cfg)
     # CH-456（T9）：冻结键校验进自检面——配置错误在 doctor 就暴露，不进运行期静默失效
@@ -639,6 +655,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         "root": str(root),
         "root_exists": root.exists(),
         "root_mode": oct(root.stat().st_mode & 0o777) if root.exists() else None,
+        # Windows 的 mode 位不代表 ACL；单列真实私有性，避免「0o777 看着吓人、
+        # 实际 ACL 已收紧」或反过来的误读。
+        "root_private": is_private(root) if root.exists() else None,
         "tokenizer": config.get(cfg, "chunks.tokenizer"),
         "s1_5_sample_pages": config.get(cfg, "s1_5.sample_pages"),
         "shard_mode": config.get(cfg, "s2.mode", "auto"),

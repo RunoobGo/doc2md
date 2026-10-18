@@ -74,6 +74,37 @@ jobs:
         continue-on-error: true
         run: ruff check .
 
+  windows-suite:
+    # CH-486：B-7 的 CI 腿。目标机是 Win11；本作业用 windows-latest 跑同一套
+    # gate + 全量，覆盖 chmod→ACL、junction、文件锁、spawn 进程池等 Ubuntu
+    # 永远看不到的路径。平台专有语义用例在测试内显式 skip（见 gate/full 口径）。
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install (runtime + dev extras)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Merge-gates (Windows)
+        run: python -m pytest -m gate -q --durations=10
+
+      - name: Full suite (Windows)
+        run: python -m pytest -q --durations=15
+
+      - name: doctor self-check (Windows)
+        run: |
+          doc2md doctor
+          doc2md --version
+
   full-suite:
     runs-on: ubuntu-latest
     timeout-minutes: 30

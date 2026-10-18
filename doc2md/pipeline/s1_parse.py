@@ -63,6 +63,7 @@ class Line:
     row: list[str] | None = None            # CH-459：表格行单元格（非 None 即行候选）
     row_explicit: bool = False              # CH-459：行来自真实表格对象（DOCX w:tbl），
                                             # 而非 PDF 几何推断——S3 的防误判守卫只对后者生效
+    table_start: bool = False               # 新表格的首行：S3 据此切开相邻 w:tbl
     level_hint: int | None = None           # CH-459：DOCX Heading 样式显式层级
     has_revision: bool = False              # CH-476（R7-GAP-1）：DOCX 段落/表格行含
                                             # `w:ins` / `w:del` 修订痕迹（正文已按
@@ -409,6 +410,9 @@ class _DocxCtx:
     has_links: bool = True
     has_sdt: bool = False
     has_custom_xml: bool = False
+    has_fields: bool = False       # w:fldSimple（DATE/REF 等域结果）
+    has_smart_tag: bool = False    # w:smartTag 包裹的 run
+    has_textbox: bool = False      # 有文本框时才做全树遍历
     numbering: "_DocxNumbering | None" = None
 
 
@@ -418,6 +422,9 @@ def _docx_ctx(root, numbering=None) -> _DocxCtx:
         has_links=root.find(f".//{_W_NS}hyperlink") is not None,
         has_sdt=root.find(f".//{_W_NS}sdt") is not None,
         has_custom_xml=root.find(f".//{_W_NS}customXml") is not None,
+        has_fields=root.find(f".//{_W_NS}fldSimple") is not None,
+        has_smart_tag=root.find(f".//{_W_NS}smartTag") is not None,
+        has_textbox=root.find(f".//{_W_NS}txbxContent") is not None,
         numbering=numbering)
 
 
@@ -576,7 +583,8 @@ def _docx_para_line(p, d, rels=None, ctx: _DocxCtx | None = None,
     # CH-483（R8-PIPE-2）：只要容器里可能藏着 `w:sdt` / `w:customXml` / 超链接，
     # 或段落本身有修订，就必须走「全部 run」的接受后视图——python-docx 的
     # `p.text`/`p.runs` 只认 `w:p` 直接子级，sdt 内的文本会整块消失。
-    use_all = rev or ctx.has_sdt or ctx.has_custom_xml or ctx.has_links
+    use_all = (rev or ctx.has_sdt or ctx.has_custom_xml or ctx.has_links
+               or ctx.has_fields or ctx.has_smart_tag)
     if use_all:
         runs = _docx_all_runs(p, include_textbox=text_box)
         # `w:del` 里的文本是 `w:delText`，`Run.text` 本就不取 → 拼出来即「接受后」正文
@@ -760,6 +768,20 @@ def _docx_cell_text(tc) -> str:
     return " ".join(parts)
 
 
+def _docx_table_elems(parent, tag: str):
+    """按序产出 `w:tr` / `w:tc`，展开 sdtContent / customXml 包裹层。
+
+    OOXML 允许 `w:sdt` 包裹整行或单元格（重复节控件/内容控件）；只取直接子级
+    会让这些行/格整块消失。递归只沿已知容器向下，不进入单元格正文。
+    """
+    for child in parent:
+        if child.tag == tag:
+            yield child
+        elif child.tag in (f"{_W_NS}sdt", f"{_W_NS}customXml"):
+            content = child.find(f"{_W_NS}sdtContent")
+            yield from _docx_table_elems(content if content is not None else child, tag)
+
+
 def _docx_table_rows(tbl) -> list[tuple[list[str], bool]]:
     """`w:tbl` → (单元格文本行, 该行是否含修订痕迹)；空单元格保留空串以对齐列数。
 
@@ -772,9 +794,9 @@ def _docx_table_rows(tbl) -> list[tuple[list[str], bool]]:
     grid_el = tbl.find(f"{_W_NS}tblGrid")
     grid_n = len(grid_el.findall(f"{_W_NS}gridCol")) if grid_el is not None else 0
     rows: list[tuple[list[str], bool]] = []
-    for tr in tbl.findall(f"{_W_NS}tr"):
+    for tr in _docx_table_elems(tbl, f"{_W_NS}tr"):
         cells: list[str] = []
-        for tc in tr.findall(f"{_W_NS}tc"):
+        for tc in _docx_table_elems(tr, f"{_W_NS}tc"):
             tcPr = tc.find(f"{_W_NS}tcPr")
             span = 1
             cont = False
@@ -861,15 +883,19 @@ def read_docx(path: str | Path, fmt: str | None = None) -> list[RawPage]:
             if child.findall(f".//{_W_NS}br[@{_W_NS}type='page']"):
                 lines.append(Line(text="\x0c", size=0.0))
         else:
-            for cells, rev in _docx_table_rows(child):
+            rows = _docx_table_rows(child)
+            for i, (cells, rev) in enumerate(rows):
                 lines.append(Line(text=" | ".join(cells), row=cells,
-                                  row_explicit=True, has_revision=rev))
+                                  row_explicit=True, has_revision=rev,
+                                  table_start=(i == 0)))
     # CH-485（R9-PIPE-1）：文本框正文不是 body 的直接 w:p；单独产出为段落，
     # 避免宿主段落只得到“前后”或 AlternateContent 双分支重复。
-    for p_el in _docx_textbox_paragraphs(d.element.body):
-        ln = _docx_para_line(_dp.Paragraph(p_el, d), d, ctx=ctx, text_box=True)
-        if ln is not None:
-            lines.append(ln)
+    # 无文本框的文档不做全树遍历（常见路径省一次 O(全部 XML 元素) 扫描）。
+    if ctx.has_textbox:
+        for p_el in _docx_textbox_paragraphs(d.element.body):
+            ln = _docx_para_line(_dp.Paragraph(p_el, d), d, ctx=ctx, text_box=True)
+            if ln is not None:
+                lines.append(ln)
     lines += _docx_notes_lines(d, ctx)
     pages: list[RawPage] = []
     chunk = 40

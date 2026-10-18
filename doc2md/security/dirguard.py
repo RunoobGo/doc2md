@@ -22,6 +22,27 @@ class WalkLimits:
     deadline_seconds: float = 10.0
 
 
+def is_link_like(path: str | os.PathLike) -> bool:
+    """符号链接、Windows junction 及其他 reparse point 的统一判定。
+
+    `Path.is_symlink()` 对 junction 返回 False，而 junction 的 `is_dir()` 为 True；
+    只认 symlink 会让 `follow_symlinks=False` 的目录防护被 junction 绕过，最坏
+    在 `shutil.rmtree` 时递归删掉链接目标。Python 3.12 有 `Path.is_junction()`，
+    3.11 回退到 reparse tag；任何 reparse point 都按链接处理（宁可少扫，不越界）。
+    """
+    p = Path(path)
+    try:
+        if p.is_symlink():
+            return True
+        is_junction = getattr(p, "is_junction", None)
+        if is_junction is not None and is_junction():
+            return True
+        st = os.lstat(p)
+    except OSError:
+        return False
+    return bool(getattr(st, "st_reparse_tag", 0))
+
+
 def walk_limits(cfg: dict, *, follow_symlinks: bool = False) -> WalkLimits:
     """CH-471（SVC-10）：按 [watch] 配置拼 WalkLimits 的唯一构造器。
 
@@ -61,6 +82,11 @@ def guard_walk(root: str | os.PathLike, limits: WalkLimits | None = None) -> Wal
     base = Path(root)
     if not base.is_dir():
         raise E4133_DirTooWide(f"not a directory: {root}")
+    if lim.deadline_seconds <= 0:
+        # 零/负预算 = 明确「不扫」；Windows 的 monotonic 分辨率不应让 0 秒
+        # 偶尔跑完全程（同一配置在不同平台语义必须一致）。
+        res.truncated = True
+        return res
     stack: list[tuple[Path, int]] = [(base, 0)]
     seen_real: set[str] = {os.path.realpath(base)}
 
@@ -88,7 +114,7 @@ def guard_walk(root: str | os.PathLike, limits: WalkLimits | None = None) -> Wal
                     if lim.skip_hidden and e.name.startswith("."):
                         res.skipped_hidden += 1
                         continue
-                    is_link = e.is_symlink()
+                    is_link = is_link_like(e.path)
                     if is_link and not lim.follow_symlinks:
                         res.skipped_symlinks += 1
                         continue
@@ -109,6 +135,9 @@ def guard_walk(root: str | os.PathLike, limits: WalkLimits | None = None) -> Wal
                             follow_symlinks=False)
                         if is_dir:
                             if depth + 1 > lim.max_depth:
+                                # 深度截断也是「没扫完」：调用方不能把结果当全量清单。
+                                res.truncated = True
+                                res.hit_depth = max(res.hit_depth, depth + 1)
                                 continue
                             rp = os.path.realpath(e.path)
                             if rp in seen_real:

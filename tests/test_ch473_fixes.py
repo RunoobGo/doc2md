@@ -704,7 +704,8 @@ def test_svc5_write_override_fsyncs_file_and_dir(tmp_path, monkeypatch):
     merged["logs"]["rotate_mb"] = 12
     diff = api.write_override(path, merged, base)
     assert diff == {"logs": {"rotate_mb": 12}}
-    assert len(calls) >= 2, "内容与目录都应 fsync"
+    # Windows 无法以 os.open 打开目录做 fsync；文件内容 fsync 仍必须发生。
+    assert len(calls) >= (1 if os.name == "nt" else 2), "内容与目录都应 fsync"
     assert json.loads(path.read_text(encoding="utf-8")) == {"logs": {"rotate_mb": 12}}
     monkeypatch.undo()
 
@@ -1262,6 +1263,17 @@ def test_x17_batch_returns_with_all_pool_workers_reaped(monkeypatch):
     # manager 线程抢先回收都算达成）、WNOHANG=0 = 仍活着（继续等）。
     import errno
     import time as _time
+
+    if os.name == "nt":
+        # Windows 没有 WNOHANG / waitpid 语义；Process.is_alive() 在此平台可靠。
+        deadline = _time.monotonic() + 10
+        while _time.monotonic() < deadline:
+            if all(not p.is_alive() for s in worker_snapshots for p in s):
+                break
+            _time.sleep(0.1)
+        stuck = [p.pid for s in worker_snapshots for p in s if p.is_alive()]
+        assert not stuck, f"batch 返回后 10s 内本池 worker 未被回收：{stuck}（X-16 回归）"
+        return
 
     def _reaped(pid: int) -> bool:
         try:

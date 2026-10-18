@@ -113,7 +113,22 @@ _ARTIFACT_META_KEYS = {
 _ARTIFACT_META_EXTRA = {"shard_stats", "llm_prompt", "notes"}
 
 
+# 固定数量的分片锁：按 doc 串行、不同 doc 可并发，且不随文档数无限增长。
+_REBUILD_LOCKS = tuple(threading.Lock() for _ in range(64))
+
+
+def _doc_lock(doc_id: str) -> threading.Lock:
+    return _REBUILD_LOCKS[hash(doc_id) % len(_REBUILD_LOCKS)]
+
+
 def _rebuild_artifact(store: Store, doc_id: str, cfg: dict, root: Path) -> Path | None:
+    """同进程内按 doc 串行重建；避免两个 PATCH 并发时旧 revision 后写覆盖新 zip。"""
+    with _doc_lock(doc_id):
+        return _rebuild_artifact_body(store, doc_id, cfg, root)
+
+
+def _rebuild_artifact_body(store: Store, doc_id: str, cfg: dict,
+                           root: Path) -> Path | None:
     """CH-485（R9-SVC-2）：从 DB 重建 zip；旧文档（gate_json 为空）返回 None。
 
     DB 已是完整事实源：blocks 保存 font/links/provenance，docs 保存 package 实际
@@ -153,13 +168,27 @@ def _rebuild_artifact(store: Store, doc_id: str, cfg: dict, root: Path) -> Path 
         link_internal=str(config.get(cfg, "s4.link_internal", "plain")),
     )
     out_dir = config.path_setting(cfg, "paths.out", root, str(root / "out"))
-    return package(ir, md, meta, Path(out_dir), cfg, gate=gate)
+    out = package(ir, md, meta, Path(out_dir), cfg, gate=gate)
+    # package 期间文档可能被删除：提交后的删除路径会再 purge 一次，这里也做
+    # 发布后复核，避免返回一个已无库行可寻址的 zip（FR-128）。
+    try:
+        alive = get_doc(store, doc_id) is not None
+    except Doc2mdError:
+        alive = False
+    if not alive:
+        try:
+            out.unlink()
+        except OSError:
+            pass
+        return None
+    return out
 
 
-def create_app(cfg: dict | None = None, root: Path | None = None):
+def create_app(cfg: dict | None = None, root: Path | None = None,
+               config_path: str | None = None, reload_from_files: bool = False):
     from flask import Flask, Response, jsonify, request
 
-    cfg = cfg or config.load()
+    cfg = cfg or config.load(config_path)
     root = Path(root) if root else config.path_setting(cfg, "paths.root", ".")
     root.mkdir(parents=True, exist_ok=True)
     override = root / "settings_override.json"
@@ -199,7 +228,9 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
     # （只记真正被改过的键，不让全量默认值冻结进去、挡住日后升级）。
     app.config["doc2md"] = {"cfg": cfg, "store": store, "root": root, "sched": sched,
                             "writer": writer, "cfg_lock": threading.Lock(),
-                            "cfg_baseline": cfg_baseline}
+                            "cfg_baseline": cfg_baseline,
+                            "config_path": config_path,
+                            "reload_from_files": bool(reload_from_files)}
 
     def cur() -> dict:
         return app.config["doc2md"]["cfg"]
@@ -306,7 +337,11 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
         since_seq = store.q1("SELECT COALESCE(MAX(id),0) AS m FROM deletions")["m"]
         b = body()
         path = b.get("path", "")
+        if not isinstance(path, str):
+            raise E4001_BadRequest("path must be a string")
         idem = request.headers.get("Idempotency-Key") or b.get("idempotency_key")
+        if idem is not None and not isinstance(idem, str):
+            raise E4001_BadRequest("idempotency_key must be a string")
         # CH-471（STOR-5）：重复转换默认护编辑，force=true 才允许覆盖已有编辑
         # CH-473（R5-SVC-6）：`bool(b.get("force"))` 把 JSON 字符串 "false"/"no"/"0"
         # 都判真——字符串形态的假值会意外放行「覆盖用户编辑」。只认布尔 true 与
@@ -331,7 +366,10 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
             lim = walk_limits(cur())
             # CH-469（O-10）：走 scan_or_raise——目录没扫完（超时）必须 413/E4133，
             # 不能把半截清单当完整结果入队（用户视角是「目录里明明有，队列里没有」）。
-            files = [Path(f) for f in scan_or_raise(p, lim)]
+            # 与 CLI 同口径：目录里的 README/图片不是输入，直接忽略；否则整批
+            # 第一个非 PDF/DOCX 就会 E4151，导致 0 入队。
+            files = [Path(f) for f in scan_or_raise(p, lim)
+                     if Path(f).suffix.lower() in (".pdf", ".docx")]
         elif p.is_file():
             files = [p]
         else:
@@ -383,7 +421,8 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
 
         def _finish_one(f, ir, doc_id, source_key, since, *, meta=None, gate=None):
             j = sched.submit(doc_id, source_key, idem_key=_idem_for(f),
-                             del_seq=since)
+                             source_path=str(f), mode=mode, del_seq=since,
+                             force=force)
             # R6-SVC-3（CH-475，决策 D1）：幂等命中 / 附着既有作业时，该 doc_id 已由
             # 在途或既往作业负责落库——不再重跑 save_ir。既省一次全量写（性能优先），
             # 又杜绝「对已 done 作业再 mark 致终态翻转 / 对已编辑文档误触 E4091 报
@@ -495,6 +534,9 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
                         j = sched.submit_rejected(f.name, r.get("code", "E4221"),
                                                   {"reason": r.get("message", "")},
                                                   idem_key=_idem_for(f))
+                        _emit(store, "job_rejected", None, j.job_id,
+                              {"code": r.get("code", "E4221"), "source": "api_batch"},
+                              logw())
                         out.append({"file": f.name, "job_id": j.job_id,
                                     "status": "rejected", "code": r.get("code", "E4221")})
                     elif r["status"] != "ok":
@@ -520,11 +562,14 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
                 # 客户端以为切了档，实际跑的是 `s2.mode` 默认档。
                 res = convert(f, cfg=cur(), mode=mode,
                               out_dir=config.path_setting(cur(), "paths.out", root,
-                                                          str(root / "out")))
+                                                          str(root / "out")),
+                              force=force)
             except Doc2mdError as e:
                 if e.code == "E4221":
                     j = sched.submit_rejected(f.name, e.code, e.detail,
                                               idem_key=_idem_for(f))
+                    _emit(store, "job_rejected", None, j.job_id,
+                          {"code": e.code, "source": "api_sync"}, logw())
                     out.append({"file": f.name, "job_id": j.job_id,
                                 "status": "rejected", "code": e.code})
                     continue
@@ -834,10 +879,23 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
         # CH-469（O-15）：reload 的输入可以是人手改过的 doc2md.toml —— 校验失败保持
         # 旧配置继续服务并回 400，而不是让半坏配置接管（或逃逸成 500）。
         try:
-            merged = config.load()
+            if app.config["doc2md"]["reload_from_files"]:
+                merged = config.load(app.config["doc2md"].get("config_path"))
+            else:
+                # 程序化 create_app(cfg) / 测试没有显式文件来源：以启动基线为
+                # 基准重放 override。退回 config.load() 会按当前 cwd 重新找
+                # doc2md.toml，把调用方传入的 cfg 静默换掉（测试与嵌入方必现）。
+                merged = copy.deepcopy(app.config["doc2md"]["cfg_baseline"])
             if override.is_file():
                 _deep(merged, json.loads(override.read_text(encoding="utf-8")))
             config.validate(merged)
+            # store/writer/root 闭包在启动时绑定；运行期改 paths.root 会让请求读写
+            # 新根、后台仍用旧根。数据边界变更必须重启，不能靠 reload 静默切换。
+            new_root = Path(config.path_setting(merged, "paths.root", root)).resolve()
+            if new_root != Path(root).resolve():
+                raise E4001_BadRequest(
+                    "paths.root changes require a restart",
+                    detail={"current": str(root), "requested": str(new_root)})
             # R6-SVC-1（CH-475）：reload 与 PUT /settings 同口径守运行期不可变红线键。
             # 原实现只在 PUT 调 check_runtime_immutable——直接改 doc2md.toml 再 reload
             # 即可绕过守卫关掉 run.offline_assert / api.allow_remote_bind，等于离线断言
@@ -952,10 +1010,8 @@ def write_override(path: Path, merged: dict, baseline: dict) -> dict:
         fh.write(json.dumps(diff, ensure_ascii=False, indent=2))
         fh.flush()
         os.fsync(fh.fileno())                   # R5-SVC-5：内容先落盘再 rename
-    try:
-        tmp.chmod(0o600)
-    except OSError:
-        pass                      # 非 POSIX 平台 chmod 近似 no-op（见 ops/backup 同口径）
+    from .security.perms import ensure_private
+    ensure_private(tmp, 0o600)    # Windows 走 ACL，不把 chmod 的 no-op 当成功
     tmp.replace(path)
     _fsync_dir(path.parent)                     # R5-SVC-5：目录项抗掉电
     return diff

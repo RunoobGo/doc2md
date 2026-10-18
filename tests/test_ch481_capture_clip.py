@@ -122,13 +122,24 @@ def test_clip_does_not_touch_owned_logs(tmp_path):
 
 
 @pytest.mark.gate
-def test_clip_oserror_recorded_not_raised(tmp_path):
+def test_clip_oserror_recorded_not_raised(tmp_path, monkeypatch):
     """单档截断失败：记 `error` 字段、不抛出、不拖累同目录其他档。
 
-    用「目录占住捕获档名」构造确定性失败——不依赖 chmod/uid，任何解释器与 CI 档位同结果。
+    直接在 `_clip_to_tail` 上注入 OSError——不依赖「目录 stat 大小」这类
+    平台相关前提（Windows 目录 st_size 为 0，原夹具不会触发截断分支）。
     """
-    (tmp_path / "launchd-serve.err").mkdir()
+    from doc2md.ops import logging as logmod
+
+    (tmp_path / "launchd-serve.err").write_bytes(b"locked\n")
     good = _fill(tmp_path / "launchd-daily.err", 200_000)
+    real = logmod._clip_to_tail
+
+    def flaky(path, tail_bytes):
+        if Path(path).name == "launchd-serve.err":
+            raise OSError("sharing violation")
+        return real(path, tail_bytes)
+
+    monkeypatch.setattr(logmod, "_clip_to_tail", flaky)
     ev = {e["name"]: e for e in bound_capture_files(tmp_path, 1, 200)}
 
     assert "error" in ev["launchd-serve.err"], ev

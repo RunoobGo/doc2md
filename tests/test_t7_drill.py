@@ -10,6 +10,7 @@ NFR-20：报告与断言只涉及表名、行数、指纹前缀；正文唯一�
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 
 import pytest
@@ -68,7 +69,8 @@ def test_drill_full_loop_succeeds(drill_env):
     rep = run_drill(cfg, root)
     assert rep.ok is True
     assert rep.match is True
-    assert [s.name for s in rep.steps] == STEP_ORDER
+    # work_dir_mode 是「权限位不可表达」时的附加证据步骤，不是固定闭环步骤。
+    assert [s.name for s in rep.steps if s.name != "work_dir_mode"] == STEP_ORDER
     assert all(s.ok for s in rep.steps)
     # 13 张表口径：FTS5 虚拟表本身被 _tables 过滤，但其影子表在列。
     # CH-476（R7-STOR-1）新增 search_map → 备份/恢复演练动态枚举表，新表自动纳入。
@@ -115,7 +117,11 @@ def test_drill_external_container_discipline(drill_env):
     assert len(encs) == 1
     enc = encs[0]
     assert enc.read_bytes()[:len(MAGIC_V2)] == MAGIC_V2
-    assert oct(enc.stat().st_mode & 0o777) == "0o600"
+    from doc2md.security.perms import is_private
+    if os.name == "nt":
+        assert is_private(enc)
+    else:
+        assert oct(enc.stat().st_mode & 0o777) == "0o600"
 
 
 def test_drill_report_leaks_no_plaintext(drill_env):

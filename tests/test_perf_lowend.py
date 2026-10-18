@@ -137,7 +137,7 @@ def test_batch_reports_gate_reject_per_file(tmp_path, cfg):
 _HANG_S = 6
 
 
-def _hanging_convert(path, cfg, mode, out):
+def _hanging_convert(path, cfg, mode, out, *args, **kwargs):
     """模块级 worker：进程池按引用 pickle，闭包传不过去。模拟损坏 PDF 让解析栈永挂。"""
     import time
     time.sleep(_HANG_S)

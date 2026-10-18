@@ -1,0 +1,16 @@
+# Golden fixtures are byte-exact test inputs. Never apply EOL conversion or
+# text filters: the manifest pins sha256, and a CRLF checkout silently changes
+# every PDF/JSON fixture on Windows (core.autocrlf=true).
+tests/golden/** -text
+tests/golden/dirs/symlink_loop/* -text
+
+# Binary document and container formats.
+*.pdf binary
+*.docx binary
+*.bin binary
+*.zip binary
+*.sqlite binary
+*.sqlite-wal binary
+*.sqlite-shm binary
+*.enc binary
+*.gguf binary

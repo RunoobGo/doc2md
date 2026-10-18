@@ -89,6 +89,11 @@ class StabilityTracker:
             self.first_seen.pop(key, None)
             return False
         cur = Stamp(st.st_size, st.st_mtime)
+        if self.stable_seconds <= 0:
+            # 显式零窗口 = 首次观察即稳定；不能依赖 wall-clock - mtime 的
+            # 符号（Windows 上 mtime 可能略超前，导致 0 秒窗口永远不触发）。
+            self.enqueued[key] = cur
+            return True
         done = self.enqueued.get(key)
         if done is not None:
             if done.size == cur.size and done.mtime == cur.mtime:

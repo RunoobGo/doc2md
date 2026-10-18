@@ -438,6 +438,11 @@ def delete_doc(store: Store, doc_id: str, actor: str, root: Path | None = None, 
                    " VALUES (?,?,?,?,?,?)",
                    (doc_id, src["source_key"], actor, now_iso(), "doc",
                     json.dumps(cascade, ensure_ascii=False)))
+    # 提交后再清一次：转换/重建在第一次 purge 与本次提交之间可能刚发布
+    # out/{doc_id}.zip。此时库行已不存在，孤儿产物不会再被任何路径引用；
+    # 第二次定向删除把窗口收窄到「提交后仍并发写」，失败也不翻转删除结果。
+    if files_removed is None:
+        purge_files(doc_id, root, out_dir=out_dir, tmp_dir=tmp_dir)
     return {"doc_id": doc_id, "deleted": counts, "files": removed}
 
 
@@ -480,6 +485,8 @@ def delete_source(store: Store, source_key: str, actor: str, root: Path | None =
                    (f"source:{source_key}", source_key, actor, now_iso(), "source",
                     json.dumps({"docs": len(ids), "files": len(removed)},
                                ensure_ascii=False)))
+    # 同 delete_doc：提交后补一次定向清扫，收窄「purge → 提交」窗口内新发布的产物。
+    purge_many(ids, root, out_dir=out_dir, tmp_dir=tmp_dir)
     return {"source_key": source_key, "docs": ids, "files": removed}
 
 

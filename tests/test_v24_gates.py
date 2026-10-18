@@ -216,6 +216,8 @@ def test_dirguard_symlink_loop_bounded(golden_dir):
         if os.environ.get("DOC2MD_ALLOW_MISSING_GOLDEN") == "1":
             pytest.skip(msg)
         pytest.fail(msg)
+    if os.name == "nt" and not any((root / n).is_symlink() for n in ("A", "B")):
+        pytest.skip("Windows checkout without symlink support (core.symlinks=false)")
     t0 = time.monotonic()
     res = guard_walk(root, WalkLimits(follow_symlinks=False))
     assert time.monotonic() - t0 < 10

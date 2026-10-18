@@ -83,7 +83,7 @@ def fingerprint(db_path: Path) -> dict:
     原像。若将来需要防篡改，应改用带键 MAC（或在对行哈希排序后取异或等抗加性的组合）。
     """
 
-    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    con = sqlite3.connect(Path(db_path).resolve().as_uri() + "?mode=ro", uri=True)
     try:
         out: dict[str, dict] = {}
         for name in _tables(con):
@@ -106,7 +106,7 @@ def fingerprint(db_path: Path) -> dict:
 
 
 def integrity_check(db_path: Path) -> str:
-    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    con = sqlite3.connect(Path(db_path).resolve().as_uri() + "?mode=ro", uri=True)
     try:
         return str(con.execute("PRAGMA integrity_check").fetchone()[0])
     except sqlite3.DatabaseError as exc:

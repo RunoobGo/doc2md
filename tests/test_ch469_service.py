@@ -333,9 +333,9 @@ def test_delete_source_purges_with_a_single_walk(tmp_cfg, tmp_path):
     walks: list[int] = []
     real = repo.purge_many
 
-    def spy(ids, r):
+    def spy(ids, r, **kw):
         walks.append(len(list(ids)))
-        return real(ids, r)
+        return real(ids, r, **kw)
 
     repo.purge_many = spy
     try:
@@ -343,7 +343,8 @@ def test_delete_source_purges_with_a_single_walk(tmp_cfg, tmp_path):
     finally:
         repo.purge_many = real
 
-    assert walks == [2], walks                    # 一次调用、批内两个 doc
+    # 提交前后各一次定向清扫（收窄产物复活窗口）；每次仍是一次遍历覆盖批内全部 doc。
+    assert walks and all(n == 2 for n in walks), walks
     assert not list((root / "out").glob("*"))     # 产物删净
     assert store.q1("SELECT COUNT(*) c FROM docs")["c"] == 0
     assert len(out["files"]) == 2

@@ -11,6 +11,8 @@ import os
 import random
 import re
 import shutil
+import sys
+import time
 from pathlib import Path
 
 # 第三方库
@@ -41,6 +43,15 @@ SEED = 20241013
 # 样本集换机/换目录后生成器直接往别人机器上写）。可用 --golden 覆盖。
 GOLDEN_DIR = Path(__file__).resolve().parent / "golden"
 FORCE_REGEN = False
+
+# Windows cp936 控制台无法编码 ✓/⊘ 等标记；打印失败不能拖垮样本生成。
+for _stream in (sys.stdout, sys.stderr):
+    _reconfigure = getattr(_stream, "reconfigure", None)
+    if _reconfigure is not None:
+        try:
+            _reconfigure(errors="replace")
+        except (ValueError, OSError):
+            pass
 
 # 注册 CJK CID 字体（TTC 是 CFF outlines，reportlab TTFont 不支持，退到 CID 方案）
 pdfmetrics.registerFont(UnicodeCIDFont('STSong-Light'))
@@ -82,6 +93,18 @@ def print_product(path: Path, desc: str = ""):
     size = path.stat().st_size if path.exists() else 0
     pages = pdf_pages(path) if path.suffix.lower() == ".pdf" else "-"
     print(f"  ✓ {path.name:40s} {size:>10,} bytes  pages={pages}  {desc}")
+
+
+def _replace_retry(src: Path, dst: Path, attempts: int = 5) -> None:
+    """Windows 杀毒/索引器短暂占用目标时退避，避免黄金生成随机失败。"""
+    for i in range(attempts):
+        try:
+            src.replace(dst)
+            return
+        except PermissionError:
+            if i == attempts - 1:
+                raise
+            time.sleep(0.05)
 
 
 # ============================================================================
@@ -498,7 +521,7 @@ def freeze_docx(path: Path) -> None:
             info.compress_type = _zf.ZIP_DEFLATED
             info.external_attr = 0o600 << 16
             dst.writestr(info, data)
-    tmp.replace(path)
+    _replace_retry(tmp, path)
 
 
 def make_docx_samples():

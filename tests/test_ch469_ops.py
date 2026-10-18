@@ -665,6 +665,7 @@ def _chmod_noop(self, mode, *a, **kw):
     return None
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows privacy is enforced by DACL, not chmod")
 def test_mode_warnings_when_chmod_raises(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "chmod", _chmod_raises)
     plan = bk.BackupPlan(local_dir=tmp_path / "b", external_dir=None)
@@ -672,6 +673,7 @@ def test_mode_warnings_when_chmod_raises(tmp_path, monkeypatch):
     assert plan.mode_warnings and "failed" in plan.mode_warnings[0]
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode-bit check; Windows uses DACL")
 def test_mode_warnings_when_volume_ignores_permissions(tmp_path, monkeypatch):
     """chmod 成功但目录仍是 755（SMB / exFAT / NFS noacl）= M8「work/ 700」前提失效。"""
     target = tmp_path / "work"
@@ -683,8 +685,10 @@ def test_mode_warnings_when_volume_ignores_permissions(tmp_path, monkeypatch):
 
 
 def test_drill_surfaces_mode_warnings(tmp_path, monkeypatch):
+    from doc2md.security import perms
     monkeypatch.setenv("DOC2MD_BACKUP_PASSPHRASE", PASS)
-    monkeypatch.setattr(Path, "chmod", _chmod_raises)
+    monkeypatch.setattr(perms, "ensure_private",
+                        lambda *a, **k: ["simulated permission failure"])
     root = tmp_path / "work"
     root.mkdir()
     _mini_db(root / "state.sqlite")
@@ -699,7 +703,9 @@ def test_cron_report_surfaces_mode_warnings(tmp_cfg, tmp_path, monkeypatch):
     root = Path(tmp_cfg["paths"]["root"])
     root.mkdir(parents=True, exist_ok=True)
     Store(root / "state.sqlite").close()
-    monkeypatch.setattr(Path, "chmod", _chmod_raises)
+    from doc2md.security import perms
+    monkeypatch.setattr(perms, "ensure_private",
+                        lambda *a, **k: ["simulated permission failure"])
     rep = cron.run(tmp_cfg, root, mode="daily")
     steps = json.dumps(rep.steps, ensure_ascii=False, default=str)
     assert "work_dir_mode" in steps, rep.steps
@@ -795,7 +801,9 @@ def test_external_write_fsyncs_and_chmod_failure_is_recorded(tmp_path, monkeypat
     # CH-485：快照自身也 fsync（.part→rename），外置容器同样 fsync。
     assert len(calls) >= 1, "外置容器写完必须 fsync"
 
-    monkeypatch.setattr(Path, "chmod", _chmod_raises)
+    from doc2md.security import perms
+    monkeypatch.setattr(perms, "ensure_private",
+                        lambda *a, **k: ["simulated permission failure"])
     plan2 = bk.BackupPlan(local_dir=tmp_path / "b2", external_dir=tmp_path / "e2")
     plan2.to_external(plan2.snapshot(db), PASS)
     assert plan2.mode_warnings, "600 落不上也要如实记账"

@@ -212,7 +212,9 @@ def test_reload_rejects_runtime_immutable_change(api_client, monkeypatch):
 
     bad = copy.deepcopy(baseline)
     bad.setdefault("run", {})["offline_assert"] = not base_val
-    # reload 走 config.load()（读磁盘）；注入被改过的配置模拟「人手改 toml 后 reload」
+    # reload 走 config.load()（读磁盘）；注入被改过的配置模拟「人手改 toml 后 reload」。
+    # 程序化 create_app(cfg) 默认按启动基线 reload，显式打开文件来源以覆盖该路径。
+    monkeypatch.setitem(app.config["doc2md"], "reload_from_files", True)
     monkeypatch.setattr(config, "load", lambda *a, **k: bad)
 
     r = client.post("/system/reload", headers={"X-Doc2md-Token": tokens["admin"]})

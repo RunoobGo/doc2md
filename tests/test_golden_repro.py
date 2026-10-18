@@ -87,6 +87,9 @@ def test_shipped_symlink_loop_is_relative(golden_dir):
         _missing("dirs/symlink_loop missing")
     names = {p.name for p in loop.iterdir()}
     assert {"A", "B"} <= names, "循环链接样本缺失"
+    if os.name == "nt" and not all((loop / n).is_symlink() for n in ("A", "B")):
+        pytest.skip("Windows checkout without symlink support (core.symlinks=false); "
+                    "run with Developer Mode or verify on POSIX")
     for n in ("A", "B"):
         p = loop / n
         assert p.is_symlink(), f"{n} 不再是符号链接"
@@ -101,6 +104,17 @@ def test_generator_has_no_absolute_output_path():
     assert 'GOLDEN_DIR = Path("/' not in text, "生成器输出目录又被写死成绝对路径"
 
 
+def _accessible(path: Path) -> Path:
+    """Windows 未启用 LongPathsEnabled 时，用 `\\\\?\\` 前缀访问 >260 字符的黄金路径。"""
+    if path.is_file():
+        return path
+    if os.name == "nt":
+        absolute = os.path.abspath(str(path))
+        if len(absolute) >= 260:
+            return Path(chr(92) * 2 + "?" + chr(92) + absolute)
+    return path
+
+
 def test_shipped_manifest_hashes_match_files(golden_dir):
     """MANIFEST 的 sha256 绑定必须是真的：逐个可复核的条目全查
     （只容忍 CH-443 规定省略的 bigfile.bin——分发包不内置 120MB 资产）。"""
@@ -111,7 +125,7 @@ def test_shipped_manifest_hashes_match_files(golden_dir):
     assert entries, "MANIFEST 为空"
     checked = 0
     for e in entries:
-        p = golden_dir / e["path"]
+        p = _accessible(golden_dir / e["path"])
         if not p.is_file():
             assert e["path"] == "bigfile.bin", f"清单声明却缺失：{e['path']}"
             continue

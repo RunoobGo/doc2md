@@ -23,6 +23,7 @@ from . import PIPELINE_VERSION, config
 from .ops.backup import BackupBusy, BackupPlan, backup_lock
 from .ops.drill import DRILL_DIR_NAME
 from .ops.logging import RotatingJsonlWriter, bound_capture_files, capture_budget
+from .security.dirguard import is_link_like
 from .storage.db import Store, now_iso
 
 
@@ -90,7 +91,12 @@ def sweep_tmp(cfg: dict, root: Path) -> int:
             except OSError:
                 continue              # 取不到 mtime（竞态删除中）——按在途处理
         try:
-            shutil.rmtree(p) if p.is_dir() else p.unlink()
+            if is_link_like(p):
+                # Windows junction 的 is_dir() 为 True；rmtree 会进入目标递归删除。
+                # 只移除链接本身（rmdir 对目录链接/junction 生效）。
+                p.rmdir() if p.is_dir() else p.unlink()
+            else:
+                shutil.rmtree(p) if p.is_dir() else p.unlink()
             cleaned += 1
         except OSError:
             pass
@@ -153,16 +159,24 @@ def _run_backup(plan: BackupPlan, cfg: dict, root: Path, mode: str,
                     rep.add("external_backup", code=exc.code, message=exc.message,
                             ok=False)
                     rep.ok = False
+                except Exception as exc:       # noqa: BLE001 — U 盘拔出/AV 占用/认证失败
+                    rep.add("external_backup", error=type(exc).__name__, ok=False)
+                    rep.ok = False
 
-        removed = plan.rotate(include_external=(mode == "weekly" and external_rotatable),
-                              keep_newest=True)
-        # CH-485（R9-OPS-1）：删前/恢复前快照与 state-* 同轮清理；沿用
-        # 既有 rotation 步骤名，避免改变附录 E 的 10 步契约。
-        pre_removed = plan.rotate_predelete()
-        rep.add("rotation", removed=[str(p) for p in removed],
-                predelete_removed=[str(p) for p in pre_removed],
-                external_rotation=("done" if mode == "weekly" and external_rotatable
-                                   else "skipped"))
+        try:
+            removed = plan.rotate(
+                include_external=(mode == "weekly" and external_rotatable),
+                keep_newest=True)
+            # CH-485（R9-OPS-1）：删前/恢复前快照与 state-* 同轮清理；沿用
+            # 既有 rotation 步骤名，避免改变附录 E 的 10 步契约。
+            pre_removed = plan.rotate_predelete()
+            rep.add("rotation", removed=[str(p) for p in removed],
+                    predelete_removed=[str(p) for p in pre_removed],
+                    external_rotation=("done" if mode == "weekly" and external_rotatable
+                                       else "skipped"))
+        except Exception as exc:               # noqa: BLE001 — 单个 unlink 失败不得中止后续步骤
+            rep.add("rotation", error=type(exc).__name__, ok=False)
+            rep.ok = False
 
 
 def run(cfg: dict | None = None, root: Path | None = None, mode: str = "daily",
@@ -207,6 +221,9 @@ def run(cfg: dict | None = None, root: Path | None = None, mode: str = "daily",
             rep.add("local_snapshot", skipped=str(exc))
             rep.add("rotation", external_rotation="skipped",
                     predelete_removed=[])
+        except Exception as exc:               # noqa: BLE001 — 备份失败不得吞掉后续 10 步
+            rep.add("local_snapshot", error=type(exc).__name__, ok=False)
+            rep.ok = False
     # 4) tmp 清理（服务启动同样执行一次，见 api.create_app）
     cleaned = sweep_tmp(cfg, root)
     rep.add("tmp_clean", removed=cleaned)

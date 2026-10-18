@@ -74,6 +74,33 @@ def test_e4091_rebuild_restores_edited_zip(api_client, headers, saved_doc,
     assert marker in md, "E4091 后必须从 DB 编辑内容重建 zip"
 
 
+@pytest.mark.gate
+def test_convert_precheck_refuses_to_overwrite_edited_artifact(
+        tmp_path, golden_dir, tmp_cfg, small_pdf):
+    """CLI/watch 没有 save_ir 的事后补偿：解析前必须拒绝覆盖已编辑文档的 zip。"""
+    from doc2md.errors import E4091_DocOverwrite
+    from doc2md.pipeline.convert import convert
+    from doc2md.storage.db import Store
+
+    root = Path(tmp_cfg["paths"]["root"])
+    out = tmp_path / "out"
+    res = convert(small_pdf, cfg=tmp_cfg, out_dir=out)
+    store = Store(root / "state.sqlite")
+    try:
+        save_ir(store, res.ir, meta=res.meta, gate=res.gate)
+        with store.tx() as tx:
+            tx.execute("UPDATE blocks SET revision=2 WHERE doc_id=?", (res.doc_id,))
+    finally:
+        store.close()
+
+    with pytest.raises(E4091_DocOverwrite):
+        convert(small_pdf, cfg=tmp_cfg, out_dir=out, precheck_edits=True)
+    # 显式 force 仍是逃生门。
+    forced = convert(small_pdf, cfg=tmp_cfg, out_dir=out, force=True,
+                     precheck_edits=True)
+    assert forced.zip_path and forced.zip_path.exists()
+
+
 def test_package_is_atomic(tmp_path, golden_dir, cfg):
     from doc2md.pipeline.convert import convert
     res = convert(golden_dir / "small_3p.pdf", cfg=cfg, out_dir=tmp_path)

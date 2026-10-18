@@ -1108,8 +1108,10 @@ def test_ops2_cron_report_filename_uses_utc_date(tmp_cfg, monkeypatch):
     from datetime import datetime, timezone
 
     from doc2md import cron
-    monkeypatch.setenv("TZ", "Pacific/Kiritimati")     # UTC+14：本地日期最易超前一天
-    time.tzset()
+    has_tzset = hasattr(time, "tzset")
+    if has_tzset:
+        monkeypatch.setenv("TZ", "Pacific/Kiritimati")   # UTC+14：本地日期最易超前一天
+        time.tzset()
     try:
         root = _root_of(tmp_cfg)
         root.mkdir(parents=True, exist_ok=True)
@@ -1117,8 +1119,9 @@ def test_ops2_cron_report_filename_uses_utc_date(tmp_cfg, monkeypatch):
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
         assert list((root / "reports").glob(f"cron-daily-{stamp}.json"))
     finally:
-        monkeypatch.delenv("TZ", raising=False)
-        time.tzset()
+        if has_tzset:
+            monkeypatch.delenv("TZ", raising=False)
+            time.tzset()
 
 
 # --- R7-GAP-1：DOCX 修订痕迹按「接受后」口径提取（决策 D4） ----------------

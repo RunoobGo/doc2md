@@ -57,15 +57,29 @@ class RotatingJsonlWriter:
 
     def _rotate(self) -> None:
         self._fh.close()
-        oldest = self.dir / f"{self.stem}.jsonl.{self.rotate_keep}"
-        if oldest.exists():
-            oldest.unlink()
-        for i in range(self.rotate_keep - 1, 0, -1):
-            src = self.dir / f"{self.stem}.jsonl.{i}"
-            if src.exists():
-                src.replace(self.dir / f"{self.stem}.jsonl.{i + 1}")
-        if self._path.exists():
-            self._path.replace(self.dir / f"{self.stem}.jsonl.1")
+        try:
+            oldest = self.dir / f"{self.stem}.jsonl.{self.rotate_keep}"
+            if oldest.exists():
+                oldest.unlink()
+            for i in range(self.rotate_keep - 1, 0, -1):
+                src = self.dir / f"{self.stem}.jsonl.{i}"
+                if src.exists():
+                    src.replace(self.dir / f"{self.stem}.jsonl.{i + 1}")
+            if self._path.exists():
+                self._path.replace(self.dir / f"{self.stem}.jsonl.1")
+        except OSError:
+            # 另一个进程（常驻 work 与手动 work --once）仍持有句柄时，Windows
+            # 的 rename 会 PermissionError。退化为「就地截断保尾」：不丢进程、
+            # 不让日志无界增长；代价是这一轮没有 .1 历史副本。
+            self._fh = open(self._path, "ab")
+            try:
+                _clip_to_tail(self._path, max(1, self.rotate_bytes // 2))
+            except OSError:
+                pass
+            self._size = self._path.stat().st_size if self._path.exists() else 0
+            self._day = self._utc_day()
+            self.rotations += 1
+            return
         self._day = self._utc_day()
         self._fh = open(self._path, "ab")
         self._size = 0

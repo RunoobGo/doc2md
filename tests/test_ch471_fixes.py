@@ -610,6 +610,8 @@ def test_sec1_sendmsg_blocked_under_guard():
     import socket as _sock
 
     from doc2md.security.netguard import OfflineViolation, offline_guard
+    if not hasattr(_sock.socket, "sendmsg"):
+        pytest.skip("POSIX-only socket primitive; Windows has no sendmsg")
     with pytest.raises(OfflineViolation):
         with offline_guard(True):
             _sock.socket(_sock.AF_INET, _sock.SOCK_DGRAM).sendmsg(

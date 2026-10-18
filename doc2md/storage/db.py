@@ -19,7 +19,8 @@ import weakref
 from datetime import datetime, timezone
 from pathlib import Path
 
-DB_VERSION = 8   # state.sqlite 结构版本（user_version）；与 IR 的 SCHEMA_VERSION=14 是两套口径
+DB_VERSION = 9   # state.sqlite 结构版本（user_version）；与 IR 的 SCHEMA_VERSION=14 是两套口径
+# v9（CH-486）：新增 ix_tasks_created，覆盖 /jobs 无状态过滤的 created_at DESC。
 # v8（CH-485 / R9-SVC-1 / R9-SVC-2）：tasks 增加 del_seq/force；blocks 增加
 # links/font/provenance JSON；docs 增加 gate_json——异步 drift 删除守护与
 # DB 作为产物事实源的基础。DDL 仍无条件幂等重放，旧库由下方 ALTER 补齐。
@@ -124,6 +125,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_tasks_doc_active
 -- 只覆盖 status IN ('queued','running')，而 `DELETE FROM tasks WHERE doc_id=?`
 -- （FR-128 级联删除）与历史作业回溯要扫全表。
 CREATE INDEX IF NOT EXISTS ix_tasks_doc ON tasks(doc_id);
+-- CH-486：/jobs 无 status 过滤时按 created_at DESC 取前 N；ix_tasks_queued 的
+-- 首列是 status，用不上。单独建时间索引，避免每次 5s 轮询都对全表建临时排序。
+CREATE INDEX IF NOT EXISTS ix_tasks_created ON tasks(created_at DESC);
 
 CREATE TABLE IF NOT EXISTS events (
   seq INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -341,6 +341,11 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
                     continue
                 flush_para()
                 flush_quote()
+                # 空行是表格边界：DOCX 连续 w:tbl 与 PDF 同页两表都靠它/或
+                # table_start 切开；跨页表格在页界没有空行，不受影响。
+                # 但表格自己的空行（ln.row 非 None，单元格全空）不得触发切分。
+                if ln.row is None:
+                    flush_rows(True)
                 continue
             # --- 代码围栏（CH-459）---
             if _FENCE.match(text):
@@ -456,6 +461,9 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
                 if not row_buf:
                     flush_para()
                     flush_quote()
+                    row_page = page.index
+                elif ln.table_start:
+                    flush_rows(True)            # 新 DOCX 表格：即使首行 x0 相同也要切开
                     row_page = page.index
                 elif abs(ln.x0 - (sum(row_x0) / len(row_x0))) > _ROW_X0_TOL:
                     flush_rows(True)            # 行首跳变：切组，各自判定

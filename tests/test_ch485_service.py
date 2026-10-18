@@ -18,7 +18,7 @@ pytestmark = [pytest.mark.milestone("M8")]
 
 @pytest.mark.gate
 def test_db8_has_del_seq_and_artifact_columns(store):
-    assert DB_VERSION == 8
+    assert DB_VERSION >= 8
     tcols = {r["name"] for r in store.q("PRAGMA table_info(tasks)")}
     assert {"del_seq", "force"} <= tcols
     bcols = {r["name"] for r in store.q("PRAGMA table_info(blocks)")}
@@ -112,7 +112,11 @@ def test_predelete_snapshot_is_0600(tmp_path, tmp_cfg):
     plan = BackupPlan(local_dir=tmp_path / "backups", external_dir=None,
                       work_root=tmp_path, cfg=tmp_cfg)
     snap = plan.predelete_snapshot(db)
-    assert (snap.stat().st_mode & 0o777) == 0o600
+    from doc2md.security.perms import is_private
+    if os.name == "nt":
+        assert is_private(snap)
+    else:
+        assert (snap.stat().st_mode & 0o777) == 0o600
 
 
 @pytest.mark.gate

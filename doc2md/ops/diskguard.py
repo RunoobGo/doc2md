@@ -52,7 +52,7 @@ def need_bytes(src_bytes: int, factor: float) -> int:
 
 
 def assert_free_space(target_dir: str | Path, src_size: int, *, cfg: dict | None = None,
-                      what: str = "artifact") -> int:
+                      what: str = "artifact", factor_override: float | None = None) -> int:
     """写产物前检查剩余空间；不足 → E4131_TooLarge（413）。返回当前可用 MB。
 
     需求 = [perf].min_free_mb + 源大小 × [perf].disk_safety_factor（叠加）：
@@ -69,6 +69,10 @@ def assert_free_space(target_dir: str | Path, src_size: int, *, cfg: dict | None
         from .. import config
         factor = float(config.get(cfg, "perf.disk_safety_factor", factor) or 0)
         floor_mb = int(config.get(cfg, "perf.min_free_mb", floor_mb))
+    if factor_override is not None:
+        # 外置加密副本实际 ≈ 1.05× 快照，复用产物 3× 系数会把合法 U 盘备份
+        # 永久拒在 E4131；调用方可按介质真实增量覆盖，固定余量仍然叠加。
+        factor = float(factor_override)
     avail_mb = free_mb(target_dir)
     write_mb = (int(need_bytes(src_size, max(factor, 0.0)) / (1024 * 1024))
                 if factor > 0 else 0)

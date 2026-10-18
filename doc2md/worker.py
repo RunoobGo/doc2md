@@ -156,13 +156,14 @@ def drain_once(store: Store, cfg: dict, root, *, workers: int | None = None,
     results: list[dict] = []
     # 同批内可能有不同转换档位（mode 为 per-job），按 mode 分组跑池，
     # 每组仍是同一批进程，不多开进程数上限。
-    by_mode: dict[str | None, list[str]] = {}
+    by_plan: dict[tuple[str | None, bool], list[str]] = {}
     for path in by_path:
         mode = next((j.get("mode") for j in by_path[path] if j.get("mode")), None)
-        by_mode.setdefault(mode, []).append(path)
-    for mode, group in by_mode.items():
+        force = any(bool(j.get("force")) for j in by_path[path])
+        by_plan.setdefault((mode, force), []).append(path)
+    for (mode, force), group in by_plan.items():
         results.extend(run_batch(group, cfg=cfg, out_dir=_out_dir(cfg, root),
-                                 workers=n, mode=mode))
+                                 workers=n, mode=mode, force=force))
     sched = Scheduler(store)
     for res in results:
         group = by_path.get(res["file"], [])
@@ -237,6 +238,24 @@ def drain_once(store: Store, cfg: dict, root, *, workers: int | None = None,
                             writer.write({"code": "E_ARTIFACT_REBUILD",
                                           "doc_id": res.get("doc_id") or job.get("doc_id") or "",
                                           "exc": type(exc).__name__})
+                    continue
+                except Exception as exc:  # noqa: BLE001 — 单任务不得毒死常驻消费者
+                    # 坏 IR 重号块（sqlite3.IntegrityError）等非瞬时库面错误：
+                    # 原实现直接冒泡，常驻 work 退出、计划任务反复重启，回收后
+                    # 同一件再次毒死队列。记 failed 后继续下一件。
+                    detail = {"reason": "finish_failed",
+                              "exc": type(exc).__name__}
+                    try:
+                        sched.mark(job["job_id"], "failed", "E5031", detail)
+                    except sqlite3.Error:
+                        pass
+                    try:
+                        _event(store, job, res, "job_failed", writer)
+                    except sqlite3.Error:
+                        pass
+                    rep.failed += 1
+                    rep.notes.append(
+                        f"{job['job_id']}: finish failed ({type(exc).__name__})")
                     continue
                 rep.done += 1
                 rep.drift += 1 if drift else 0

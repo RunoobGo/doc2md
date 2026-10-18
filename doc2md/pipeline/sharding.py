@@ -183,6 +183,12 @@ def overlap_dedupe(blocks: list[Block], spans: list[tuple[int, int]],
             if cut is not None and _replace_recent(out, cut):
                 seen.discard(fingerprint(cut))
                 cut.flags.setdefault("dropped_dup_of", fp)
+                # 被替换的旧截断块仍留在 tail 里：后续窗口块若恰好是它的后缀，
+                # `_seam_suffix` 会把新内容当伪影丢掉。替换成功即同步移出 tail。
+                for j, (_ti, tb) in enumerate(tail):
+                    if tb is cut:
+                        del tail[j]
+                        break
             seen.add(fp)
         out.append(b)
         tail.append((idx, b))

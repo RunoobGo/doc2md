@@ -69,7 +69,11 @@ def test_external_backup_encrypted_and_restorable(tmp_path):
     snap = plan.snapshot(db)
     out = plan.to_external(snap, PASS)
     assert out.suffix == ".enc"
-    assert oct(out.stat().st_mode & 0o777) == "0o600"
+    from doc2md.security.perms import is_private
+    if os.name == "nt":
+        assert is_private(out)
+    else:
+        assert oct(out.stat().st_mode & 0o777) == "0o600"
     assert MAGIC_V2 == out.read_bytes()[:7]   # 外置副本为新 v2 容器
     # 恢复 → 可用
     dst = plan.restore(out, tmp_path / "restored.sqlite", PASS)
@@ -82,7 +86,11 @@ def test_local_snapshot_dir_mode_700(tmp_path):
     plan = BackupPlan(local_dir=tmp_path / "work/reports/backups", external_dir=None)
     plan.snapshot(db)
     work = tmp_path / "work"
-    assert oct(work.stat().st_mode & 0o777) == "0o700", "work/ 权限必须 700（M8 验收）"
+    from doc2md.security.perms import is_private
+    if os.name == "nt":
+        assert is_private(work), "Windows 上 work/ 必须落成仅当前用户 DACL"
+    else:
+        assert oct(work.stat().st_mode & 0o777) == "0o700", "work/ 权限必须 700（M8 验收）"
 
 
 def test_rotation_drops_files_older_than_14_days(tmp_path):

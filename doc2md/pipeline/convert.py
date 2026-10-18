@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import time
 import uuid
 import zipfile
@@ -14,7 +15,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .. import config
-from ..errors import WARN_SHARD_NOT_MERGED, WARN_TABLE_ACROSS_SHARD, E5041_LlmUnavailable
+from ..errors import (
+    WARN_SHARD_NOT_MERGED,
+    WARN_TABLE_ACROSS_SHARD,
+    E4091_DocOverwrite,
+    E4151_UnsupportedType,
+    E5031_StorageError,
+    E5041_LlmUnavailable,
+)
 from ..ir import IR, hash_of_path
 from ..llm import DEFAULT_OP_WHITELIST, LlmClient, LlmServiceError, apply_ops, offline_llm, scan_injection
 from ..ops.diskguard import assert_free_space
@@ -47,27 +55,70 @@ class Result:
 
 
 def convert(path: str | Path, *, cfg: dict | None = None, mode: str | None = None,
-            out_dir: str | Path | None = None, raw_name: str | None = None) -> Result:
+            out_dir: str | Path | None = None, raw_name: str | None = None,
+            force: bool = False, precheck_edits: bool = False) -> Result:
     """转换入口：离线断言（NFR-1）+ 冻结键校验（T9）在此施加，再进管线本体。"""
     cfg = cfg or config.load()
     config.validate(cfg)
     with offline_guard(bool(config.get(cfg, "run.offline_assert", True))):
-        return _convert(path, cfg=cfg, mode=mode, out_dir=out_dir, raw_name=raw_name)
+        return _convert(path, cfg=cfg, mode=mode, out_dir=out_dir, raw_name=raw_name,
+                        force=force, precheck_edits=precheck_edits)
+
+
+def _edited_conflict(cfg: dict, doc_id: str) -> int:
+    """库内该内容是否存在用户编辑；0 = 无冲突。
+
+    转换**先发 zip 再落库**，CLI/watch 又没有 save_ir 的 E4091 事后补偿：
+    对已编辑文档重转会把 out/{doc_id}.zip 覆盖成未编辑版本。这里在解析前用
+    只读连接查一次；DB 存在但查询失败时 fail-closed（无法确认就不覆盖）。
+    """
+    root = Path(config.path_setting(cfg, "paths.root", "."))
+    db = root / "state.sqlite"
+    if not db.is_file():
+        return 0
+    try:
+        con = sqlite3.connect(db.resolve().as_uri() + "?mode=ro", uri=True)
+        try:
+            row = con.execute(
+                "SELECT COUNT(*) FROM blocks WHERE doc_id=? AND revision>1",
+                (doc_id,)).fetchone()
+            return int(row[0] if row else 0)
+        finally:
+            con.close()
+    except sqlite3.Error as exc:
+        raise E5031_StorageError(
+            "cannot verify edit guard before conversion",
+            detail={"reason": type(exc).__name__}) from exc
 
 
 def _convert(path: str | Path, *, cfg: dict, mode: str | None,
-             out_dir: str | Path | None, raw_name: str | None) -> Result:
+             out_dir: str | Path | None, raw_name: str | None,
+             force: bool = False, precheck_edits: bool = False) -> Result:
     p = Path(path)
-    # CH-447：doc_id / source_key 走流式哈希，S1 走分块解析 —— 两者都不得把整本文档
-    # 一次性读进内存，否则「低配机跑大文件」在这一步就先 OOM。
-    doc_id, source_key = hash_of_path(p)
-    raw = raw_name or p.name
-    safe = sanitize_name(raw, int(config.get(cfg, "security.max_name_bytes", 128)))
-
-    chunk_pages = int(config.get(cfg, "s1.chunk_pages", 0)) or None
     # CH-459（A-13）：sniff 一次直传 read_any——原实现 read_any 内嗅探后
     # 分片前又 sniff(p) 一次，同一文件多开一遍（magic + zip 目录）。
+    # 先 sniff 再哈希：不支持的输入只读首 8 字节即拒，不再把整文件读完才报 E4151。
     fmt = sniff(p)
+    # CH-447：doc_id / source_key 走流式哈希，S1 走分块解析 —— 两者都不得把整本文档
+    # 一次性读进内存，否则「低配机跑大文件」在这一步就先 OOM。
+    # 哈希阶段的 OSError（文件被独占/权限/竞态删除）与 sniff 同归输入不可读 415。
+    try:
+        doc_id, source_key = hash_of_path(p)
+    except OSError as exc:
+        raise E4151_UnsupportedType(
+            f"cannot read {p.name}: {type(exc).__name__}",
+            detail={"file": p.name}) from exc
+    raw = raw_name or p.name
+    safe = sanitize_name(raw, int(config.get(cfg, "security.max_name_bytes", 128)))
+    if precheck_edits and out_dir and not force:
+        edited = _edited_conflict(cfg, doc_id)
+        if edited:
+            raise E4091_DocOverwrite(
+                "document has user edits; re-conversion would overwrite the artifact",
+                detail={"doc_id": doc_id, "edited_blocks": edited,
+                        "hint": "pass force=true to overwrite"})
+
+    chunk_pages = int(config.get(cfg, "s1.chunk_pages", 0)) or None
     # A-8 回退说明（CH-460）：本处曾改为「PDF 按片读取、单片驻留」，实测
     # large_320p 峰值内存 132.9MB → 134.9/137.9MB（反而更差，见 12.3 证据行）——
     # 驻留主体是 IR blocks（5890 块）与 pdfplumber 单页解析缓冲，`pages_all` 只占

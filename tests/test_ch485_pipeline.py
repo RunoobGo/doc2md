@@ -72,6 +72,59 @@ _NUMBERING = f'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 </w:numbering>'''
 
 
+def test_adjacent_docx_tables_are_not_merged(tmp_path):
+    """相邻 w:tbl 必须有各自表头；不能把第二张表降成第一张的数据行。"""
+    from docx import Document
+    path = tmp_path / "adjacent.docx"
+    d = Document()
+    t1 = d.add_table(rows=2, cols=2)
+    t1.cell(0, 0).text, t1.cell(0, 1).text = "ColA", "ColB"
+    t1.cell(1, 0).text, t1.cell(1, 1).text = "a1", "b1"
+    t2 = d.add_table(rows=2, cols=3)
+    t2.cell(0, 0).text, t2.cell(0, 1).text, t2.cell(0, 2).text = "Name", "Qty", "Price"
+    t2.cell(1, 0).text, t2.cell(1, 1).text, t2.cell(1, 2).text = "n1", "2", "9"
+    d.save(path)
+
+    blocks = analyze(read_docx(path)).blocks
+    tables = [b.text for b in blocks if b.type == "table"]
+    assert len(tables) == 2, blocks
+    assert "| ColA | ColB |" in tables[0] and "| Name | Qty | Price |" in tables[1]
+
+
+def test_docx_simple_field_and_smarttag_keep_text(tmp_path):
+    """w:fldSimple（DATE/REF）与 w:smartTag 包裹的文本不得静默丢失。"""
+    from docx import Document
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+
+    path = tmp_path / "field.docx"
+    d = Document()
+    p = d.add_paragraph()
+    p.add_run("生效日期：")
+    fld = OxmlElement("w:fldSimple")
+    fld.set(qn("w:instr"), "DATE")
+    r = OxmlElement("w:r")
+    t = OxmlElement("w:t")
+    t.text = "2026-10-18"
+    r.append(t)
+    fld.append(r)
+    p._p.append(fld)
+
+    p2 = d.add_paragraph()
+    smart = OxmlElement("w:smartTag")
+    r2 = OxmlElement("w:r")
+    t2 = OxmlElement("w:t")
+    t2.text = "智能标记正文"
+    r2.append(t2)
+    smart.append(r2)
+    p2._p.append(smart)
+    d.save(path)
+
+    texts = [ln.text for ln in _lines(path)]
+    assert any("2026-10-18" in x for x in texts), texts
+    assert any("智能标记正文" in x for x in texts), texts
+
+
 @pytest.mark.gate
 def test_105pt_numbered_line_is_list_not_heading():
     from reportlab.pdfgen import canvas

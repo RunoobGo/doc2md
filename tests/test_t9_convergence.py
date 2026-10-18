@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import copy
 import importlib
+import os
 import socket
 
 import pytest
@@ -188,8 +189,13 @@ def test_work_dir_mode_configurable(tmp_path):
                       work_root=tmp_path / "work", work_dir_mode="750")
     import os
     plan.snapshot(tmp_path / "state.sqlite")
-    assert (tmp_path / "work").stat().st_mode & 0o777 == 0o750
-    assert os.stat(tmp_path / "work/reports/backups").st_mode & 0o777 == 0o750
+    from doc2md.security.perms import is_private
+    if os.name == "nt":
+        assert is_private(tmp_path / "work")
+        assert is_private(tmp_path / "work/reports/backups")
+    else:
+        assert (tmp_path / "work").stat().st_mode & 0o777 == 0o750
+        assert os.stat(tmp_path / "work/reports/backups").st_mode & 0o777 == 0o750
 
 
 def test_work_dir_mode_default_is_700(tmp_path):
@@ -197,7 +203,11 @@ def test_work_dir_mode_default_is_700(tmp_path):
     plan = BackupPlan(local_dir=tmp_path / "work/reports/backups", external_dir=None,
                       work_root=tmp_path / "work")
     plan.snapshot(tmp_path / "state.sqlite")
-    assert (tmp_path / "work").stat().st_mode & 0o777 == 0o700
+    from doc2md.security.perms import is_private
+    if os.name == "nt":
+        assert is_private(tmp_path / "work")
+    else:
+        assert (tmp_path / "work").stat().st_mode & 0o777 == 0o700
 
 
 # --- api.token_roles ------------------------------------------------------------
