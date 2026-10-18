@@ -907,7 +907,7 @@ mismatch 0
 | B-7 | CI Windows 腿 | **扩展**：必须覆盖 `convert` + `doctor` + `cron` 锁；本缺陷不会被 ubuntu 捕获 |
 | B-8 | 跨机性能基准 | 320p 基线/微优化/`save_ir` 锁时长在 Win11/Mac mini 复测 |
 | B-9 | serve/work 常驻运行时 | macOS 半侧已验；Windows `Register-ScheduledTask` + `.ps1` 待验 |
-| B-10 | 外置卷备份容器 v2 真机恢复 | **扩展**：v1 旧容器、predelete/pre-restore、并发 cron、失败回滚、产物恢复 |
+| B-10 | 外置卷备份容器 v2 真机恢复 | **v2 外置卷实景已验（2026-10-18 本机，真实 USB APFS `/Volumes/fx`）**：weekly 备份 → 模拟 work 根丢失 → CLI restore，`integrity_check=ok`、docs/blocks 一致、产物自动重建；**剩余**：v1 历史真实容器、SMB/网络卷、并发 cron、失败回滚 |
 | B-11 | 编辑器/审阅页真实浏览器人工走查 | 未变 |
 | B-12 | >30min 合法转换与 `reclaim_stale` 双进程 | 未变；R9-SVC-3 的 worker 重试/租约需真实验证 |
 | B-13 | 真实 Word 模板语料 | **扩展**：文本框、bullet/多级/Heading 编号、首列编号表、页眉页脚 |
@@ -922,7 +922,7 @@ R9-OPS-3（Windows）并入 B-6/B-7；R9-OPS-5（并发备份）需真机 launch
 ### 12.3 交付时提醒（请优先安排）
 
 1. **B-6/B-7 Windows**：`sendmsg` 主路径、CI 腿、备份锁、CLI 参数；这是唯一能证明“Win11 目标机可用”的路径。
-2. **B-10 外置卷恢复演练**：v1 历史容器、predelete/pre-restore、并发 cron、失败回滚、产物恢复；建议在 D5/D6 落地后立即安排。
+2. **B-10 外置卷恢复演练**：v2 外置卷核心场景已于 2026-10-18 本机真实 USB APFS `/Volumes/fx` 验证；剩 v1 历史容器、SMB/网络卷、并发 cron、失败回滚待验。
 3. **B-13/B-15/B-1 真实语料**：Word 文本框/编号/表格；中文 10.5pt/数字表/跨行链接；噪声误杀面。
 4. **B-12**：>30min 合法转换与 reclaim 双进程；与 R9-SVC-3 的租约/重试同批复测。
 
@@ -1109,4 +1109,4 @@ missing sendmsg -> AttributeError; orig keys connect/connect_ex/sendto
 
 建议按 B0→B1→B2→B3→B4 推进：先封死数据安全与恢复，再统一产物事实源，再做结构补全，最后做队列/性能与文档收口。每批退出都必须有本机 gate/full 0 skipped、G6/黄金分类、旧代码红新代码绿，以及 B 类提醒。
 
-**B 类提醒**：B-6/B-7（Windows `sendmsg`/CI 腿/备份锁/CLI 参数）、B-10（外置卷恢复：v1、predelete/pre-restore、并发、产物）、B-13/B-15/B-1（真实 Word/中文 PDF/噪声语料）、B-12（长转换 × reclaim）需要本机以外环境或人工参与，请优先安排；B-4/B-5/B-9 的 macOS 部分已验，Windows 腿仍开放。
+**B 类提醒**：B-6/B-7（Windows `sendmsg`/CI 腿/备份锁/CLI 参数）、B-10（v2 外置卷核心场景已于 2026-10-18 本机真实 USB APFS 验证；v1 历史容器/SMB/并发/失败回滚待验）、B-13/B-15/B-1（真实 Word/中文 PDF/噪声语料）、B-12（长转换 × reclaim）需要本机以外环境或人工参与，请优先安排；B-4/B-5/B-9 的 macOS 部分已验，Windows 腿仍开放。
