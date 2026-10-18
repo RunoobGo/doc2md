@@ -18,6 +18,7 @@ from doc2md.pipeline.convert import convert
 from doc2md.pipeline.s1_parse import read_pdf
 
 ROOT = Path(__file__).resolve().parents[3] / "work" / "real_samples"
+GROUND = Path(__file__).with_name("ground_truth.json")
 NS = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 CJK = re.compile(r"[\u4e00-\u9fff]")
 
@@ -112,21 +113,22 @@ def main() -> int:
         except Exception as exc:  # noqa: BLE001
             item["status"] = f"error:{type(exc).__name__}"
         out["pdf"].append(item)
-    by_stem = {Path(w["file"]).stem: w for w in out["word"]}
+    ground = json.loads(GROUND.read_text(encoding="utf-8")) if GROUND.is_file() else {}
     for p in out["pdf"]:
-        w = by_stem.get(Path(p["file"]).stem)
-        if not w or p.get("status") != "ok" or w.get("status") != "ok":
+        g = ground.get(p["file"], {})
+        truth = {_norm(x) for x in g.get("headings", [])}
+        if not truth or p.get("status") != "ok":
             continue
-        truth = {_norm(x) for x in w.get("headings", [])}
         got = {_norm(x) for x in p.get("headings", [])}
         hit = truth & got
         out["comparisons"].append({
             "stem": Path(p["file"]).stem,
-            "docx_headings": len(truth),
+            "basis": "manual_ground_truth",
+            "truth_headings": len(truth),
             "pdf_headings": len(got),
             "matched": len(hit),
-            "recall": round(len(hit) / len(truth), 3) if truth else None,
-            "precision": round(len(hit) / len(got), 3) if got else None,
+            "recall": round(len(hit) / len(truth), 3),
+            "precision": round(len(hit) / len(got), 3) if got else 0.0,
             "extra_pdf_headings": sorted(got - truth)[:8],
             "missing_pdf_headings": sorted(truth - got)[:8],
         })
@@ -137,7 +139,7 @@ def main() -> int:
     bad += [p["file"] for p in out["pdf"] if p["status"] != "ok"]
     print("non-ok:", bad[:20], "..." if len(bad) > 20 else "")
     for c in out["comparisons"]:
-        print(f"{c['stem']}: docx={c['docx_headings']} pdf={c['pdf_headings']} "
+        print(f"{c['stem']}: truth={c['truth_headings']} pdf={c['pdf_headings']} "
               f"match={c['matched']} recall={c['recall']} precision={c['precision']}")
     print(f"report: {result}")
     return 0

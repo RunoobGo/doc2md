@@ -106,16 +106,16 @@
 
 未能在本机执行：`pwsh` 未安装（Windows PowerShell 5.1 无法解析安装脚本中的中文/PS7 语法）；外置 USB/SMB 卷、macOS、真实 Word/PDF 语料、域策略终端仍属 B 类。计划任务 XML 已用 `schtasks` 成功注册，证明定义本身可用；安装脚本的 `-VerifyOnly` 需 PowerShell 7。
 
-### 4.2 B-13/B-15 真实语料推进（PIPELINE 2.9.0）
+### 4.2 B-13/B-15 真实语料推进（PIPELINE 2.9.1）
 
 | 项目 | 结果 |
 | --- | --- |
 | 真实 Word 模板 | Office 2052 模板 23 份，20 份可转换；文本框 11 文件/116 处、编号 9/22、表格 11/155、合并单元格 3/10、sdt 20/1495、页眉页脚 16/20 |
 | 真实中文 PDF | Word 16 导出 9 份，1–8 页，正文 8.0–11.0pt；规则改进后 8/9 检出标题块 |
-| 自动标题对照（代理口径） | RedAndBlackReport recall **0.955** / precision 0.656；TimelessReport **0.435** / 0.588；其余模板占位标题不可靠 |
+| 人工标题 ground truth（10 PDF） | RedAndBlackReport recall **0.967** / precision 0.906；TimelessReport **0.567** / 1.000；AdjacencyReport 0.333 / 1.000；ApothecaryNewsletter 0.333 / 0.500；其余模板仍有漏判 |
 | 本轮修复 | 文本框内 `w:sdt` / 嵌套文本框漏抽；无编号大字号短行标题（+6pt 阈值） |
 
-真实样本二进制按许可与隐私要求保留在 `work/real_samples/`，不进入公开仓库；可复现脚本与清单见 `tests/corpus/real/`。B-15 的正式 H1 precision/recall 仍需人工标注 10–20 份标题集合，B-13 仍需人工抽查样式联动，故两项仍保持开放。
+真实样本二进制按许可与隐私要求保留在 `work/real_samples/`，不进入公开仓库；可复现脚本、清单与人工 ground truth 见 `tests/corpus/real/`。本机 10 份 PDF 已人工标注，B-15 仍需扩展到非模板真实文档并校准小字号标题；B-13 仍需人工抽查样式联动，故两项仍保持开放。
 
 ## 5. B/C 类登记与提醒
 
@@ -126,7 +126,7 @@
 | B-08 | Win11 / Mac mini 跨机性能基准 | 当前数字来自 Windows 本机与历史 macOS/Linux；需目标机同语料复测 |
 | B-10 | v1 历史容器、SMB/网络卷、并发 cron、失败回滚的真机恢复 | 需要真实外置卷/网络卷与人工拔盘 |
 | B-13 | 真实 Word 模板语料（文本框、编号、sdt、域代码、页眉页脚） | **已开始收集并修复**：Office 2052 真实模板 23 份，20 份可转换；文本框中 `w:sdt`/嵌套文本框漏抽已修；特征矩阵见 `tests/corpus/real/manifest.json`；样本本地保留，仍需人工抽查 |
-| B-15 | 真实中文 PDF 标题/数字表/跨行链接语料 | **已开始收集并加规则**：9 份 Word 导出中文 PDF，正文 8.0–11.0pt；8/9 检出标题块，RedAndBlackReport recall 0.955、TimelessReport 0.435（自动代理）；仍需人工标注 10–20 份标题集合做最终 H1 precision/recall |
+| B-15 | 真实中文 PDF 标题/数字表/跨行链接语料 | **已收集 10 份并人工标注**：9/10 检出标题块；RedAndBlackReport recall 0.967 / precision 0.906，TimelessReport 0.567 / 1.000；仍需扩展到非模板真实文档并校准小字号标题 |
 | B-16 | 真实注入语料 + `_attribute` 归因 | 需安全语料与人工审阅 |
 | B-17 | 图片型 DOCX 的媒体全量驻留 | 本机测量：871KB `StudentReport.docx` 转换 0.46s；短进程峰值采样未捕获，媒体全量驻留架构未改；需决定自建 OOXML 读取器/媒体上限 |
 | B-18 | API 与 worker 跨进程产物重建的最终一致 | **已实现并本机双进程验证**：`out/.locks/<doc>.lock` 跨进程 O_EXCL 锁 + 60s 陈旧回收 + 30s 超时 E5031；两个独立 Python 进程同时重建同一 600 块文档均 exit 0、zip 可读；线程串行回归已加 |

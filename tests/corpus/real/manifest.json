@@ -51,8 +51,8 @@
     "headings_docx_total": 42
   },
   "pdf": {
-    "total": 9,
-    "convert_ok": 9,
+    "total": 10,
+    "convert_ok": 10,
     "pages": [
       2,
       1,
@@ -62,6 +62,7 @@
       1,
       1,
       8,
+      2,
       8
     ],
     "body_sizes": [
@@ -72,7 +73,7 @@
       10.6,
       11.0
     ],
-    "files_with_detected_headings": 8,
+    "files_with_detected_headings": 9,
     "heading_counts": {
       "AdjacencyReport.pdf": 2,
       "ApothecaryLetter.pdf": 0,
@@ -82,66 +83,66 @@
       "OriginResume.pdf": 1,
       "RedAndBlackLetter.pdf": 2,
       "RedAndBlackReport.pdf": 32,
+      "StudentReport.pdf": 1,
       "TimelessReport.pdf": 23
     },
     "numeric_table_blocks": 2
   },
+  "ground_truth": "tests/corpus/real/ground_truth.json",
   "pairs": [
     {
       "stem": "AdjacencyReport",
-      "docx_headings": 3,
+      "basis": "manual_ground_truth",
+      "truth_headings": 3,
       "pdf_headings": 1,
+      "matched": 1,
+      "recall": 0.333,
+      "precision": 1.0,
+      "extra_pdf_headings": [],
+      "missing_pdf_headings": [
+        "小标题1",
+        "键入文档副标题"
+      ]
+    },
+    {
+      "stem": "ApothecaryNewsletter",
+      "basis": "manual_ground_truth",
+      "truth_headings": 3,
+      "pdf_headings": 2,
+      "matched": 1,
+      "recall": 0.333,
+      "precision": 0.5,
+      "extra_pdf_headings": [
+        "[新闻稿标题]"
+      ],
+      "missing_pdf_headings": [
+        "文章副标题或摘要",
+        "新闻稿标题"
+      ]
+    },
+    {
+      "stem": "EssentialReport",
+      "basis": "manual_ground_truth",
+      "truth_headings": 3,
+      "pdf_headings": 3,
       "matched": 0,
       "recall": 0.0,
       "precision": 0.0,
       "extra_pdf_headings": [
-        "键入文档标题"
-      ],
-      "missing_pdf_headings": [
-        "[键入提要栏标题]",
-        "小标题2",
-        "小标题3"
-      ]
-    },
-    {
-      "stem": "ApothecaryLetter",
-      "docx_headings": 0,
-      "pdf_headings": 0,
-      "matched": 0,
-      "recall": null,
-      "precision": null,
-      "extra_pdf_headings": [],
-      "missing_pdf_headings": []
-    },
-    {
-      "stem": "ApothecaryNewsletter",
-      "docx_headings": 2,
-      "pdf_headings": 2,
-      "matched": 2,
-      "recall": 1.0,
-      "precision": 1.0,
-      "extra_pdf_headings": [],
-      "missing_pdf_headings": []
-    },
-    {
-      "stem": "EssentialReport",
-      "docx_headings": 3,
-      "pdf_headings": 3,
-      "matched": 1,
-      "recall": 0.333,
-      "precision": 0.333,
-      "extra_pdf_headings": [
         "[键入文档副标题]",
+        "[键入文档标题]",
         "标题]"
       ],
       "missing_pdf_headings": [
         "小标题2",
-        "小标题3"
+        "键入文档副标题",
+        "键入文档标题"
       ]
     },
     {
       "stem": "OriginReport",
-      "docx_headings": 5,
+      "basis": "manual_ground_truth",
+      "truth_headings": 2,
       "pdf_headings": 1,
       "matched": 0,
       "recall": 0.0,
@@ -150,75 +151,87 @@
         "[键入文档标题]"
       ],
       "missing_pdf_headings": [
-        "[文档标题]",
-        "[键入文档标题]",
-        "标题1",
-        "标题2",
-        "标题3"
+        "键入文档副标题",
+        "键入文档标题"
       ]
     },
     {
       "stem": "OriginResume",
-      "docx_headings": 0,
+      "basis": "manual_ground_truth",
+      "truth_headings": 5,
       "pdf_headings": 1,
       "matched": 0,
-      "recall": null,
+      "recall": 0.0,
       "precision": 0.0,
       "extra_pdf_headings": [
         "[键入您的姓名]"
       ],
-      "missing_pdf_headings": []
+      "missing_pdf_headings": [
+        "学历",
+        "工作经历",
+        "技能",
+        "目标职位",
+        "键入您的姓名"
+      ]
     },
     {
       "stem": "RedAndBlackLetter",
-      "docx_headings": 0,
+      "basis": "manual_ground_truth",
+      "truth_headings": 1,
       "pdf_headings": 2,
       "matched": 0,
-      "recall": null,
+      "recall": 0.0,
       "precision": 0.0,
       "extra_pdf_headings": [
         "[公司]",
         "[日期]"
       ],
-      "missing_pdf_headings": []
+      "missing_pdf_headings": [
+        "公司"
+      ]
     },
     {
       "stem": "RedAndBlackReport",
-      "docx_headings": 22,
+      "basis": "manual_ground_truth",
+      "truth_headings": 30,
       "pdf_headings": 32,
-      "matched": 21,
-      "recall": 0.955,
-      "precision": 0.656,
+      "matched": 29,
+      "recall": 0.967,
+      "precision": 0.906,
       "extra_pdf_headings": [
-        "1.1无保留意见",
-        "1.2保留意见报告",
-        "1.3否定意见报告",
-        "1.4放弃表达意见报告",
-        "1.5上市公司内部控制审计报告",
-        "1.6持续经营",
         "[公司]",
-        "[在此处添加贵公司某位高级管理人员的引言或使用此空间放置文"
+        "[在此处添加贵公司某位高级管理人员的引言或使用此空间放置文",
+        "档内容的简短摘要。]"
       ],
       "missing_pdf_headings": [
         "致我们的股东"
       ]
     },
     {
-      "stem": "TimelessReport",
-      "docx_headings": 23,
-      "pdf_headings": 17,
-      "matched": 10,
-      "recall": 0.435,
-      "precision": 0.588,
+      "stem": "StudentReport",
+      "basis": "manual_ground_truth",
+      "truth_headings": 2,
+      "pdf_headings": 1,
+      "matched": 0,
+      "recall": 0.0,
+      "precision": 0.0,
       "extra_pdf_headings": [
-        "1.1无保留意见",
-        "1.2保留意见报告",
-        "1.3否定意见报告",
-        "1.4放弃表达意见报告",
-        "1.5上市公司内部控制审计报告",
-        "1.6持续经营",
-        "目录"
+        "[报告标题]"
       ],
+      "missing_pdf_headings": [
+        "报告副标题",
+        "报告标题"
+      ]
+    },
+    {
+      "stem": "TimelessReport",
+      "basis": "manual_ground_truth",
+      "truth_headings": 30,
+      "pdf_headings": 17,
+      "matched": 17,
+      "recall": 0.567,
+      "precision": 1.0,
+      "extra_pdf_headings": [],
       "missing_pdf_headings": [
         "会计科目",
         "债务",
@@ -231,5 +244,5 @@
       ]
     }
   ],
-  "note": "Automatic DOCX Heading comparison is a proxy; final B-15 accuracy requires manual title annotation. The +6pt unnumbered heading rule was added in PIPELINE 2.9.0."
+  "note": "Manual ground truth covers 10 Word-exported Chinese PDFs; broader non-template real-world corpus and low-recall cases remain open."
 }
