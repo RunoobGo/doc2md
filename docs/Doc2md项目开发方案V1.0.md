@@ -135,7 +135,7 @@ v2.4 轮次审查（2026-10-13）从 v2.3 自检、安全与隐私、并发编�
 
 **FR-128 文档删除级联（P1）**。`DELETE /docs/{doc_id}` 级联删除 out 产物、IR / 中间产物、事件、revision、编辑审计；审计的删除记录本身保留（who / when / doc_id，不含内容）。删除需 admin token + 二次确认参数 `confirm=true`；`source_key` 下所有版本可整源删除。验收标准：删除后 `GET /docs/{id}` 返回 404、全局搜索无残留、已删数据 ≤ 14 天后从全部备份副本自然轮出。
 
-**FR-129 目录投递防护（P2）**。并入 FR-102 / FR-111 的公共实现：符号链接不跟随、目录深度 ≤ 20、隐藏文件跳过（`.` 开头，可配）、单目录文件数上限 5000；API 目录上传与 watch folder 共用。验收标准：符号链接循环目录 10s 内扫完；超限目录返回明确错误码 `E4133` 而非挂起。
+**FR-129 目录投递防护（P2）**。并入 FR-102 / FR-111 的公共实现：符号链接**默认不跟随**（`watch.follow_symlinks=true` / `--follow-symlinks` 为显式 opt-in；开启时只跟随 `realpath` 位于 root 内且防循环的目标，CH-483/485）、目录深度 ≤ 20、隐藏文件跳过（`.` 开头，可配）、单目录文件数上限 5000；API 目录上传与 watch folder 共用。验收标准：符号链接循环目录 10s 内扫完；超限目录返回明确错误码 `E4133` 而非挂起。
 
 **NFR-18 备份介质加密（隐私）**。外置卷 / 独立目录的备份文件以 AES-256 加密容器（encrypted sparsebundle 或 age / gpg 对称加密，二选一写进 README）存放；密钥不入库、不随备份走；本地快照（`reports/backups/`）在 `work/` 内可明文，但 `work/` 目录权限 700。
 
@@ -477,7 +477,7 @@ GGUF 内嵌 vocab 导出工具（llama.cpp 工具链）；encrypted sparsebundle
 | 文件名消毒 | 纯增量校验，不设降级——消毒失败即拒收（FR-127 红线） | — |
 | `base_revision` 乐观锁 | 灰度两阶段：先 optional（缺省沿用旧行为并告警）→ 全量 required；旧客户端 400 响应附 `current_revision` 自愈 | 前端未同批发布 |
 | token 三角色 | 存量 token 默认 `admin` 角色，兼容期后按端点矩阵收紧 | 下游调用断裂 |
-| 删除级联 | `confirm=true` + admin 双闸；删除前本地快照（FR-607）可恢复 | 误删投诉 |
+| 删除级联 | `confirm=true` + admin 双闸；删除前本地快照（FR-607）可恢复；快照按 14 天/份数上限轮出，最新一份也不例外（CH-485） | 误删投诉 |
 | 日志轮转 | 轮转异常退化为「不轮转 + 告警」，NFR-6 磁盘门禁兜底 | 写入器异常 |
 | `doc2md cron` | `launchctl unload` 即停；任务可手动 `doc2md cron --daily` 补跑 | launchd 失效 |
 

@@ -1,6 +1,6 @@
 # Doc2md
 
-文本型 PDF / DOCX → Markdown 的**离线**转换管线（v2.6）。
+文本型 PDF / DOCX → Markdown 的**离线**转换管线（v2.7）。
 单机、无出站网络、无云端依赖；LLM 修补助手同样只连本地 `127.0.0.1`。
 
 ## 安装
@@ -25,6 +25,7 @@ doc2md watch <dir> [--once --interval S]
 doc2md tokenizer export F [--vocab V --manifest M]
 doc2md tokenizer verify --manifest M --gguf F
 doc2md backup drill [--keep]                     # 隔离沙箱内跑完整恢复闭环（ops/backup.md）
+doc2md backup restore SRC [--to PATH] [--force]  # 离线恢复（v1/v2 容器；CH-485）
 doc2md doctor
 ```
 
@@ -53,6 +54,8 @@ curl -s "localhost:8090/search?q=例外" -H "X-Doc2md-Token: $TOK"
 相对路径（`work/out`、`work/reports/backups` 等）会随 `[paths].root` / `--root` 一起迁移（CH-432）。
 
 ## 低配机器（Win11 无 GPU / Mac mini 16GB）
+
+> 下表驻留/吞吐数字来自 Linux 4 vCPU / 8GB 沙箱（本机 macOS arm64 复测见 12.1）；Win11 与 Mac mini 真机同口径数字登记 B-6/B-8，未实测前不得当作目标机结论。
 
 文本管线是 CPU + 内存带宽问题，GPU 无收益；下列口径全部有实测支撑（方案 第七章 + 第十二章证据）：
 
@@ -89,7 +92,7 @@ Windows 中文控制台（cp936）下含 emoji 的文件名不再崩进程，`--
 随机盐 + 序号 AAD；历史 v1 `b"D2MBAE1"` 只读兼容），口令只走
 `DOC2MD_BACKUP_PASSPHRASE`；macOS 备选 `hdiutil create -encryption AES-256 … SPARSEBUNDLE`。
 未配置外置卷 → 周报该步骤 `skipped`（不算失败）；配置了外置卷但无口令 → `ok=False`，**不落明文**。
-已删数据 ≤14 天从全部副本自然轮出（FR-128）。
+已删数据 ≤14 天从全部副本自然轮出（FR-128）；`predelete-*` / `pre-restore-*` 由每日 cron 同步轮出，最新一份也受 14 天约束。v1 历史容器可用 `backup restore` 恢复（CH-485）。
 
 ## 定时任务（launchd）
 
@@ -134,7 +137,7 @@ launchctl list | grep doc2md          # 校验：定时 + 常驻四个标签齐�
 两档均为 `RunAtLoad` + `KeepAlive{SuccessfulExit: false}` + `ThrottleInterval 30`：
 **崩溃（非零退出）自动重启，正常退出与 `launchctl unload` 不会被复活**，重启风暴由 30 秒节流兜住。
 它们会长期占用一个监听进程加一个转换进程池，8GB 机器可只装 serve、需要时手跑
-`doc2md work --once` 排空即退。实机「开机自启 + 崩溃自恢复」的行为待真机确认（方案 12.7 B-9）。
+`doc2md work --once` 排空即退。实机「开机自启 + 崩溃自恢复」：macOS 已验（2026-10-18），Windows `Register-ScheduledTask` 腿待验（B-9）。
 
 ## 定时任务（Windows 任务计划）
 
@@ -188,7 +191,7 @@ Windows 任务计划不捕获标准输出，日志目录里没有 `launchd-*` �
 | `ops/backup.md` | 备份介质与恢复演练细则 |
 | `ops/windows/install-doc2md-tasks.ps1` | Windows 任务计划安装 / 校验 / 卸载（与 launchd 同等能力） |
 
-跟踪约定：契约变更、缺陷、更优做法一律按登记流写入方案 第十一章（当前编号至 `CH-484`，下一条自 `CH-485`），实测数字进第十二章并标注语料与测量方法；规格发生变化时同步主题篇章节与本文相应小节，并递增 `doc2md.PLAN_VERSION`（管线契约变化另递增 `PIPELINE_VERSION`；状态库结构变化另递增 `DB_VERSION`，CH-469 起为 `5`、CH-476 起为 `6`、CH-483 起为 `7`）。
+跟踪约定：契约变更、缺陷、更优做法一律按登记流写入方案 第十一章（当前编号至 `CH-485`，下一条自 `CH-486`），实测数字进第十二章并标注语料与测量方法；规格发生变化时同步主题篇章节与本文相应小节，并递增 `doc2md.PLAN_VERSION`（管线契约变化另递增 `PIPELINE_VERSION`；状态库结构变化另递增 `DB_VERSION`，CH-476 起为 `6`、CH-483 起为 `7`、CH-485 起为 `8`）。
 
 ## 验收与测试
 
@@ -207,7 +210,7 @@ Windows 任务计划不捕获标准输出，日志目录里没有 `launchd-*` �
 `workflow_dispatch` 供取证）用 3.11/3.12/3.13 三档跑全量 + 黄金逐字节复现 + `doctor`，补上这些非红线项的
 跨版本空白。这个分工由 `tests/test_ch479_ci_matrix.py` 的四条红线钉住：两工作流的版本集合必须相等、
 push 面 `full-suite` 必须保持无矩阵且钉死 `3.12`、每个作业必须带 `timeout-minutes`、周期腿不得挂
-`push`/`pull_request` 触发。周期腿首证 = run `39032817663`（手动 `workflow_dispatch`，三档各 `811 passed`，含黄金逐字节复现与 `doctor` 自检），push 面 = run `39032796293`（三档各 `260 passed, 551 deselected` + `811 passed` 全量）；上一轮（CH-481）push 面 = run `39041920410`（三档各 `275 passed, 563 deselected`，全量 `838 passed` 干净退出）；上一轮（CH-482）push 面 = run `39043948338`（三档各 `285 passed, 567 deselected`，全量 `852 passed` 干净退出，`doctor` 打 `2.5.0`）；最新一轮（CH-483）push 面 = run `39050319814`（三档各 `308 passed, 575 deselected`，全量 `883 passed` 干净退出，`doctor` 打 `2.6.0`）。
+`push`/`pull_request` 触发。周期腿首证 = run `39032817663`（手动 `workflow_dispatch`，三档各 `811 passed`，含黄金逐字节复现与 `doctor` 自检），push 面 = run `39032796293`（三档各 `260 passed, 551 deselected` + `811 passed` 全量）；上一轮（CH-481）push 面 = run `39041920410`（三档各 `275 passed, 563 deselected`，全量 `838 passed` 干净退出）；上一轮（CH-482）push 面 = run `39043948338`（三档各 `285 passed, 567 deselected`，全量 `852 passed` 干净退出，`doctor` 打 `2.5.0`）；最新一轮（CH-483）push 面 = run `39050319814`（三档各 `308 passed, 575 deselected`，全量 `883 passed` 干净退出，`doctor` 打 `2.6.0`）；CH-484 push 面 = run `39092382196`（三档各 `311 passed, 575 deselected`，全量 `886 passed` 干净退出，回填 run `39092772664`）；CH-485 本机 gate **339 passed / 0 skipped（34.63s）**、全量 **920 passed / 0 skipped（71.69s）**、ruff 全绿、doctor 退 0（`pipeline 2.7.0`），远端 CI 由本次推送触发、run id 待回填。
 > 现状（CH-468 起）：仓库已公开，`main` 分支保护已配置——`merge-gate (3.11/3.12/3.13)` 为**必需检查**，
 > 三个 gate 任一失败即禁止合并（`full-suite` 因 `needs` 同样被阻断）。验收：故意失败的 PR #1 被
 > `mergeStateStatus=BLOCKED` 拦下。另有本地 pre-push 钩子双保险（见「本地红线兜底」）。
@@ -217,7 +220,7 @@ push 面 `full-suite` 必须保持无矩阵且钉死 `3.12`、每个作业必须
 
 ```bash
 pytest -m gate            # 红线层：六条 merge-gate + 低配机专项 + CH-469 两批安全/契约专项 + CH-473 第五轮 12 项 + CH-475 第六轮 7 项 + CH-476 第七轮 91 项 + CH-477 版本对账 4 项 + CH-478 批次① 有序列表端到端 4 项 + 批次② 等价门缩进敏感度 4 项 + CH-479 CI 版本矩阵口径 4 项 + CH-480 常驻资产同构 7 项 + CH-481 捕获档截断 8 项 + CH-482 代码块缩进重建 10 项（全绿方可合并）
-                          # 当前 285 项 = 275（上一轮口径：267（更早口径：40 契约红线 + 29 低配机 + 10 服务/存储 + 54 安全/配置/运维 + 13（CH-473 12 项 + CH-474 补入 X-17 1 项）+ 7（CH-475 第六轮）+ 91（CH-476：test_ch476_fixes.py 83 + test_sharding_unit.py 8）+ 4（CH-477 版本与编号对账）+ 4（CH-478 批次①：test_ch478_fixes.py 端到端反例）+ 4（CH-478 批次②：test_ch478_gate_drift.py 度量对照）+ 4（CH-479：test_ch479_ci_matrix.py 工作流文本静态断言）+ 7（CH-480：test_ch480_resident_assets.py 常驻 plist/schtasks 资产的静态同构断言））+ 8（CH-481：test_ch481_capture_clip.py 捕获档就地截断与 cron 接线））+ 10（CH-482：test_ch482_indent_rebuild.py 代码块行首缩进按几何重建：PDF 围栏/等宽块 2 + 几何守卫 1 + S1 字宽 1 + DOCX 保空白 1 + 表格不误判 1 + mono 首行缩进 1 + indent 模式不二次缩进 1 + 无字宽回退 1 + 缓冲/两行守卫 1）
+                          # 当前 339 项（CH-485；构成与完整耗时历史见 docs/dev-plan.md 附录 F / 12.1。项数是硬口径，耗时只作历史）
                           # 耗时历史记录：Linux 沙箱轮次 72–110s、T8 优化后 53.0s、CH-469 本机（macOS arm64 / Py 3.15）28.7s、CH-473 62.7s、CH-475 30.0s、CH-476 33.9s、CH-477 33.25s / 31.98s、CH-478 批次① 31.54s、批次② 31.16s、CH-479 38.55s / 收口复跑 33.74s、CH-480 36.13s / 收口复跑 35.43s（新七条红线只做 plistlib 解析与 XML 读 DOM，差值属同机负载抖动）、CH-481 36.14s / 34.92s / 35.91s、CH-482 35.71s（`--junitxml` 35.36s）——项数是硬口径，耗时只作历史
 pytest tests/             # 全量（marker 实际取值：M0+M2 / M3 / M5 / M6c / M8 / M9a / DoD / PERF，见 pytest.ini）
 python3 tests/make_golden.py            # 重建黄金样本（输出目录随脚本位置，--golden 可覆盖）

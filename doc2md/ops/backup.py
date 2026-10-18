@@ -470,6 +470,7 @@ class BackupPlan:
         tmp = dst.parent / f"{dst.name}.{secrets.token_hex(4)}.part"
         old_main: Path | None = None
         old_side: list[tuple[Path, Path]] = []
+        replaced = False
         try:
             size = src.stat().st_size
             with src.open("rb") as fh:
@@ -513,6 +514,7 @@ class BackupPlan:
                         os.replace(side, side_old)
                         old_side.append((side, side_old))
             tmp.replace(dst)
+            replaced = True
             _fsync_dir(dst.parent)
             _chmod600(dst, self.mode_warnings)
             con = sqlite3.connect(f"file:{dst}?mode=ro", uri=True)
@@ -532,8 +534,9 @@ class BackupPlan:
                         if side_old.exists():
                             os.replace(side_old, side)
                     _fsync_dir(dst.parent)
-                elif dst.exists() and old_main is None:
-                    # 目标原本不存在 → 失败后不得留下未验证的新库
+                elif replaced and dst.exists() and old_main is None:
+                    # 目标原本不存在 → 失败后不得留下未验证的新库；失败发生在
+                    # 替换之前时，旧目标必须原样保留。
                     dst.unlink(missing_ok=True)
             except OSError:
                 pass

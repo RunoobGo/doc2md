@@ -10,8 +10,8 @@
 - PLAN_VERSION：开发方案文档版本（主题篇规格变化时递增）。
 """
 
-PIPELINE_VERSION = "2.6.0"
+PIPELINE_VERSION = "2.7.0"
 SCHEMA_VERSION = 14          # IR 约定 14（文件名与内容的边界）落地
-PLAN_VERSION = "3.18"         # 开发方案文档版本（docs/dev-plan.md，文件名不带版本号）
+PLAN_VERSION = "3.19"         # 开发方案文档版本（docs/dev-plan.md，文件名不带版本号）
 
 __all__ = ["PIPELINE_VERSION", "SCHEMA_VERSION", "PLAN_VERSION"]

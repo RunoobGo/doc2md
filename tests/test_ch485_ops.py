@@ -176,3 +176,13 @@ def test_concurrent_external_backup_produces_valid_container(tmp_path):
     outs = list(ext.glob("*.enc"))
     assert len(outs) == 1, outs
     assert decrypt_bytes(outs[0].read_bytes(), PASS) == snap.read_bytes()
+
+
+def test_backup_lock_is_exclusive(tmp_path):
+    from doc2md.ops.backup import BackupBusy, backup_lock
+    with backup_lock(tmp_path):
+        with pytest.raises(BackupBusy):
+            with backup_lock(tmp_path):
+                pass
+    with backup_lock(tmp_path):
+        pass

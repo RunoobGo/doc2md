@@ -792,7 +792,8 @@ def test_external_write_fsyncs_and_chmod_failure_is_recorded(tmp_path, monkeypat
     monkeypatch.setattr(bk, "_fsync", lambda fh: calls.append(fh.fileno()))
     plan = bk.BackupPlan(local_dir=tmp_path / "b", external_dir=tmp_path / "e")
     plan.to_external(plan.snapshot(db), PASS)
-    assert len(calls) == 1, "外置容器写完必须 fsync"
+    # CH-485：快照自身也 fsync（.part→rename），外置容器同样 fsync。
+    assert len(calls) >= 1, "外置容器写完必须 fsync"
 
     monkeypatch.setattr(Path, "chmod", _chmod_raises)
     plan2 = bk.BackupPlan(local_dir=tmp_path / "b2", external_dir=tmp_path / "e2")

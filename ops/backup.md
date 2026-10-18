@@ -52,13 +52,15 @@ DOC2MD_BACKUP_PASSPHRASE='…' doc2md backup drill --keep      # 留存沙箱取
 DOC2MD_BACKUP_PASSPHRASE='…' doc2md backup restore \
     /Volumes/doc2md-backup/state-XXXX.sqlite.enc \
     --to work/state.sqlite --force
-# 命令内部已做：解密 → integrity_check → 旧库备份 → 清理 -wal/-shm →
-# 原子替换 → 恢复后再次 integrity_check；失败退出码 4，目标保持不变。
+# 命令内部已做：解密（v1/v2）→ integrity_check → 旧库备份 → 旧库/WAL 移开 →
+# 原子替换 → 恢复后再次 integrity_check；失败会回滚旧库并退出码 4。
+# 旧库备份为 pre-restore-<ts>-<rand>.sqlite（0600，纳入 14 天轮出）。
 sqlite3 work/state.sqlite "PRAGMA integrity_check;"   # 期望 ok
 ```
 
 > `--force` 只允许覆盖已存在的目标，不绕过完整性校验；旧库会先备份为
 > `pre-restore-<ts>-<rand>.sqlite`。恢复期间必须停止 serve / work 两个进程。
+> 恢复成功后 CLI 会为缺失产物且 `gate_json` 存在的文档从 DB 重建 zip（CH-485）。
 
 `backup drill`（CH-456 / T7）在 `work/tmp/drill-<ts>/` 隔离沙箱内依次执行：
 **copy_live → snapshot → external_encrypt → simulate_loss → rotate → restore →
@@ -83,6 +85,8 @@ integrity_check → compare**。线上 `state.sqlite` 只被只读拷贝，默�
   「顺手放一下」的目录，早期版本按 `glob("*")` + mtime 判定，会把用户放在同一目录的
   无关过期文件一并删掉；现在不是本工具形态的一律不碰。
 - **过期判据取更早者**：文件名内嵌的生成时刻与磁盘 mtime 两者中**更早**的那个超过保留期即删。
+- **删前/恢复前快照**（CH-485）：`predelete-*` 与 `pre-restore-*` 同样按 14 天轮出，并受份数/总字节硬上限；最新一份也受 14 天约束（FR-128 是上限，不是“至少保留 14 天”）。
+- **并发**：cron 的 snapshot→external→rotate 全程持有 `backup.lock`；外置容器 rename 前做一次流式解密自检，拿不到锁的运行记 `backup_skipped`。
   取生成时刻是因为跨卷拷贝会把 mtime 改成拷贝当天（副本看起来"很新"却已超期）；
   取 mtime 是因为老副本可能没有可解析的时刻，此时退回文件系统信号。
 

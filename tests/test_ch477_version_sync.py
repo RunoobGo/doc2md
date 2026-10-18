@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import re
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -115,3 +116,11 @@ def test_schema_and_db_version_rows_match_constants():
         f"IR schema 版本不一致：常量 {doc2md.SCHEMA_VERSION} / 文档 {schema.group(1)}")
     assert str(DB_VERSION) == db.group(1), (
         f"状态库结构版本不一致：常量 {DB_VERSION} / 文档 {db.group(1)}")
+
+
+@pytest.mark.gate
+def test_pyproject_version_matches_pipeline_constant():
+    """CH-485（R9-DOC-2）：包元数据必须与 PIPELINE_VERSION 同源。"""
+    py = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    assert py["project"]["version"] == doc2md.PIPELINE_VERSION, (
+        f"pyproject {py['project']['version']} != PIPELINE {doc2md.PIPELINE_VERSION}")

@@ -49,7 +49,7 @@ queue_async = false                    # CH-449：true → POST /jobs 只入队�
 enqueue_hash_threads = 8               # CH-476（R7-PERF-3）：异步入队的「预检+内容哈希」线程上限
                                        # 1 = 逐个串行；写库始终单线程按序提交，附着/幂等口径不变
 sync_min_parallel = 8                  # CH-471（SVC-3）：同步目录达此文件数才走进程池；否则串行
-                                       # false = 同步转换（方案 5.4 既有契约）
+                                       # 1 = 全部串行（同步转换仍是默认路径，方案 5.4）
 min_free_mb = 512                      # CH-450（NFR-6）：写产物/备份前的剩余空间下限；本项与 disk_safety_factor 同时为 0 才关闭门禁
 disk_safety_factor = 3                 # 需求 = 源大小 × 该系数
 stale_job_minutes = 30                 # CH-448：`doc2md work` 回收 running 超过该时长且崩溃遗骸（仅限队列来源）
