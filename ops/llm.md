@@ -20,6 +20,53 @@ LLM 在管线里只做**块级修补 op**（`split_block` / `merge_block` / `fix
 | 语言 | 中文语料选中文强的 instruct（如 Qwen 系列） | 黄金样本以中文为主 |
 | 格式 | **必须是 GGUF** | llama.cpp 唯一消费格式；`tokenizer verify` 可校验完整性 |
 
+### 本机实测推荐（2026-10-18，RTX 3070 8GB + i5-13600K / 34GB）
+
+本机 llama.cpp 为 winget 的 **b11680 Vulkan 构建**；选定：
+
+- **Qwen3.5-4B Q4_K_M**（4.21B，2.54GiB）——质量为优先；可全量 `-ngl 99` 上 GPU
+- 上下文 **32768**、KV **q4_0**、flash-attn on、单 slot；实测显存约 **3.7GB used / 4.3GB free**
+- 若 KV 用 q8_0，32k 会到约 **7.9GB used**，8GB 卡只剩几十 MB，不建议
+- `--reasoning-budget 0` 关闭思考；`--jinja` 使用模型聊天模板；`--alias doc2md-llm`
+
+```powershell
+llama-server.exe -m "D:\Models\Qwen3.5-4B-Q4_K-M\Qwen3.5-4B-Q4_K_M.gguf" `
+  --host 127.0.0.1 --port 8080 `
+  -ngl 99 -c 32768 -t 8 -tb 16 -fa on `
+  -ctk q4_0 -ctv q4_0 -np 1 `
+  --jinja --reasoning-budget 0 --alias doc2md-llm --no-webui --metrics
+```
+
+项目本地配置（`work/` 不入库）：
+
+```toml
+[llm]
+mode = "server"
+fallback = true
+timeout_ms = 120000
+retries = 1
+model = "doc2md-llm"
+bind = "127.0.0.1"
+port = 8080
+auth = false
+```
+
+本机实测结果：
+
+| 项目 | 结果 |
+| --- | --- |
+| `/health` / `/v1/models` | ok / `doc2md-llm` |
+| 4B `llama-bench` pp/tg | 134.6 / 64.1 t/s（16 token 短测） |
+| 40 页语料（18,058 prompt tokens） | server 模式 **15.35s**，成功 |
+| 3 页黄金样本 | server 模式 **1.09s**，成功 |
+| 320 页（5789 块） | prompt 超 32k，`fallback=true` 回退 offline，**13.05s** 成功 |
+| 注入探针 | `rewrite_table_to_prose`/`delete_block` 被拒，归因 `injection_candidate` |
+
+**边界**：项目 `LlmClient` 当前把整篇块摘要一次发出，不做分块；超过服务上下文的文档会收到
+http 错误。生产建议保持 `llm.fallback=true`（大文档自动 offline），或先修 LLM 层分块后再
+考虑 `fallback=false`。2B 模型虽生成更快，但 32k q8 KV 占用约 5.6GB、且会输出 fenced JSON；
+本轮以 4B 为质量/显存平衡选择。
+
 ## 引入五步
 
 ```bash
@@ -82,9 +129,10 @@ doc2md convert 文件.pdf --llm-mode server
 
 - **离线纪律（NFR-1）**：运行期出站仅限 127.0.0.1；模型下载属于引入期人工动作，
   与运行期守护无关。不要把 HuggingFace 代理配置写进任何 `doc2md` 配置。
-- **诚实边界**（12.7）：已验证面 = 请求契约、故障分级、fallback、注入归因
-  （假 llama-server 22 项 + e2e）；**真实 GGUF 全链路**（真实模型加载与真实输出下的
-  产物等价性）未在沙箱验证——首次接入后建议对黄金样本跑一轮 `convert --llm-mode server`
-  并与 offline 产物比对，作为一次真机验收。
+- **诚实边界**（12.7，2026-10-18 更新）：真实 GGUF 全链路已在本机 Qwen3.5-4B +
+  llama.cpp b11680 Vulkan 上验证：`doctor`、`/health`、真实 `convert`、注入探针拒绝、
+  大小文档 fallback 均通过；3 页 PDF 与 6 块 DOCX 的 server/offline `content.md`
+  **逐字节相同**（sha 前缀 `e822313717df` / `4e976360e761`）。仍未验证：其他模型、
+  跨机 GPU/驱动、320 页以上要 LLM 真正参与（当前超上下文回退 offline）。
 - 模型资产不入 git（`vendor/models/` 不进版本库）；换模型 = 换 gguf 文件 +
   （可选）更新 `llm.model`，无 schema / 版本常量影响。

@@ -113,6 +113,7 @@
 | 真实 Word 模板 | Office 2052 模板 23 份，20 份可转换；文本框 11 文件/116 处、编号 9/22、表格 11/155、合并单元格 3/10、sdt 20/1495、页眉页脚 16/20 |
 | 真实中文 PDF | Word 16 导出 9 份，1–8 页，正文 8.0–11.0pt；规则改进后 8/9 检出标题块 |
 | 人工标题 ground truth（10 PDF） | RedAndBlackReport recall **0.967** / precision 0.906；TimelessReport **0.567** / 1.000；AdjacencyReport 0.333 / 1.000；ApothecaryNewsletter 0.333 / 0.500；其余模板仍有漏判 |
+| 本机用户真实文档（本地不入库） | 7 PDF + 4 DOCX + 3 旧 DOC；**11/11 受支持文件转换成功**，3 个 `.doc` 预期 E4151；PDF 2–156 页，最大 4287 blocks/845 headings/356 tables |
 | 本轮修复 | 文本框内 `w:sdt` / 嵌套文本框漏抽；无编号大字号短行标题（+6pt 阈值） |
 
 真实样本二进制按许可与隐私要求保留在 `work/real_samples/`，不进入公开仓库；可复现脚本、清单与人工 ground truth 见 `tests/corpus/real/`。本机 10 份 PDF 已人工标注，B-15 仍需扩展到非模板真实文档并校准小字号标题；B-13 仍需人工抽查样式联动，故两项仍保持开放。
@@ -125,8 +126,8 @@
 | B-7 | Windows CI 首次远端运行 | **已闭环**：run `39106866387` 六作业全绿；首轮 `39106420181` 仅 Windows checkout 长路径失败，`7b99d00` 启用 `core.longpaths` 后复跑通过 |
 | B-08 | Win11 / Mac mini 跨机性能基准 | 当前数字来自 Windows 本机与历史 macOS/Linux；需目标机同语料复测 |
 | B-10 | v1 历史容器、SMB/网络卷、并发 cron、失败回滚的真机恢复 | 需要真实外置卷/网络卷与人工拔盘 |
-| B-13 | 真实 Word 模板语料（文本框、编号、sdt、域代码、页眉页脚） | **已开始收集并修复**：Office 2052 真实模板 23 份，20 份可转换；文本框中 `w:sdt`/嵌套文本框漏抽已修；特征矩阵见 `tests/corpus/real/manifest.json`；样本本地保留，仍需人工抽查 |
-| B-15 | 真实中文 PDF 标题/数字表/跨行链接语料 | **已收集 10 份并人工标注**：9/10 检出标题块；RedAndBlackReport recall 0.967 / precision 0.906，TimelessReport 0.567 / 1.000；仍需扩展到非模板真实文档并校准小字号标题 |
+| B-13 | 真实 Word 模板语料（文本框、编号、sdt、域代码、页眉页脚） | **已收集并修复**：Office 2052 真实模板 23 份（20 可转换）+ 本机真实 DOCX 4 份全部可转换；文本框 `w:sdt`/嵌套漏抽已修；特征矩阵见 `tests/corpus/real/manifest.json`；样本本地保留，仍需人工抽查 |
+| B-15 | 真实中文 PDF 标题/数字表/跨行链接语料 | **已收集并人工标注**：10 份 Word 导出 PDF（9/10 检出标题，RedAndBlack recall 0.967、Timeless 0.567）+ 本机真实 PDF 7 份（2–156 页，全部转换成功）；仍需对真实业务 PDF 做人工标题 ground truth |
 | B-16 | 真实注入语料 + `_attribute` 归因 | 需安全语料与人工审阅 |
 | B-17 | 图片型 DOCX 的媒体全量驻留 | 本机测量：871KB `StudentReport.docx` 转换 0.46s；短进程峰值采样未捕获，媒体全量驻留架构未改；需决定自建 OOXML 读取器/媒体上限 |
 | B-18 | API 与 worker 跨进程产物重建的最终一致 | **已实现并本机双进程验证**：`out/.locks/<doc>.lock` 跨进程 O_EXCL 锁 + 60s 陈旧回收 + 30s 超时 E5031；两个独立 Python 进程同时重建同一 600 块文档均 exit 0、zip 可读；线程串行回归已加 |

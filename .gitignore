@@ -25,3 +25,6 @@ tests/golden/bigfile.bin
 
 # 编辑器 / 系统
 .DS_Store
+
+# 本机用户提供的真实/内部语料（只做本地验证，不进入公开仓库）
+tests/corpus/tests/

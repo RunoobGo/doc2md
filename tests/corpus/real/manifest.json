@@ -244,5 +244,22 @@
       ]
     }
   ],
-  "note": "Manual ground truth covers 10 Word-exported Chinese PDFs; broader non-template real-world corpus and low-recall cases remain open."
+  "note": "Manual ground truth covers 10 Word-exported Chinese PDFs; broader non-template real-world corpus and low-recall cases remain open.",
+  "user_corpus": {
+    "total": 14,
+    "pdf": 7,
+    "docx": 4,
+    "doc": 3,
+    "supported_ok": 11,
+    "doc_rejected": 3,
+    "pages_range": [
+      2,
+      156
+    ],
+    "max_blocks": 4287,
+    "max_headings": 845,
+    "max_tables": 356,
+    "local_only": true,
+    "location": "tests/corpus/tests (gitignored)"
+  }
 }
