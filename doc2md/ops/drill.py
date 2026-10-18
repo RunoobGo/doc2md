@@ -162,7 +162,8 @@ def run_drill(cfg: dict, root: Path, *, keep: bool = False) -> DrillReport:
 
         # 3) 外置加密副本（NFR-18：强制 AES-256-GCM 容器 + 600）
         enc = plan.to_external(snap, passphrase)
-        head = enc.read_bytes()[:len(MAGIC_V2)]
+        with enc.open("rb") as fh:
+            head = fh.read(len(MAGIC_V2))
         if head != MAGIC_V2:
             raise DrillFailure(f"external container magic mismatch: {head!r}")
         rep.steps.append(DrillStep("external_encrypt", True,
@@ -188,7 +189,7 @@ def run_drill(cfg: dict, root: Path, *, keep: bool = False) -> DrillReport:
 
         # 6) 解密恢复
         restored = work / "restored.sqlite"
-        plan.restore(enc, restored, passphrase)
+        plan.restore_safe(enc, restored, passphrase, force=True)
         rep.steps.append(DrillStep("restore", True,
                                    {"file": restored.name,
                                     "mode": oct(restored.stat().st_mode & 0o777)}))

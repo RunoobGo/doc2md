@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import PIPELINE_VERSION, config
-from .ops.backup import BackupPlan
+from .ops.backup import BackupBusy, BackupPlan, backup_lock
 from .ops.drill import DRILL_DIR_NAME
 from .ops.logging import RotatingJsonlWriter, bound_capture_files, capture_budget
 from .storage.db import Store, now_iso
@@ -97,6 +97,71 @@ def sweep_tmp(cfg: dict, root: Path) -> int:
     return cleaned
 
 
+def _run_backup(plan: BackupPlan, cfg: dict, root: Path, mode: str,
+                passphrase_env: str, rep: "CronReport") -> None:
+    """cron 的备份/外置/轮出步骤（在 backup_lock 内执行）。"""
+    # NFR-6（CH-450）：备份同样是写盘。快照大小 = 库大小（外置副本 ≈ ×1.05，
+    # AES-GCM + nonce），按同一系数口径预估；空间不足记为失败步骤而不是半截文件。
+    from .errors import Doc2mdError
+    from .ops.diskguard import assert_free_space
+    state = root / "state.sqlite"
+    snap = None
+    # CH-483（R8-OPS-3）：只有本轮外置加密备份成功，才允许轮出外置旧副本。
+    # 失败/跳过的轮次若仍 wheel，连续失败超过保留期会删掉最后一份外置副本。
+    external_rotatable = False
+    try:
+        assert_free_space(plan.local_dir, _db_bytes(state), cfg=cfg,
+                          what="local_snapshot")
+        snap = plan.snapshot(state)
+    except Doc2mdError as exc:
+        rep.add("local_snapshot", code=exc.code, message=exc.message, ok=False)
+        rep.ok = False
+    except OSError as exc:
+        rep.add("local_snapshot", error=str(exc)[:200], ok=False)
+        rep.ok = False
+    if snap is not None:
+        rep.add("local_snapshot", path=str(snap), bytes=snap.stat().st_size)
+        if plan.mode_warnings:
+            # O-12：chmod 在无 POSIX 权限的卷上不生效 ≠ 失败，但「work/ 700
+            # 所以快照可明文」这个前提已经不成立了，必须进日报。
+            rep.add("work_dir_mode", warnings=list(plan.mode_warnings))
+
+        # 3) 外置加密增量（仅 weekly）
+        if mode == "weekly":
+            import os
+            phrase = os.environ.get(passphrase_env, "")
+            if not plan.external_dir:
+                # CH-433：未配置外置卷属「按配置跳过」，不是失败；
+                # 原逻辑先判 passphrase，会让没接外置卷的部署每周报一次 ok=False。
+                rep.add("external_backup", skipped="ops.backup_external_dir not configured")
+            elif not phrase:
+                rep.add("external_backup", skipped="no passphrase in env", ok=False)
+                rep.ok = False
+            else:
+                try:
+                    # CH-471（OPS-4）：外置卷剩余空间守卫已下沉到 plan.to_external
+                    # （plan 带 cfg → 内部自检），这里不再重复预检，to_external 成为
+                    # 唯一闸口，直接调用方也受同一道保护。
+                    out = plan.to_external(snap, phrase)
+                    external_rotatable = True
+                    rep.add("external_backup", path=str(out), bytes=out.stat().st_size,
+                            encrypted=True)
+                except Doc2mdError as exc:
+                    rep.add("external_backup", code=exc.code, message=exc.message,
+                            ok=False)
+                    rep.ok = False
+
+        removed = plan.rotate(include_external=(mode == "weekly" and external_rotatable),
+                              keep_newest=True)
+        # CH-485（R9-OPS-1）：删前/恢复前快照与 state-* 同轮清理；沿用
+        # 既有 rotation 步骤名，避免改变附录 E 的 10 步契约。
+        pre_removed = plan.rotate_predelete()
+        rep.add("rotation", removed=[str(p) for p in removed],
+                predelete_removed=[str(p) for p in pre_removed],
+                external_rotation=("done" if mode == "weekly" and external_rotatable
+                                   else "skipped"))
+
+
 def run(cfg: dict | None = None, root: Path | None = None, mode: str = "daily",
         passphrase_env: str = "DOC2MD_BACKUP_PASSPHRASE",
         with_backup: bool = True) -> CronReport:
@@ -132,67 +197,13 @@ def run(cfg: dict | None = None, root: Path | None = None, mode: str = "daily",
                       cfg=cfg)
 
     if with_backup:
-        # NFR-6（CH-450）：备份同样是写盘。快照大小 = 库大小（外置副本 ≈ ×1.05，
-        # AES-GCM + nonce），按同一系数口径预估；空间不足记为失败步骤而不是半截文件。
-        from .errors import Doc2mdError
-        from .ops.diskguard import assert_free_space
-        state = root / "state.sqlite"
-        snap = None
-        # CH-483（R8-OPS-3）：只有本轮外置加密备份成功，才允许轮出外置旧副本。
-        # 失败/跳过的轮次若仍 wheel，连续失败超过保留期会删掉最后一份外置副本。
-        external_rotatable = False
         try:
-            assert_free_space(plan.local_dir, _db_bytes(state), cfg=cfg,
-                              what="local_snapshot")
-            snap = plan.snapshot(state)
-        except Doc2mdError as exc:
-            rep.add("local_snapshot", code=exc.code, message=exc.message, ok=False)
-            rep.ok = False
-        except OSError as exc:
-            rep.add("local_snapshot", error=str(exc)[:200], ok=False)
-            rep.ok = False
-        if snap is not None:
-            rep.add("local_snapshot", path=str(snap), bytes=snap.stat().st_size)
-            if plan.mode_warnings:
-                # O-12：chmod 在无 POSIX 权限的卷上不生效 ≠ 失败，但「work/ 700
-                # 所以快照可明文」这个前提已经不成立了，必须进日报。
-                rep.add("work_dir_mode", warnings=list(plan.mode_warnings))
-
-            # 3) 外置加密增量（仅 weekly）
-            if mode == "weekly":
-                import os
-                phrase = os.environ.get(passphrase_env, "")
-                if not plan.external_dir:
-                    # CH-433：未配置外置卷属「按配置跳过」，不是失败；
-                    # 原逻辑先判 passphrase，会让没接外置卷的部署每周报一次 ok=False。
-                    rep.add("external_backup", skipped="ops.backup_external_dir not configured")
-                elif not phrase:
-                    rep.add("external_backup", skipped="no passphrase in env", ok=False)
-                    rep.ok = False
-                else:
-                    try:
-                        # CH-471（OPS-4）：外置卷剩余空间守卫已下沉到 plan.to_external
-                        # （plan 带 cfg → 内部自检），这里不再重复预检，to_external 成为
-                        # 唯一闸口，直接调用方也受同一道保护。
-                        out = plan.to_external(snap, phrase)
-                        external_rotatable = True
-                        rep.add("external_backup", path=str(out), bytes=out.stat().st_size,
-                                encrypted=True)
-                    except Doc2mdError as exc:
-                        rep.add("external_backup", code=exc.code, message=exc.message,
-                                ok=False)
-                        rep.ok = False
-
-            removed = plan.rotate(include_external=(mode == "weekly" and external_rotatable),
-                                  keep_newest=True)
-            # CH-485（R9-OPS-1）：删前/恢复前快照与 state-* 同轮清理；沿用
-            # 既有 rotation 步骤名，避免改变附录 E 的 10 步契约。
-            pre_removed = plan.rotate_predelete()
-            rep.add("rotation", removed=[str(p) for p in removed],
-                    predelete_removed=[str(p) for p in pre_removed],
-                    external_rotation=("done" if mode == "weekly" and external_rotatable
-                                       else "skipped"))
-
+            with backup_lock(plan.local_dir):
+                _run_backup(plan, cfg, root, mode, passphrase_env, rep)
+        except BackupBusy as exc:
+            rep.add("local_snapshot", skipped=str(exc))
+            rep.add("rotation", external_rotation="skipped",
+                    predelete_removed=[])
     # 4) tmp 清理（服务启动同样执行一次，见 api.create_app）
     cleaned = sweep_tmp(cfg, root)
     rep.add("tmp_clean", removed=cleaned)

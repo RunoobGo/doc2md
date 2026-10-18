@@ -18,8 +18,11 @@ macOS 部署可选 encrypted sparsebundle（见 ops/backup.md）。
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import re
+import secrets
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
@@ -39,7 +42,10 @@ _V2_SALT_LEN = 16
 _V2_HEADER_LEN = 7 + _V2_SALT_LEN + 4 + 8   # magic | salt | chunk_size | total_chunks
 
 # 本工具产生的副本名（轮出只认这个形态，见 BackupPlan.rotate）
-_SNAPSHOT_RE = re.compile(r"^state-(\d{8}T\d{6}Z)\.sqlite(\.enc)?$")
+# CH-485（R9-OPS-5）：快照名允许随机后缀，避免同一秒的并发运行互覆盖；
+# 旧形态 `state-<ts>.sqlite` 仍由可选组匹配（轮出兼容）。
+_SNAPSHOT_RE = re.compile(
+    r"^state-(\d{8}T\d{6}Z)(?:-[0-9a-f]{8})?\.sqlite(\.enc)?$")
 # CH-483（R8-OPS-1）：删除前整库快照。随机后缀避免同一秒内两次删除互相覆盖。
 _PREDELETE_RE = re.compile(r"^predelete-(\d{8}T\d{6}Z)-[0-9a-f]{8}\.sqlite$")
 # CH-485（R9-OPS-2）：恢复前旧库备份也属于含正文的本地副本，需同样轮出/0600。
@@ -48,6 +54,43 @@ _PRERESTORE_RE = re.compile(r"^pre-restore-(\d{8}T\d{6}Z)-[0-9a-f]{8}\.sqlite$")
 PREDELETE_KEEP_MAX = 50
 PREDELETE_MAX_BYTES = 2 * 1024 * 1024 * 1024
 _TS_FMT = "%Y%m%dT%H%M%SZ"
+MAX_V1_BYTES = 512 * 1024 * 1024        # v1 单块容器整读恢复的防御上限
+
+
+class BackupBusy(RuntimeError):
+    """另一个备份进程持有锁（cron 重入/手动补跑重叠）。"""
+
+
+@contextlib.contextmanager
+def backup_lock(directory: str | Path, name: str = "backup.lock",
+                stale_seconds: float = 24 * 3600):
+    """跨平台的备份互斥锁（O_EXCL 标记文件；进程崩溃后按 mtime 过期）。"""
+    d = Path(directory)
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / name
+    fd = None
+    for _ in range(2):
+        try:
+            fd = os.open(str(p), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            os.write(fd, f"{os.getpid()} {time.time():.0f}".encode("ascii"))
+            os.fsync(fd)
+            break
+        except FileExistsError:
+            try:
+                age = time.time() - p.stat().st_mtime
+            except OSError:
+                age = 0.0
+            if age > stale_seconds:
+                p.unlink(missing_ok=True)
+                continue
+            raise BackupBusy(f"backup already running: {p}")
+    if fd is None:
+        raise BackupBusy(f"backup lock contention: {p}")
+    try:
+        yield p
+    finally:
+        os.close(fd)
+        p.unlink(missing_ok=True)
 
 
 def derive_key(passphrase: str, salt: bytes) -> bytes:
@@ -222,14 +265,25 @@ class BackupPlan:
 
 
     def snapshot(self, state_db: Path, ts: datetime | None = None) -> Path:
-        """本地快照（work/ 内可明文，前提是 work/ 权限 700）。"""
+        """本地快照（work/ 内可明文，前提是 work/ 权限 700）。
+
+        CH-485（R9-OPS-5）：随机后缀 + `.part` + rename。同一秒的并发运行
+        不再写同一路径；SIGKILL/断电最多留下 `.part`，不会被轮出/恢复挑中。
+        """
         ts = ts or datetime.now(timezone.utc)
         self.local_dir.mkdir(parents=True, exist_ok=True)
-        dst = self.local_dir / f"state-{ts.strftime(_TS_FMT)}.sqlite"
-        # CH-469（O-11）：backup 中途抛错（源库被占用、磁盘写满）时不得留下
-        # 半截 `state-*.sqlite`——它名字合法、时间戳是「当期」，轮出不会清它，
-        # 恢复演练却会挑中它。sqlite_backup 失败即删。
-        sqlite_backup(state_db, dst)
+        dst = self.local_dir / (
+            f"state-{ts.strftime(_TS_FMT)}-{secrets.token_hex(4)}.sqlite")
+        part = dst.with_name(dst.name + ".part")
+        sqlite_backup(state_db, part)
+        check = _sqlite_quick_check(part)
+        if check != "ok":
+            part.unlink(missing_ok=True)
+            raise ValueError(f"snapshot quick_check failed: {check}")
+        with part.open("rb+") as fh:
+            _fsync(fh)
+        part.replace(dst)
+        _fsync_dir(self.local_dir)
         mode = _parse_mode(self.work_dir_mode)
         self._enforce_mode(self.local_dir, mode)
         self._enforce_mode(self._resolve_work_root(), mode)
@@ -356,11 +410,15 @@ class BackupPlan:
         # 的半截 .enc**：rotate() 的 _SNAPSHOT_RE 不清它，后续恢复演练可能选中
         # 必然认证失败的容器。本地 snapshot（O-11）与 restore 早已是 tmp+rename
         # 口径，外置侧漏修——这里补齐，失败路径 unlink 半截件。
-        part = out.with_name(out.name + ".part")
+        part = out.with_name(out.name + f".{secrets.token_hex(4)}.part")
         try:
             with snapshot.open("rb") as src, part.open("wb") as dst:
                 encrypt_stream(src, dst, passphrase)
                 _fsync(dst)                      # O-14：外置卷掉电不留半截容器
+            # CH-485（R9-OPS-5）：rename 前流式解密自检，防止并发/IO 错误把
+            # 认证失败容器当成有效备份（keep_newest 否则会保护它）。
+            with part.open("rb") as chk, open(os.devnull, "wb") as sink:
+                decrypt_stream(chk, sink, passphrase)
             part.replace(out)
         except Exception:
             part.unlink(missing_ok=True)
@@ -394,24 +452,39 @@ class BackupPlan:
 
     def restore_safe(self, src: Path, dst: Path, passphrase: str, *,
                      force: bool = False) -> Path:
-        """恢复的安全序列（CH-483 / R8-OPS-2）。
+        """恢复的安全序列（CH-483 / R8-OPS-2；CH-485 补 v1 与失败回滚）。
 
-        与 `restore` 的区别：目标已存在默认拒绝；强制时先备份旧库；无论明文
-        快照还是加密容器都先落到 `.part` 并跑 `integrity_check`；替换前清理
-        目标旁的 `-wal`/`-shm`，避免旧 WAL 帧污染新库；替换后复核完整性。
+        与 `restore` 的区别：
+        - 目标已存在默认拒绝；`--force` 先做旧库备份；
+        - v1 历史容器（单块）与 v2 流式容器都可恢复；
+        - 先落 `.part` + 完整性校验；旧库及 `-wal/-shm` 先移开，替换/复核
+          失败时回滚，而不是留下“目标已变、WAL 已删”的半恢复态；
+        - `pre-restore-*` 0600，由 `rotate_predelete` 纳入 14 天轮出。
         """
-        import secrets
         import sqlite3
 
         src, dst = Path(src), Path(dst)
         if dst.exists() and not force:
             raise FileExistsError(f"target exists: {dst} (use --force)")
         dst.parent.mkdir(parents=True, exist_ok=True)
-        tmp = dst.parent / (dst.name + ".part")
+        tmp = dst.parent / f"{dst.name}.{secrets.token_hex(4)}.part"
+        old_main: Path | None = None
+        old_side: list[tuple[Path, Path]] = []
         try:
+            size = src.stat().st_size
             with src.open("rb") as fh:
                 head = fh.read(len(MAGIC_V2))
-            if head in (MAGIC, MAGIC_V2):
+            if head == MAGIC:
+                if not passphrase:
+                    raise ValueError("passphrase required for encrypted backup")
+                if size > MAX_V1_BYTES:
+                    raise ValueError(
+                        f"legacy v1 container too large to restore in memory: {size}")
+                plain = decrypt_bytes(src.read_bytes(), passphrase)
+                with tmp.open("wb") as w:
+                    w.write(plain)
+                    _fsync(w)
+            elif head == MAGIC_V2:
                 if not passphrase:
                     raise ValueError("passphrase required for encrypted backup")
                 with src.open("rb") as r, tmp.open("wb") as w:
@@ -430,21 +503,46 @@ class BackupPlan:
                 ts = datetime.now(timezone.utc).strftime(_TS_FMT)
                 backup = dst.parent / f"pre-restore-{ts}-{secrets.token_hex(4)}.sqlite"
                 sqlite_backup(dst, backup)
-            # 目标旁的旧 WAL/SHM 属于被替换的库；保留会让新库打开时尝试应用旧帧。
-            for suffix in ("-wal", "-shm"):
-                Path(str(dst) + suffix).unlink(missing_ok=True)
+                _chmod600(backup, self.mode_warnings)
+                old_main = dst.with_name(f"{dst.name}.old-{secrets.token_hex(4)}")
+                os.replace(dst, old_main)
+                for suffix in ("-wal", "-shm"):
+                    side = Path(str(dst) + suffix)
+                    if side.exists():
+                        side_old = Path(str(old_main) + suffix)
+                        os.replace(side, side_old)
+                        old_side.append((side, side_old))
             tmp.replace(dst)
             _fsync_dir(dst.parent)
             _chmod600(dst, self.mode_warnings)
+            con = sqlite3.connect(f"file:{dst}?mode=ro", uri=True)
+            try:
+                if str(con.execute("PRAGMA integrity_check").fetchone()[0]) != "ok":
+                    raise ValueError("restored db failed integrity_check")
+            finally:
+                con.close()
         except Exception:
             tmp.unlink(missing_ok=True)
+            # 回滚：优先恢复旧主库与 WAL/SHM；没有旧库时删掉刚替换的目标。
+            try:
+                if old_main is not None and old_main.exists():
+                    dst.unlink(missing_ok=True)
+                    os.replace(old_main, dst)
+                    for side, side_old in old_side:
+                        if side_old.exists():
+                            os.replace(side_old, side)
+                    _fsync_dir(dst.parent)
+                elif dst.exists() and old_main is None:
+                    # 目标原本不存在 → 失败后不得留下未验证的新库
+                    dst.unlink(missing_ok=True)
+            except OSError:
+                pass
             raise
-        con = sqlite3.connect(f"file:{dst}?mode=ro", uri=True)
-        try:
-            if str(con.execute("PRAGMA integrity_check").fetchone()[0]) != "ok":
-                raise ValueError("restored db failed integrity_check")
-        finally:
-            con.close()
+        if old_main is not None:
+            old_main.unlink(missing_ok=True)
+        for _side, side_old in old_side:
+            side_old.unlink(missing_ok=True)
+        _fsync_dir(dst.parent)
         return dst
 
 
@@ -495,9 +593,21 @@ class BackupPlan:
                 if p is protected:
                     continue
                 if stamp < cutoff:
-                    p.unlink()
+                    p.unlink(missing_ok=True)
                     removed.append(p)
         return removed
+
+
+def _sqlite_quick_check(path: Path) -> str:
+    import sqlite3
+    try:
+        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        try:
+            return str(con.execute("PRAGMA quick_check").fetchone()[0])
+        finally:
+            con.close()
+    except sqlite3.DatabaseError as exc:
+        return f"error: {type(exc).__name__}"
 
 
 def _fsync(fh) -> None:
