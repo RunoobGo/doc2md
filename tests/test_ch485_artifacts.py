@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 import zipfile
 from pathlib import Path
 
@@ -72,6 +74,35 @@ def test_e4091_rebuild_restores_edited_zip(api_client, headers, saved_doc,
     with zipfile.ZipFile(zp) as z:
         md = z.read(f"{doc_id}/content.md").decode("utf-8")
     assert marker in md, "E4091 后必须从 DB 编辑内容重建 zip"
+
+
+@pytest.mark.gate
+def test_artifact_lock_serializes_threads(tmp_path):
+    """B-18：同一 out 目录的 doc 重建必须串行，不能两个线程同时 package。"""
+    from doc2md.api import _artifact_lock
+    active = 0
+    peak = 0
+    order: list[int] = []
+    guard = threading.Lock()
+
+    def worker(i: int) -> None:
+        nonlocal active, peak
+        with _artifact_lock(tmp_path, "doc-lock", timeout=5):
+            with guard:
+                active += 1
+                peak = max(peak, active)
+                order.append(i)
+            time.sleep(0.05)
+            with guard:
+                active -= 1
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in (1, 2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert peak == 1, f"artifact lock overlapped: order={order} peak={peak}"
+    assert not (tmp_path / ".locks" / "doc-lock.lock").exists()
 
 
 @pytest.mark.gate

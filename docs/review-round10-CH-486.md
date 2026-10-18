@@ -70,8 +70,8 @@
 
 | 项目 | 结果 |
 | --- | --- |
-| `pytest -m gate`（Windows 本机） | **343 项：342 passed / 0 failed / 1 platform skip（47.61s）** |
-| `pytest`（Windows 本机全量） | **932 项：924 passed / 0 failed / 8 platform skips（119.79s）** |
+| `pytest -m gate`（Windows 本机） | **344 项：343 passed / 0 failed / 1 platform skip（47.46s）** |
+| `pytest`（Windows 本机全量） | **934 项：926 passed / 0 failed / 8 platform skips（118.28s）** |
 | 综合语料 | **17/17 通过**（16 目标 Markdown + 1 扫描件 E4221 拒收） |
 | `ruff check .` | All checks passed |
 | `doc2md doctor` | exit 0；`pipeline 2.8.0`、`root_private` 可见 |
@@ -129,11 +129,11 @@
 | B-15 | 真实中文 PDF 标题/数字表/跨行链接语料 | **已开始收集并加规则**：9 份 Word 导出中文 PDF，正文 8.0–11.0pt；8/9 检出标题块，RedAndBlackReport recall 0.955、TimelessReport 0.435（自动代理）；仍需人工标注 10–20 份标题集合做最终 H1 precision/recall |
 | B-16 | 真实注入语料 + `_attribute` 归因 | 需安全语料与人工审阅 |
 | B-17 | 图片型 DOCX 的媒体全量驻留 | 需决定是否自建 OOXML 读取器/媒体上限；当前 `python-docx` 会载入 `word/media/*`，4 worker 会放大 |
-| B-18 | API 与 worker 跨进程产物重建的最终一致 | 同进程已串行；跨进程仍需按 doc 的跨进程锁或 DB 版本号发布协议 |
+| B-18 | API 与 worker 跨进程产物重建的最终一致 | **已实现并本机双进程验证**：`out/.locks/<doc>.lock` 跨进程 O_EXCL 锁 + 60s 陈旧回收 + 30s 超时 E5031；两个独立 Python 进程同时重建同一 600 块文档均 exit 0、zip 可读；线程串行回归已加 |
 | B-19 | 大文档 PATCH 的全篇重渲染/重打包 O(全文) | 需设计块级增量渲染；当前单块编辑仍 O(文档) |
-| B-20 | `/docs`、`/audit`、`/audit/deletions` 的硬分页上界 | 低风险但会改变大库 API 形状，需产品确认默认值 |
+| B-20 | `/docs`、`/audit`、`/audit/deletions` 的硬分页上界 | **已实现**：默认 500、显式 limit 硬顶 500，保留 total/offset/limit；600 块 API 回归已加 |
 
-**提醒（每批交付时重复）**：B-7（Windows CI）已由 run `39106866387` 闭环；B-6 仍是域策略/受管终端的目标机实证路径；B-10 是“以为备份了”的最后防线；B-13/B-15/B-16 是结构修复的真实语料验收；B-17/B-18/B-19 是本轮明确留作后续架构项，不应在发布说明中写成已解决。
+**提醒（每批交付时重复）**：B-7（Windows CI）已由 run `39106866387` 闭环；B-18/B-20 已在本机实现；B-6 仍是域策略/受管终端的目标机实证路径；B-10 是“以为备份了”的最后防线；B-13/B-15/B-16 是结构修复的真实语料验收；B-17/B-19 仍是后续架构项，不应在发布说明中写成已解决。
 
 ## 6. 变更与回滚
 

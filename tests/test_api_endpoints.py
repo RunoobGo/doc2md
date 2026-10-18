@@ -13,6 +13,8 @@ import pytest
 from conftest import hdr
 
 from doc2md import config
+from doc2md.ir import IR, Block
+from doc2md.storage.repo import save_ir
 
 pytestmark = [pytest.mark.milestone("DoD")]
 
@@ -69,6 +71,23 @@ def test_system_reload_role_matrix(api_client):
     assert r.status_code == 200 and r.get_json()["reloaded"] is True
     assert client.post("/system/reload", headers=hdr(tokens, "editor")).status_code == 403
     assert client.post("/system/reload", headers=hdr(tokens, "reader")).status_code == 403
+
+
+def test_document_blocks_default_window_is_capped(api_client):
+    """大文档块列表默认 500 上限，total 仍报告真实总数（B-20）。"""
+    client, tokens = api_client
+    store = client.application.config["doc2md"]["store"]
+    ir = IR(doc_id="cap0000000000001", source_key="cap000000000000000000001",
+            source_name="cap.pdf", format="pdf",
+            blocks=[Block(id=f"b{i}", type="paragraph", text=f"row-{i}")
+                    for i in range(1, 601)])
+    save_ir(store, ir)
+    r = client.get(f"/docs/{ir.doc_id}", headers=hdr(tokens, "reader"))
+    assert r.status_code == 200
+    body = r.get_json()
+    assert len(body["blocks"]) == 500
+    assert body["blocks_total"] == 600
+    assert body["blocks_limit"] == 500
 
 
 def test_system_reload_preserves_cli_root_binding(api_client):

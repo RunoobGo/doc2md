@@ -9,11 +9,13 @@
 """
 from __future__ import annotations
 
+import contextlib
 import copy
 import hashlib
 import json
 import os
 import threading
+import time
 from pathlib import Path
 
 from . import PIPELINE_VERSION, SCHEMA_VERSION, auth, config
@@ -121,14 +123,50 @@ def _doc_lock(doc_id: str) -> threading.Lock:
     return _REBUILD_LOCKS[hash(doc_id) % len(_REBUILD_LOCKS)]
 
 
+@contextlib.contextmanager
+def _artifact_lock(out_dir: Path, doc_id: str, *, timeout: float = 30.0):
+    """跨进程按 doc 串行重建（B-18）。
+
+    进程内已有分片锁；API 与 worker 是两个进程，仍可能同时 package 同一
+    doc。锁文件放 out/.locks，O_EXCL 建锁；崩溃遗留锁 60s 后视为陈旧。
+    """
+    lock_dir = Path(out_dir) / ".locks"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    path = lock_dir / f"{doc_id}.lock"
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            os.write(fd, f"{os.getpid()} {time.time():.0f}".encode("ascii"))
+            os.close(fd)
+            break
+        except FileExistsError:
+            try:
+                age = time.time() - path.stat().st_mtime
+            except OSError:
+                age = 0.0
+            if age > 60:
+                path.unlink(missing_ok=True)
+                continue
+            if time.monotonic() >= deadline:
+                raise E5031_StorageError(
+                    "artifact rebuild busy", detail={"doc_id": doc_id})
+            time.sleep(0.05)
+    try:
+        yield
+    finally:
+        path.unlink(missing_ok=True)
+
+
 def _rebuild_artifact(store: Store, doc_id: str, cfg: dict, root: Path) -> Path | None:
-    """同进程内按 doc 串行重建；避免两个 PATCH 并发时旧 revision 后写覆盖新 zip。"""
-    with _doc_lock(doc_id):
-        return _rebuild_artifact_body(store, doc_id, cfg, root)
+    """同进程/跨进程按 doc 串行重建；避免旧 revision 后写覆盖新 zip。"""
+    out_dir = config.path_setting(cfg, "paths.out", root, str(root / "out"))
+    with _doc_lock(doc_id), _artifact_lock(Path(out_dir), doc_id):
+        return _rebuild_artifact_body(store, doc_id, cfg, root, out_dir=Path(out_dir))
 
 
 def _rebuild_artifact_body(store: Store, doc_id: str, cfg: dict,
-                           root: Path) -> Path | None:
+                           root: Path, *, out_dir: Path | None = None) -> Path | None:
     """CH-485（R9-SVC-2）：从 DB 重建 zip；旧文档（gate_json 为空）返回 None。
 
     DB 已是完整事实源：blocks 保存 font/links/provenance，docs 保存 package 实际
@@ -167,8 +205,9 @@ def _rebuild_artifact_body(store: Store, doc_id: str, cfg: dict,
         preserve_strike=bool(config.get(cfg, "s4.preserve_marks_strike", False)),
         link_internal=str(config.get(cfg, "s4.link_internal", "plain")),
     )
-    out_dir = config.path_setting(cfg, "paths.out", root, str(root / "out"))
-    out = package(ir, md, meta, Path(out_dir), cfg, gate=gate)
+    out_dir = Path(out_dir) if out_dir is not None else config.path_setting(
+        cfg, "paths.out", root, str(root / "out"))
+    out = package(ir, md, meta, out_dir, cfg, gate=gate)
     # package 期间文档可能被删除：提交后的删除路径会再 purge 一次，这里也做
     # 发布后复核，避免返回一个已无库行可寻址的 zip（FR-128）。
     try:
@@ -274,18 +313,17 @@ def create_app(cfg: dict | None = None, root: Path | None = None,
     def err(exc: Doc2mdError):
         return jsonify(exc.to_body()), exc.http
 
-    def _window() -> tuple[int, int | None]:
-        """分页窗口解析（CH-469，V-5）。
+    def _window(default_limit: int = 0) -> tuple[int, int | None]:
+        """分页窗口解析（CH-469，V-5；B-20）。
 
-        口径：**不给 `limit`（或 `limit=0`）= 取全部**，保持既有「一次拉全量」契约
-        不漂移；给了 `limit` 才走 SQL 窗口。非数字 → 400/E4001（与 `_int_arg` 同口径，
-        不让参数错误逃逸成 500）。
+        默认 `default_limit=0` 保持既有「不给 limit = 取全部」；大列表端点显式传
+        `_MAX_ROWS` 作为默认与硬顶，避免单请求无界物化。非数字 → 400/E4001。
         """
         offset = _int_arg("offset", 0)
-        limit = _int_arg("limit", 0)
+        limit = _int_arg("limit", default_limit)
         if offset < 0 or limit < 0:
             raise E4001_BadRequest("offset/limit must be >= 0")
-        return offset, (limit or None)
+        return offset, (min(limit, _MAX_ROWS) if limit else None)
 
     def _int_arg(name: str, default: int) -> int:
         """查询参数整数解析：非数字走 400/E4001（CH-464，原裸 int() 逃逸 500 HTML）。"""
@@ -626,11 +664,12 @@ def create_app(cfg: dict | None = None, root: Path | None = None,
         d = get_doc(store, doc_id)
         # CH-469（V-5）：分片文档可达数千块，原实现无条件全量物化 + 序列化，
         # 首个响应就能到 MB 级。`?offset=&limit=` 走 SQL 窗口；不带参数仍取全部。
-        offset, limit = _window()
+        offset, limit = _window(default_limit=_MAX_ROWS)
         blocks = list_blocks(store, doc_id, offset=offset, limit=limit)
         d["blocks"] = [b.to_dict() for b in blocks]
         d["blocks_total"] = count_blocks(store, doc_id)
         d["blocks_offset"] = offset
+        d["blocks_limit"] = min(limit, _MAX_ROWS) if limit else _MAX_ROWS
         return jsonify(d)
 
     @app.get("/docs/<doc_id>/markdown")
@@ -744,7 +783,7 @@ def create_app(cfg: dict | None = None, root: Path | None = None,
         """
         need("edit")
         get_doc(store, doc_id)
-        offset, limit = _window()
+        offset, limit = _window(default_limit=_MAX_ROWS)
         cond = "doc_id=?"
         args: tuple = (doc_id,)
         block_id = request.args.get("block_id")
@@ -762,13 +801,14 @@ def create_app(cfg: dict | None = None, root: Path | None = None,
             args += (offset,)
         rows = store.q(sql, args)
         return jsonify({"doc_id": doc_id, "audit": [dict(r) for r in rows],
-                        "total": total, "offset": offset})
+                        "total": total, "offset": offset,
+                        "limit": min(limit, _MAX_ROWS) if limit else _MAX_ROWS})
 
     @app.get("/audit/deletions")
     def deletion_audit():
         """删除留痕（FR-128）：只有 who/when/doc_id + 计数，绝不含正文（NFR-20）。"""
         need("delete")
-        offset, limit = _window()
+        offset, limit = _window(default_limit=_MAX_ROWS)
         total = store.q1("SELECT COUNT(*) c FROM deletions")["c"]
         sql = ("SELECT doc_id, source_key, actor, ts, kind, cascade_json"
                " FROM deletions ORDER BY rowid")
@@ -784,7 +824,8 @@ def create_app(cfg: dict | None = None, root: Path | None = None,
             d = dict(r)
             d["cascade"] = json.loads(d.pop("cascade_json") or "{}")
             out.append(d)
-        return jsonify({"deletions": out, "total": total, "offset": offset})
+        return jsonify({"deletions": out, "total": total, "offset": offset,
+                        "limit": min(limit, _MAX_ROWS) if limit else _MAX_ROWS})
 
     # --- 搜索 / 事件 --------------------------------------------------------
     @app.get("/search")
