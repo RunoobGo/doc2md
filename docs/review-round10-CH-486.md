@@ -64,13 +64,15 @@
 - **管线**：DOCX 域代码/smartTag 预检；相邻表 `table_start` 切分；表内 sdt 递归；sniff 先于哈希；文本框无内容时零全树遍历。
 - **服务**：CLI 编辑预检（`precheck_edits=True`）与 `--force`；同步 task 落路径；API 入参校验/后缀过滤/任务索引；reload 配置来源显式化；同步拒收补事件；worker 毒任务隔离。
 - **CI**：新增 `windows-suite`（`windows-latest`，25 分钟上界，gate + 全量 + doctor）。
+- **综合语料**：新增 `tests/corpus/`，17 份 PDF/DOCX 源文件、16 份目标 Markdown、1 份扫描件 E4221 拒收；覆盖标题/段落/列表/表格/链接/代码/脚注尾注/修订/域代码/smartTag/sdt/文本框/图片/页眉页脚/大文档。
 
 ## 4. 验证
 
 | 项目 | 结果 |
 | --- | --- |
-| `pytest -m gate`（Windows 本机） | **342 项：341 passed / 0 failed / 1 platform skip（47.77s）** |
-| `pytest`（Windows 本机全量） | **928 项：920 passed / 0 failed / 8 platform skips（119.04s）** |
+| `pytest -m gate`（Windows 本机） | **342 项：341 passed / 0 failed / 1 platform skip（51.18s）** |
+| `pytest`（Windows 本机全量） | **929 项：921 passed / 0 failed / 8 platform skips（124.63s）** |
+| 综合语料 | **17/17 通过**（16 目标 Markdown + 1 扫描件 E4221 拒收） |
 | `ruff check .` | All checks passed |
 | `doc2md doctor` | exit 0；`pipeline 2.8.0`、`root_private` 可见 |
 | 黄金 MANIFEST | 5140 条全表匹配；31 份污染资产恢复 |

@@ -1,0 +1,138 @@
+[
+  {
+    "source": "pdf_01_simple_1p.pdf",
+    "kind": "pdf",
+    "expected_behavior": "ok",
+    "expected_markdown": "expected/pdf_01_simple_1p.md",
+    "bytes": 2598,
+    "sha256": "a545becc4d31a988e6e5ceb5c6c03293c6a82f06510498508abb8d026287aeae"
+  },
+  {
+    "source": "pdf_02_lists_2p.pdf",
+    "kind": "pdf",
+    "expected_behavior": "ok",
+    "expected_markdown": "expected/pdf_02_lists_2p.md",
+    "bytes": 3113,
+    "sha256": "b9900243eccc3bc0811cd5b863f60afe0fdc13b995e2ccd272147819de8c7680"
+  },
+  {
+    "source": "pdf_03_table_1p.pdf",
+    "kind": "pdf",
+    "expected_behavior": "ok",
+    "expected_markdown": "expected/pdf_03_table_1p.md",
+    "bytes": 2706,
+    "sha256": "d76377cb5201bd16c030def91eeb19c60655be7582f40c4a65e9fbe9fb51b034"
+  },
+  {
+    "source": "pdf_04_links_code_2p.pdf",
+    "kind": "pdf",
+    "expected_behavior": "ok",
+    "expected_markdown": "expected/pdf_04_links_code_2p.md",
+    "bytes": 3002,
+    "sha256": "0bd1fb0f558326fbc20d3c8a024b83591aad2f8d588623a4c5f58159e612a247"
+  },
+  {
+    "source": "pdf_05_cjk_en_3p.pdf",
+    "kind": "pdf",
+    "expected_behavior": "ok",
+    "expected_markdown": "expected/pdf_05_cjk_en_3p.md",
+    "bytes": 4321,
+    "sha256": "568ee05237b25b0cc5cff8b4bbb8e1d3506fb6434bc5d1ba39f50e2272eb9e66"
+  },
+  {
+    "source": "pdf_06_scanned_1p.pdf",
+    "kind": "pdf",
+    "expected_behavior": "reject:E4221",
+    "expected_markdown": null,
+    "bytes": 1488,
+    "sha256": "06ab224bc641a98f479ea54e8561967939ccfef70aff3b5ae1e5cf9338f3fdca"
+  },
+  {
+    "source": "pdf_07_numbered_105pt_2p.pdf",
+    "kind": "pdf",
+    "expected_behavior": "ok",
+    "expected_markdown": "expected/pdf_07_numbered_105pt_2p.md",
+    "bytes": 3129,
+    "sha256": "c6d11fb18982aa310cfb8d951f8cc94c991b67018f3f83a8c6503637d6a2303c"
+  },
+  {
+    "source": "pdf_08_large_40p.pdf",
+    "kind": "pdf",
+    "expected_behavior": "ok",
+    "expected_markdown": "expected/pdf_08_large_40p.md",
+    "bytes": 33545,
+    "sha256": "f08138940181495cc9d57def44dcfbe02273e05b0d1fb6a919cb5d7c56519f71"
+  },
+  {
+    "source": "docx_01_simple.docx",
+    "kind": "docx",
+    "expected_behavior": "ok",
+    "expected_markdown": "expected/docx_01_simple.md",
+    "bytes": 36832,
+    "sha256": "0ce7cddb6afbc150ef7ac57fe8881d618c53b4f4733e87dfa2462d616ec7cfe0"
+  },
+  {
+    "source": "docx_02_lists.docx",
+    "kind": "docx",
+    "expected_behavior": "ok",
+    "expected_markdown": "expected/docx_02_lists.md",
+    "bytes": 36709,
+    "sha256": "9c7094a4d06cfa8344d8d6663e601fffd33546e229d443df58c15faaa34b6c77"
+  },
+  {
+    "source": "docx_03_tables.docx",
+    "kind": "docx",
+    "expected_behavior": "ok",
+    "expected_markdown": "expected/docx_03_tables.md",
+    "bytes": 36910,
+    "sha256": "6607df09c1b235852b66943d578732a85aa8597f41aa1169823c4c9ce5235610"
+  },
+  {
+    "source": "docx_04_links_notes.docx",
+    "kind": "docx",
+    "expected_behavior": "ok",
+    "expected_markdown": "expected/docx_04_links_notes.md",
+    "bytes": 37550,
+    "sha256": "673b66095b0b5a0dae234d9ba8a5b5ed50d07551ae3831b2cac88cd36748051c"
+  },
+  {
+    "source": "docx_05_revisions_fields.docx",
+    "kind": "docx",
+    "expected_behavior": "ok",
+    "expected_markdown": "expected/docx_05_revisions_fields.md",
+    "bytes": 36948,
+    "sha256": "6eca13685fc8f6d7d10c623c5839989f78d31f84320165fe72f0f9b602226de0"
+  },
+  {
+    "source": "docx_06_textbox_image.docx",
+    "kind": "docx",
+    "expected_behavior": "ok",
+    "expected_markdown": "expected/docx_06_textbox_image.md",
+    "bytes": 38424,
+    "sha256": "11f3addc4bf8b16caf814c82264f5e4fe93d5d62dd3437c5c2cc12764e3e4a32"
+  },
+  {
+    "source": "docx_07_code_quote.docx",
+    "kind": "docx",
+    "expected_behavior": "ok",
+    "expected_markdown": "expected/docx_07_code_quote.md",
+    "bytes": 36855,
+    "sha256": "86f8dc5e3d35ef05863b433d79281e2e3036aa3eed1e2049018a9a5415552c7f"
+  },
+  {
+    "source": "docx_08_large_30sections.docx",
+    "kind": "docx",
+    "expected_behavior": "ok",
+    "expected_markdown": "expected/docx_08_large_30sections.md",
+    "bytes": 37990,
+    "sha256": "c11735fc2c2a5c12c16b539c220d9a0d04c6a4caa5d0582f749c259bfd0cdee5"
+  },
+  {
+    "source": "docx_09_mixed_cn_en.docx",
+    "kind": "docx",
+    "expected_behavior": "ok",
+    "expected_markdown": "expected/docx_09_mixed_cn_en.md",
+    "bytes": 36818,
+    "sha256": "5250ce38eff3c27ed2c8d3739e5cf2fb03d4858c32105ef4f2e6193e0f5256f4"
+  }
+]
