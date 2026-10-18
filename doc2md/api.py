@@ -370,6 +370,11 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
                               {"reason": "doc_deleted_during_conversion"}):
                     _emit(store, "job_rejected", doc_id, j.job_id,
                           {"code": "E4041", "source": "api"}, logw())
+                # CH-484：删除×在途转换——convert 刚写进 out/{doc_id}.zip 的产物
+                # 随本轮回滚成为孤儿（库面已不复活，字节却仍占盘）。仅在 doc 确已
+                # 出 docs 时 best-effort 清掉，绝不误删存活文档的载体。
+                from .worker import _drop_orphan_artifact
+                _drop_orphan_artifact(store, root, cur(), doc_id)
                 out.append({"file": f.name, "job_id": j.job_id, "doc_id": doc_id,
                             "status": "rejected", "code": "E4041",
                             "reason": "doc_deleted_during_conversion"})

@@ -29,7 +29,7 @@ from .errors import E4041_NotFound, E4091_DocOverwrite
 from .pipeline.batch import default_workers, run_batch
 from .scheduler import Scheduler
 from .storage.db import Store, now_iso
-from .storage.repo import save_ir
+from .storage.repo import purge_files, save_ir
 
 
 @dataclass
@@ -209,6 +209,7 @@ def drain_once(store: Store, cfg: dict, root, *, workers: int | None = None,
                     sched.mark(job["job_id"], "rejected", "E4041",
                                {"reason": "doc_deleted_during_conversion"})
                     _event(store, job, res, "job_rejected", writer)
+                    _drop_orphan_artifact(store, root, cfg, res.get("doc_id") or "")
                     rep.rejected += 1
                     rep.notes.append(f"{job['job_id']}: doc deleted during conversion")
                     continue
@@ -302,6 +303,22 @@ def _read_ir(zip_path: str):
             return IR.from_dict(json.loads(z.read(name).decode("utf-8")))
     except (OSError, ValueError, KeyError, TypeError, zipfile.BadZipFile):
         return None
+
+
+def _drop_orphan_artifact(store: Store, root, cfg: dict, doc_id: str) -> None:
+    """CH-484：E4041 回滚后清掉本轮刚落盘、已不可寻址的产物孤儿。
+
+    只在 `doc_id` 确已不在 `docs` 时清——mark rowcount=0 也可能来自「任务行单独
+    消失、文档仍在库」，那份 `out/{doc_id}.zip` 是**活文档**的正文载体，清它等于
+    删数据（数据安全护栏）。best-effort：删除失败不翻转已判定的 rejected 终态，
+    孤儿至多留在盘上、绝不影响库面正确性。
+    """
+    if not doc_id or store.q1("SELECT 1 FROM docs WHERE doc_id=? LIMIT 1",
+                              (doc_id,)) is not None:
+        return
+    purge_files(doc_id, root,
+                out_dir=config.path_setting(cfg, "paths.out", root, str(Path(root) / "out")),
+                tmp_dir=config.path_setting(cfg, "paths.tmp", root, str(Path(root) / "tmp")))
 
 
 def _event(store: Store, job: dict, res: dict, code: str, writer,
