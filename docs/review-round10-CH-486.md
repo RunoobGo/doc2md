@@ -49,7 +49,7 @@
 | P-06 | MED | `batch` 的 `pool.submit` 在 try 外，BrokenProcessPool 时跳过 finally 清理 | 已修：submit 移入 try |
 | P-07 | LOW | 缝合替换后旧截断块仍留在 `tail`，后续窗口块可能被误判为伪影丢弃 | 已修：替换成功即从 `tail` 移除旧块 |
 | D-01 | MED | 文档版本锚点 / DB 版本表 / DB6 旧口径漂移 | 已修：PIPELINE 2.8.0、DB 9、PLAN 3.20 三处同步，新增 CH-486 登记行 |
-| T-01 | MED | Windows 无 CI 腿，B-7 只有人工 | 已加 `windows-suite` 作业（gate + 全量 + doctor）；首次远端运行仍登记 B-7 |
+| T-01 | MED | Windows 无 CI 腿，B-7 只有人工 | 已加 `windows-suite` 作业（gate + 全量 + doctor）；远端 run `39106866387` 已全绿，B-7 闭环 |
 | L-01 | LOW | Windows 平台专有用例（tzset/waitpid/sendmsg/symlink/ps sampler）在非授权环境红 | 已改为带原因的 skip 或平台分支；POSIX 语义用 `is_private`/分支补位 |
 
 ## 3. 实施要点
@@ -82,7 +82,7 @@
 | 编号 | 事项 | 为什么仍需外部/人工 |
 | --- | --- | --- |
 | B-6 | Win11 真机 spawn 池、任务计划常驻、ACL 在域账户/漫游配置下的行为 | 当前仅 Windows 11 本机实测；域策略/受管终端需目标机验证 |
-| B-7 | Windows CI 首次远端运行 | `windows-suite` 已加入 `ci.yml`；本轮未推送，首次远端结论待补 |
+| B-7 | Windows CI 首次远端运行 | **已闭环**：run `39106866387` 六作业全绿；首轮 `39106420181` 仅 Windows checkout 长路径失败，`7b99d00` 启用 `core.longpaths` 后复跑通过 |
 | B-08 | Win11 / Mac mini 跨机性能基准 | 当前数字来自 Windows 本机与历史 macOS/Linux；需目标机同语料复测 |
 | B-10 | v1 历史容器、SMB/网络卷、并发 cron、失败回滚的真机恢复 | 需要真实外置卷/网络卷与人工拔盘 |
 | B-13 | 真实 Word 模板语料（文本框、编号、sdt、域代码、页眉页脚） | 需 ≥20 份真实模板抽查，不能由合成 DOCX 代替 |
@@ -93,10 +93,10 @@
 | B-19 | 大文档 PATCH 的全篇重渲染/重打包 O(全文) | 需设计块级增量渲染；当前单块编辑仍 O(文档) |
 | B-20 | `/docs`、`/audit`、`/audit/deletions` 的硬分页上界 | 低风险但会改变大库 API 形状，需产品确认默认值 |
 
-**提醒（每批交付时重复）**：B-6/B-7 是“Win11 目标机可用”的唯一实证路径；B-10 是“以为备份了”的最后防线；B-13/B-15/B-16 是结构修复的真实语料验收；B-17/B-18/B-19 是本轮明确留作后续架构项，不应在发布说明中写成已解决。
+**提醒（每批交付时重复）**：B-7（Windows CI）已由 run `39106866387` 闭环；B-6 仍是域策略/受管终端的目标机实证路径；B-10 是“以为备份了”的最后防线；B-13/B-15/B-16 是结构修复的真实语料验收；B-17/B-18/B-19 是本轮明确留作后续架构项，不应在发布说明中写成已解决。
 
 ## 6. 变更与回滚
 
 - 版本：`PIPELINE_VERSION` 2.7.0→**2.8.0**（相邻表/域代码修复改变部分输入产物）、`DB_VERSION` 8→**9**（新增索引，幂等 DDL）、`PLAN_VERSION` 3.19→**3.20**。
 - 回滚：`.gitattributes` 与黄金资产恢复可整体回退；ACL 入口在 Windows 失败时降级为告警，不会阻断转换；`ix_tasks_created` 为纯增量索引，旧代码可忽略；`precheck_edits` 为 CLI/watch 显式参数，API/worker 保留原补偿路径。
-- 本轮未提交、未推送、未创建 PR；所有改动留在工作树，便于复核后再决定提交边界。
+- 已提交并推送：`500159a`（CH-486 主体）与 `7b99d00`（Windows CI 长路径修复）；远端 CI run `39106866387` 六作业全绿。未创建 PR（直推 `main`，远端提示绕过必需检查，属既有 CH-470 行为）。
