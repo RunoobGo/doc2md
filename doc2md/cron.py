@@ -119,6 +119,9 @@ def _run_backup(plan: BackupPlan, cfg: dict, root: Path, mode: str,
     except OSError as exc:
         rep.add("local_snapshot", error=str(exc)[:200], ok=False)
         rep.ok = False
+    except Exception as exc:                # noqa: BLE001 — quick_check/DB 异常也要收口
+        rep.add("local_snapshot", error=type(exc).__name__, ok=False)
+        rep.ok = False
     if snap is not None:
         rep.add("local_snapshot", path=str(snap), bytes=snap.stat().st_size)
         if plan.mode_warnings:

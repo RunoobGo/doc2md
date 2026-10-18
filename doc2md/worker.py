@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -29,7 +30,7 @@ from .errors import E4041_NotFound, E4091_DocOverwrite
 from .pipeline.batch import default_workers, run_batch
 from .scheduler import Scheduler
 from .storage.db import Store, now_iso
-from .storage.repo import purge_files, save_ir
+from .storage.repo import prepare_ir_rows, purge_files, save_ir
 
 
 @dataclass
@@ -55,7 +56,7 @@ def claim(store: Store, limit: int) -> list[dict]:
     out: list[dict] = []
     with store.tx() as tx:
         rows = tx.execute(
-            "SELECT job_id, doc_id, source_key, source_path, mode, del_seq FROM tasks"
+            "SELECT job_id, doc_id, source_key, source_path, mode, del_seq, force FROM tasks"
             " WHERE status='queued' ORDER BY created_at LIMIT ?", (limit,)).fetchall()
         for r in rows:
             tx.execute("UPDATE tasks SET status='running', started_at=?, error_code=''"
@@ -65,7 +66,8 @@ def claim(store: Store, limit: int) -> list[dict]:
             out.append({"job_id": r["job_id"], "doc_id": r["doc_id"],
                         "source_key": r["source_key"] or "",
                         "path": r["source_path"] or "", "mode": r["mode"],
-                        "del_seq": int(r["del_seq"] or 0)})
+                        "del_seq": int(r["del_seq"] or 0),
+                        "force": bool(r["force"])})
     return out
 
 
@@ -287,6 +289,7 @@ def _finish_ok(store: Store, sched: Scheduler, job: dict, res: dict, ir,
     if drift:
         # 产物按消费时内容入库；任务留痕，不偷偷改 task.doc_id 主键语义
         detail["content_drift"] = {"enqueued": enqueued, "consumed": consumed}
+    prepared = prepare_ir_rows(ir)
     with store.tx() as tx:
         # CH-485（R9-SVC-1）：与同步路径同口径的墓碑检查。drift 让任务行的
         # doc_id（入队时内容）与本次消费的 ir.doc_id 分离，不能只靠
@@ -302,7 +305,8 @@ def _finish_ok(store: Store, sched: Scheduler, job: dict, res: dict, ir,
         if not sched.mark(job["job_id"], "done", detail=detail, tx=tx):
             raise E4041_NotFound(
                 f"task row gone (doc deleted during conversion): {job['job_id']}")
-        save_ir(store, ir, tx=tx, meta=meta, gate=gate)
+        save_ir(store, ir, tx=tx, meta=meta, gate=gate,
+                force=bool(job.get("force")), prepared=prepared)
         _emit(store, "job_done", res.get("doc_id") or job.get("doc_id"), job["job_id"],
               {"blocks": int(res.get("blocks", 0) or 0), "source": "work",
                "file": str(job.get("path", ""))[-64:]}, writer, tx=tx)
@@ -388,7 +392,7 @@ def _sniff_and_hash(p: Path) -> tuple[str, str]:
 
 def enqueue_many(sched: Scheduler, paths, *, mode: str | None = None,
                  idem_keys=None, cfg: dict | None = None,
-                 threads: int | None = None) -> list[dict]:
+                 threads: int | None = None, force: bool = False) -> list[dict]:
     """批量入队（CH-476 / R7-PERF-3）：**哈希并行、提交单事务**。
 
     并行只放在预检/哈希（纯文件读，`hashlib` 大缓冲释放 GIL）；写库按入参顺序
@@ -417,18 +421,19 @@ def enqueue_many(sched: Scheduler, paths, *, mode: str | None = None,
     jobs = sched.submit_many([(hashed[i][0], hashed[i][1],
                                idem_keys[i] if idem_keys is not None else None,
                                str(p), mode)
-                              for i, p in enumerate(items)])
+                              for i, p in enumerate(items)], force=force)
     for i, p in enumerate(items):
-        doc_id = hashed[i][0]
         job = jobs[i]
-        out.append({"file": p.name, "job_id": job.job_id, "doc_id": doc_id,
-                    "status": "queued", "attached": job.attached,
+        # CH-485（R9-SVC-3）：回报真实 status/doc_id；终态幂等命中不得再谎报 queued。
+        out.append({"file": p.name, "job_id": job.job_id, "doc_id": job.doc_id,
+                    "status": job.status, "attached": job.attached,
                     "idempotency_hit": job.idem_hit})
     return out
 
 
 def enqueue(sched: Scheduler, path: str | Path, *, mode: str | None = None,
-            idem_key: str | None = None, cfg: dict | None = None) -> dict:
+            idem_key: str | None = None, cfg: dict | None = None,
+            force: bool = False) -> dict:
     """只入队不算（CH-449 异步路径）。doc_id 仍按内容寻址（约定 14），
     因此 `uq_tasks_doc_active` 的附着去重在入队阶段就已生效。
 
@@ -437,7 +442,8 @@ def enqueue(sched: Scheduler, path: str | Path, *, mode: str | None = None,
     消费参数（source_path / mode）走 tasks 独立列，附着到既有作业时不改对端行。
     单文件即 `enqueue_many` 的一元素特例（CH-476 / R7-PERF-3 收敛为一条代码路径）。
     """
-    return enqueue_many(sched, [path], mode=mode, idem_keys=[idem_key], cfg=cfg)[0]
+    return enqueue_many(sched, [path], mode=mode, idem_keys=[idem_key],
+                        cfg=cfg, force=force)[0]
 
 
 def run_work(cfg: dict, root, *, once: bool = False, max_jobs: int = 0,
@@ -479,12 +485,31 @@ def run_work(cfg: dict, root, *, once: bool = False, max_jobs: int = 0,
             if not once and reclaim_seconds > 0 and \
                     time.monotonic() - last_reclaim >= reclaim_seconds:
                 last_reclaim = time.monotonic()
-                n = reclaim_stale(store, cfg)
+                try:
+                    n = reclaim_stale(store, cfg)
+                except sqlite3.OperationalError as exc:
+                    writer.write({"code": "WORK_RETRY", "stage": "reclaim",
+                                  "exc": type(exc).__name__})
+                    writer.flush()
+                    time.sleep(min(60.0, max(1.0, float(idle_seconds) * 2)))
+                    continue
                 if n:
                     total.notes.append(f"reclaimed_stale={n}")
                     writer.write({"code": "WORK_RECLAIM", "count": n})
                     writer.flush()
-            rep = drain_once(store, cfg, root, workers=workers, writer=writer)
+            try:
+                rep = drain_once(store, cfg, root, workers=workers, writer=writer)
+            except (sqlite3.OperationalError, OSError) as exc:
+                # CH-485（R9-SVC-3）：busy/ENOSPC 等瞬时库面错误不得让常驻消费者
+                # 直接退出；退避重试并留 WORK_RETRY 证据。once 模式仍上抛，
+                # 让 CLI 得到明确退出码。
+                if once:
+                    raise
+                writer.write({"code": "WORK_RETRY", "stage": "drain",
+                              "exc": type(exc).__name__})
+                writer.flush()
+                time.sleep(min(60.0, max(1.0, float(idle_seconds) * 2)))
+                continue
             for k in ("drained", "done", "failed", "rejected", "drift"):
                 setattr(total, k, getattr(total, k) + getattr(rep, k))
             total.notes.extend(rep.notes)

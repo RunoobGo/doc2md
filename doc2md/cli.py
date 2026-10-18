@@ -605,8 +605,9 @@ def cmd_tokenizer(args: argparse.Namespace) -> int:
     from .ops import gguf
     cfg = _cfg(args)
     if args.tz_cmd == "export":
-        manifest_path = Path(args.manifest or config.get(
-            cfg, "chunks.manifest", str(_root(cfg) / "tokenizer.manifest.json")))
+        manifest_path = (Path(args.manifest).expanduser() if args.manifest else
+                         config.path_setting(cfg, "chunks.manifest", _root(cfg),
+                                             str(_root(cfg) / "tokenizer.manifest.json")))
         vocab = args.vocab or str(manifest_path.with_name("vocab.jsonl"))
         man = gguf.export_vocab(args.gguf, vocab)
         gguf.write_manifest(man, manifest_path)
@@ -647,6 +648,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         "llm_fallback": config.get(cfg, "llm.fallback", True),
         "llm_endpoint": f"{config.get(cfg, 'llm.bind')}:{config.get(cfg, 'llm.port')}",
         "llm_vendor_models": _vendor_models(cfg),
+        "config_unknown_keys": config.last_unknown_keys(),
+        "backup_external_dir": config.get(cfg, "ops.backup_external_dir", ""),
+        "backup_passphrase_env_set": bool(os.environ.get("DOC2MD_BACKUP_PASSPHRASE")),
         "base_revision_required": config.get(cfg, "api.base_revision_required"),
         "logs_rotate_mb": config.get(cfg, "logs.rotate_mb"),
         "backup_encrypted_external": config.get(cfg, "ops.backup_external_encrypted"),
@@ -703,10 +707,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 def _vendor_models(cfg) -> list[str]:
     """paths.vendor_models 下的 gguf 资产清单（T2 消费点：定位本地模型文件）。"""
     import glob
-    base = str(config.get(cfg, "paths.vendor_models", "") or "")
-    if not base:
-        return []
-    return sorted(Path(p).name for p in glob.glob(str(Path(base) / "*.gguf")))
+    base = config.path_setting(cfg, "paths.vendor_models", _root(cfg),
+                               str(_root(cfg) / "vendor/models/llm"))
+    return sorted(Path(p).name for p in glob.glob(str(base / "*.gguf")))
 
 
 COMMANDS = {"serve": cmd_serve, "cron": cmd_cron, "convert": cmd_convert,

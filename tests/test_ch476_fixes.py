@@ -1693,7 +1693,7 @@ def test_perf_h_submit_many_equals_item_by_item_submit(tmp_path):
     rows = [
         ("doc-a", "src-a", "k1", "/p/a1.pdf", "auto"),
         ("doc-a", "src-a", None, "/p/a2.pdf", "auto"),      # 同 doc 进行中 → 附着
-        ("doc-b", "src-b", "k1", "/p/b.pdf", None),          # idem k1 已用 → 附着
+        ("doc-b", "src-b", "k1", "/p/b.pdf", None),          # 同键不同 doc → 新行
         ("doc-c", "src-c", "k2", "/p/c.pdf", "single"),
         ("doc-d", "src-d", None, "/p/d.pdf", "single"),
         ("doc-d", "src-d", "k3", "/p/d2.pdf", "single"),     # 同 doc → 附着
@@ -1712,10 +1712,12 @@ def test_perf_h_submit_many_equals_item_by_item_submit(tmp_path):
                 first_new.setdefault(j.doc_id, j.job_id)
         assert first_new["doc-a"] != first_new["doc-c"]
         assert two[1].job_id == first_new["doc-a"] and two[5].job_id == first_new["doc-d"]
+        assert not two[2].attached and not two[2].idem_hit
         cols = ("doc_id", "source_key", "idem_key", "source_path", "mode", "status")
         q = "SELECT %s FROM tasks ORDER BY doc_id, source_path" % ", ".join(cols)
         assert [dict(r) for r in s1.q(q)] == [dict(r) for r in s2.q(q)]
-        assert len(s2.q(q)) == 3      # 6 投 → 3 行（同 doc 附着 2 + idem 命中 1）
+        # 6 投 → 4 行（同 doc 附着 2；k1 跨 doc 各建一行）
+        assert len(s2.q(q)) == 4
     finally:
         s1.close(), s2.close()
 
@@ -1808,8 +1810,9 @@ def test_perf_j_search_limit_capped(api_client, headers, monkeypatch):
     api_mod = importlib.import_module("doc2md.api")
     seen = {}
 
-    def fake_search(store, q, limit):
+    def fake_search(store, q, limit, **kw):
         seen["limit"] = limit
+        seen["full"] = kw.get("full")
         return {"total": 0, "hits": [], "has_more": False, "mode": "like"}
 
     monkeypatch.setattr(api_mod, "search", fake_search)

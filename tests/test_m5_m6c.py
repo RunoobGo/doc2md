@@ -129,12 +129,15 @@ def test_submit_attaches_to_active_job(store):
 
 
 @m6c
-def test_idempotency_key_is_second_path_of_same_mechanism(store):
+def test_idempotency_key_is_scoped_to_payload(store):
     s = Scheduler(store)
     j1 = s.submit("docB", "srcB", idem_key="k-1")
-    j2 = s.submit("docC", "srcC", idem_key="k-1")      # 同键不同文档 → 仍命中既有作业
-    assert j2.idem_hit and j2.attached and j2.job_id == j1.job_id
-    assert j2.doc_id == "docB"
+    # CH-485：同键不同文档不再静默返回旧作业（否则 submit_rejected 会取消在途作业）
+    j2 = s.submit("docC", "srcC", idem_key="k-1")
+    assert not j2.idem_hit and not j2.attached and j2.job_id != j1.job_id
+    assert j2.doc_id == "docC"
+    j3 = s.submit("docB", "srcB", idem_key="k-1")
+    assert j3.idem_hit and j3.job_id == j1.job_id
 
 
 @m6c

@@ -32,7 +32,8 @@ class Scheduler:
 
     def submit(self, doc_id: str, source_key: str = "",
                idem_key: str | None = None, *, source_path: str | None = None,
-               mode: str | None = None, del_seq: int | None = None) -> Job:
+               mode: str | None = None, del_seq: int | None = None,
+               force: bool = False) -> Job:
         """投递作业；命中去重路径时不新建。
 
         `source_path` / `mode`（CH-448）：异步队列的消费参数，独立列存放
@@ -41,9 +42,9 @@ class Scheduler:
         with self.store.tx() as tx:
             return self._submit_tx(tx, doc_id, source_key, idem_key,
                                    source_path=source_path, mode=mode,
-                                   del_seq=del_seq)
+                                   del_seq=del_seq, force=force)
 
-    def submit_many(self, items) -> list[Job]:
+    def submit_many(self, items, *, force: bool = False) -> list[Job]:
         """批量投递（CH-476 / R7-PERF-h）：整批只开一个 `BEGIN IMMEDIATE`。
 
         `items` 为 `(doc_id, source_key, idem_key, source_path, mode)` 五元组序列，
@@ -57,18 +58,26 @@ class Scheduler:
         with self.store.tx() as tx:
             for doc_id, source_key, idem_key, source_path, mode in items:
                 jobs.append(self._submit_tx(tx, doc_id, source_key, idem_key,
-                                            source_path=source_path, mode=mode))
+                                            source_path=source_path, mode=mode,
+                                            force=force))
         return jobs
 
     def _submit_tx(self, tx, doc_id: str, source_key: str = "",
                    idem_key: str | None = None, *, source_path: str | None = None,
-                   mode: str | None = None, del_seq: int | None = None) -> Job:
+                   mode: str | None = None, del_seq: int | None = None,
+                   force: bool = False) -> Job:
         """`submit` 的语句序列（运行在调用方事务里）。"""
         if idem_key:
-            row = tx.execute("SELECT job_id, doc_id FROM tasks WHERE idem_key=? LIMIT 1",
-                             (idem_key,)).fetchone()
+            # CH-485（R9-SVC-3）：幂等键按 (key, doc_id) 绑定。原实现只看 key，
+            # 同键不同文档会静默返回旧作业；submit_rejected 更会把在途有效作业
+            # 标成 rejected。现在不同 doc_id 各建一行（索引非唯一），同键同文档
+            # 才命中，且回报真实终态。
+            row = tx.execute(
+                "SELECT job_id, doc_id, status FROM tasks"
+                " WHERE idem_key=? AND doc_id=? ORDER BY created_at DESC LIMIT 1",
+                (idem_key, doc_id)).fetchone()
             if row:
-                return Job(row["job_id"], row["doc_id"], "queued",
+                return Job(row["job_id"], row["doc_id"], row["status"],
                            attached=True, idem_hit=True)
         row = tx.execute(
             f"SELECT job_id FROM tasks WHERE doc_id=? AND status IN {ACTIVE} LIMIT 1",
@@ -85,9 +94,10 @@ class Scheduler:
         try:
             tx.execute(
                 "INSERT INTO tasks(job_id, doc_id, source_key, status, idem_key,"
-                " created_at, source_path, mode, del_seq) VALUES (?,?,?,?,?,?,?,?,?)",
+                " created_at, source_path, mode, del_seq, force)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?)",
                 (job_id, doc_id, source_key, "queued", idem_key, now_iso(),
-                 source_path, mode, int(del_seq)))
+                 source_path, mode, int(del_seq), int(bool(force))))
         except sqlite3.IntegrityError:
             # 并发窗口：唯一索引挡住第二份进行中作业 → 附着
             row = tx.execute(

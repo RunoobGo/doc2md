@@ -40,6 +40,7 @@ from .storage.repo import (
     delete_source,
     get_doc,
     list_blocks,
+    prepare_ir_rows,
     reconcile_search,
     save_ir,
     search,
@@ -359,7 +360,9 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
         # 默认 false = 同步转换，既有红线契约（方案 5.4：jobs[].doc_id 立即可用）不变。
         if bool(config.get(cur(), "perf.queue_async", False)):
             from .worker import enqueue_many
-            targets = [f for f in files if f.is_file()]
+            # CH-485（R9-SVC-7）：不在这里静默剔除扫描后消失的文件；
+            # enqueue_many 的预检会以 E4041 整体失败，避免“响应少一项”。
+            targets = files
             # CH-476（R7-PERF-3）：预检 + 内容哈希进线程池并行（hashlib 对 1MB 块
             # 释放 GIL），写库仍按原顺序单线程提交——`jobs[]` 顺序、附着/幂等口径不变。
             # 入队前整体预检 magic 的「要么全入队、要么零副作用」纪律由 enqueue_many
@@ -368,7 +371,7 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
             # 现按 E4041 整体失败——「目录里明明有、队列里没有」比一次 404 更难排查。
             out = enqueue_many(sched, targets, mode=mode,
                                idem_keys=[_idem_for(f) for f in targets],
-                               cfg=cur())
+                               cfg=cur(), force=force)
             for it in out:
                 if not it["attached"]:
                     _emit(store, "job_queued", it["doc_id"], it["job_id"],
@@ -400,6 +403,7 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
             # _finish_ok 同序）——submit 与本事务之间 delete_doc 若级联收走了
             # 刚建的 queued 行，mark rowcount=0 → 抛 E4041 整笔回滚，正文不写回，
             # 杜绝「docs 有、tasks 无」的半复活态（FR-128 轮出语义）。
+            prepared = prepare_ir_rows(ir)
             try:
                 with store.tx() as tx:
                     # CH-483（R8-SVC-1）：同一个写事务内先看墓碑。删除与落库
@@ -413,7 +417,8 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
                         raise E4041_NotFound("doc deleted during conversion")
                     if not sched.mark(j.job_id, "done", tx=tx):
                         raise E4041_NotFound(f"task row gone: {j.job_id}")
-                    save_ir(store, ir, tx=tx, force=force, meta=meta, gate=gate)
+                    save_ir(store, ir, tx=tx, force=force, meta=meta, gate=gate,
+                            prepared=prepared)
                     _emit(store, "job_done", doc_id, j.job_id,
                           {"blocks": len(ir.blocks)}, logw(), tx=tx)
             except E4041_NotFound:
@@ -480,7 +485,9 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
                     "Retry-After": str(_SYNC_RETRY_AFTER_S)}
             try:
                 by_file = {r["file"]: r for r in run_batch(
-                    files, cfg=cur(), mode=mode, out_dir=root / "out",
+                    files, cfg=cur(), mode=mode,
+                    out_dir=config.path_setting(cur(), "paths.out", root,
+                                                str(root / "out")),
                     workers=default_workers(cfg))}
                 for f in files:
                     r = by_file.get(str(f)) or {"status": "error", "code": "E5000"}
@@ -511,7 +518,9 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
                 # CH-476（R7-SVC-2）：同步分支同样吃 `mode`。原实现只在异步分支读这个
                 # 字段，`queue_async=false`（默认）下 `{"mode":"single"}` 被静默忽略——
                 # 客户端以为切了档，实际跑的是 `s2.mode` 默认档。
-                res = convert(f, cfg=cur(), mode=mode, out_dir=root / "out")
+                res = convert(f, cfg=cur(), mode=mode,
+                              out_dir=config.path_setting(cur(), "paths.out", root,
+                                                          str(root / "out")))
             except Doc2mdError as e:
                 if e.code == "E4221":
                     j = sched.submit_rejected(f.name, e.code, e.detail,
@@ -583,7 +592,8 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
     def get_markdown(doc_id):
         need("export")
         get_doc(store, doc_id)
-        zp = root / "out" / f"{doc_id}.zip"
+        out_dir = config.path_setting(cur(), "paths.out", root, str(root / "out"))
+        zp = out_dir / f"{doc_id}.zip"
         if not zp.exists():
             raise E4041_NotFound("artifact not found")
         import zipfile
@@ -741,8 +751,10 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
         limit = _int_arg("limit", 20)
         if limit < 0:
             raise E4001_BadRequest("limit must be >= 0")
-        return jsonify(search(store, request.args.get("q", ""),
-                              min(limit, _MAX_ROWS)))   # CH-476（R7-PERF-j）
+        return jsonify(search(
+            store, request.args.get("q", ""), min(limit, _MAX_ROWS),
+            full=(request.args.get("mode") == "full"
+                  or request.args.get("full") in ("1", "true"))))
 
     @app.get("/events")
     def events():

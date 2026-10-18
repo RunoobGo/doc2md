@@ -123,3 +123,51 @@ def test_delete_missing_doc_does_not_snapshot(api_client, headers, tmp_cfg):
                       headers=headers(tokens, "admin"))
     assert r.status_code == 404
     assert not list(backups.glob("predelete-*.sqlite"))
+
+
+@pytest.mark.gate
+def test_search_full_mode_reaches_beyond_index_window(tmp_path):
+    from doc2md.storage.repo import search
+    st = Store(tmp_path / "state.sqlite")
+    text = "A" * 8500 + "TAILMARK" + "B" * 20
+    save_ir(st, IR(doc_id="c" * 16, source_key="c" * 24,
+                   blocks=[Block(id="b1", text=text)]))
+    assert search(st, "TAILMARK")["total"] == 0
+    assert search(st, "TAILMARK", full=True)["total"] == 1
+    st.close()
+
+
+@pytest.mark.gate
+def test_idempotency_reject_does_not_cancel_active_job(tmp_path):
+    st = Store(tmp_path / "state.sqlite")
+    sched = Scheduler(st)
+    valid = sched.submit("d" * 16, "d" * 24, idem_key="shared")
+    rej = sched.submit_rejected("bad.pdf", "E4221", idem_key="shared")
+    assert rej.job_id != valid.job_id
+    assert sched.get(valid.job_id)["status"] == "queued"
+    assert sched.get(rej.job_id)["status"] == "rejected"
+    st.close()
+
+
+@pytest.mark.gate
+def test_async_force_allows_overwriting_edits(tmp_path):
+    st = Store(tmp_path / "state.sqlite")
+    ir = IR(doc_id="e" * 16, source_key="e" * 24,
+            blocks=[Block(id="b1", text="旧")])
+    save_ir(st, ir)
+    with st.tx() as tx:
+        tx.execute("UPDATE blocks SET text='编辑', revision=2 WHERE doc_id=?",
+                   (ir.doc_id,))
+    sched = Scheduler(st)
+    j = sched.submit(ir.doc_id, ir.source_key, source_path="/tmp/x.pdf", force=True)
+    task = sched.get(j.job_id)
+    assert task["force"] == 1
+    job = {"job_id": j.job_id, "doc_id": ir.doc_id, "source_key": ir.source_key,
+           "path": "/tmp/x.pdf", "del_seq": task["del_seq"], "force": True}
+    res = {"doc_id": ir.doc_id, "source_key": ir.source_key, "status": "ok",
+           "zip": "/tmp/x.zip", "blocks": 1, "code": ""}
+    _finish_ok(st, sched, job, res, IR(doc_id=ir.doc_id,
+                                       source_key=ir.source_key,
+                                       blocks=[Block(id="b1", text="新")]))
+    assert st.q1("SELECT text FROM blocks WHERE doc_id=?", (ir.doc_id,))["text"] == "新"
+    st.close()

@@ -63,9 +63,27 @@ def _fts_replace_block(t, doc_id: str, block_id: str, text_aux) -> None:
 
 
 
+def prepare_ir_rows(ir: IR):
+    """事务外预计算 blocks 插入行与 FTS 行（JSON/cjk_aux 是写锁时长主因）。"""
+    from .fts import cjk_aux
+    block_rows = [
+        (ir.doc_id, b.id, b.type, b.text, b.level, b.page,
+         json.dumps(b.flags, ensure_ascii=False),
+         json.dumps(b.marks, ensure_ascii=False),
+         json.dumps(b.links or [], ensure_ascii=False),
+         json.dumps(b.font or {}, ensure_ascii=False),
+         json.dumps(b.provenance or {}, ensure_ascii=False),
+         int(b.immutable), b.revision)
+        for b in ir.blocks]
+    fts_rows = [(b.id, b.text[:SEARCH_INDEX_WINDOW],
+                 cjk_aux(b.text[:SEARCH_INDEX_WINDOW]))
+                for b in ir.blocks if b.text]
+    return block_rows, fts_rows
+
+
 def save_ir(store: Store, ir: IR, profile: str = "standard", tx=None,
             force: bool = False, meta: dict | None = None,
-            gate: dict | None = None) -> None:
+            gate: dict | None = None, prepared=None) -> None:
     """整本文档入库（docs + blocks + FTS）。
 
     CH-459（A-4/A-14）：原实现 docs/blocks 与 reindex 各起一次事务、逐块
@@ -85,12 +103,14 @@ def save_ir(store: Store, ir: IR, profile: str = "standard", tx=None,
     - 覆盖（force 或无编辑的幂等重写）时**保留原 `created_at`**，只更新 `updated_at`；
     - 每次真实覆盖既有文档都记 `doc_overwritten` 事件（只带计数、无正文，NFR-20）。
     """
-    from .fts import cjk_aux
     ts = now_iso()
     # CH-485（R9-SVC-2）：DB 成为产物事实源——保存 package 实际使用的完整
     # meta/gate 与块级 links/font/provenance；旧调用方可省略，缺省仍为 ir.meta()。
     doc_meta = meta if meta is not None else ir.meta()
     gate_json = json.dumps(gate or {}, ensure_ascii=False)
+    # CH-485（R9-SVC-6）：调用方可在 BEGIN IMMEDIATE 之前传入预计算结果；
+    # 非 tx 路径也在此之前完成，写锁只留 SQL。
+    block_rows, fts_rows = prepared if prepared is not None else prepare_ir_rows(ir)
 
     def _do(t):
         cur = t.execute("SELECT created_at FROM docs WHERE doc_id=?",
@@ -128,16 +148,8 @@ def save_ir(store: Store, ir: IR, profile: str = "standard", tx=None,
             "INSERT INTO blocks(doc_id, block_id, type, text, level, page,"
             " flags_json, marks_json, links_json, font_json, provenance_json,"
             " immutable, revision) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            [(ir.doc_id, b.id, b.type, b.text, b.level, b.page,
-              json.dumps(b.flags, ensure_ascii=False), json.dumps(b.marks, ensure_ascii=False),
-              json.dumps(b.links or [], ensure_ascii=False),
-              json.dumps(b.font or {}, ensure_ascii=False),
-              json.dumps(b.provenance or {}, ensure_ascii=False),
-              int(b.immutable), b.revision) for b in ir.blocks])
-        _fts_replace_doc(t, ir.doc_id, [
-            (b.id, b.text[:SEARCH_INDEX_WINDOW],
-             cjk_aux(b.text[:SEARCH_INDEX_WINDOW]))
-            for b in ir.blocks if b.text])
+            block_rows)
+        _fts_replace_doc(t, ir.doc_id, fts_rows)
         if existed:
             # 覆盖留痕只记计数与来源，不记正文（NFR-20）
             t.execute("INSERT INTO events(ts, code, doc_id, job_id, payload_json)"
@@ -292,7 +304,8 @@ def count_blocks(store: Store, doc_id: str) -> int:
     return int(row[0]["n"]) if row else 0
 
 
-def search(store: Store, query: str, limit: int = 20) -> dict:
+def search(store: Store, query: str, limit: int = 20, *,
+           full: bool = False) -> dict:
     """全文检索（CH-435：CJK 走 aux n-gram 列命中，text 列 LIKE 复核连续性）。
 
     两段式：FTS5 负责「快速缩小候选集」，`text LIKE` 负责「字组确实连续出现」，
@@ -315,6 +328,16 @@ def search(store: Store, query: str, limit: int = 20) -> dict:
     expr = build_match(query)
     fts_error = ""
 
+    # CH-485（R9-SVC-4）：显式 full 模式直接扫 blocks.text，覆盖 FTS 8000 字
+    # 窗口外的尾部；正常查询不触发全表 LIKE（原实现每次零命中都要扫一遍 FTS 正文）。
+    if full:
+        rows = store.q(
+            "SELECT doc_id, block_id, substr(text, 1, 48) AS snip FROM blocks"
+            f" WHERE {like_sql} LIMIT ?", (*like_args, limit + 1))
+        has_more = len(rows) > limit
+        hits = [dict(r) for r in rows[:limit]]
+        return {"total": len(hits), "has_more": has_more, "hits": hits,
+                "match": like_args[0], "mode": "full"}
     if expr:
         try:
             rows = store.q(
@@ -326,6 +349,9 @@ def search(store: Store, query: str, limit: int = 20) -> dict:
                 hits = [dict(r) for r in rows[:limit]]
                 return {"total": len(hits), "has_more": has_more, "hits": hits,
                         "match": expr, "mode": "fts"}
+            # 健康 FTS 零命中就是零命中；不再为“没搜到”付出全表 LIKE。
+            return {"total": 0, "has_more": False, "hits": [],
+                    "match": expr, "mode": "fts"}
         except sqlite3.OperationalError as exc:
             # CH-469（V-9）：MATCH 表达式不被接受 → 可以降级 LIKE，但**原因必须留痕**
             # （响应带 fts_error），否则「索引面坏了」与「n-gram 没命中」不可区分。
@@ -336,10 +362,10 @@ def search(store: Store, query: str, limit: int = 20) -> dict:
             # 而真因是搜索面已经不可用。明确报错（detail 只带异常类名，NFR-20）。
             raise E5031_StorageError("search index query failed",
                                      detail={"reason": type(exc).__name__}) from exc
-    # 兜底：纯 LIKE 子串（FTS 表达式非法 / n-gram 未命中，如旧库尚未回填 aux）。
-    # LIKE 路径无 MATCH 上下文，bm25 不适用，按插入序返回（同样 LIMIT+1 探测，免全表 COUNT）。
+    # 兜底：FTS 表达式非法时用 blocks.text 的 LIKE（不再只查 8000 字索引窗口）。
+    # 这是错误路径，不是每次零命中的常规路径。
     rows = store.q(
-        f"SELECT doc_id, block_id, substr(text, 1, 48) AS snip FROM search_blocks"
+        f"SELECT doc_id, block_id, substr(text, 1, 48) AS snip FROM blocks"
         f" WHERE {like_sql} LIMIT ?", (*like_args, limit + 1))
     has_more = len(rows) > limit
     hits = [dict(r) for r in rows[:limit]]

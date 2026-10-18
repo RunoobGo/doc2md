@@ -338,7 +338,7 @@ class LlmClient:
             timeout_ms=int(_cfg_get(cfg, "llm.timeout_ms", DEFAULT_LLM_TIMEOUT_MS)),
             retries=int(_cfg_get(cfg, "llm.retries", DEFAULT_LLM_RETRIES)),
             model=str(_cfg_get(cfg, "llm.model", "") or ""),
-            vendor_models=str(_cfg_get(cfg, "paths.vendor_models", "") or ""))
+            vendor_models=_cfg_vendor_models(cfg))
 
     @property
     def base_url(self) -> str:
@@ -470,6 +470,20 @@ def _parse_ops(resp: dict) -> list[dict]:
             isinstance(o, dict) and isinstance(o.get("op"), str) for o in ops):
         raise LlmServiceError("ops payload shape invalid", stage="parse")
     return ops[:MAX_OPS_PER_RESPONSE]
+
+
+def _cfg_vendor_models(cfg) -> str:
+    """paths.vendor_models 相对 paths.root 解析（llm 基座不 import config）。"""
+    v = str(_cfg_get(cfg, "paths.vendor_models", "") or "")
+    if not v:
+        return ""
+    p = Path(v)
+    if p.is_absolute():
+        return str(p)
+    root = Path(str(_cfg_get(cfg, "paths.root", ".") or "."))
+    if p.parts and p.parts[0] == root.name:
+        p = Path(*p.parts[1:])
+    return str(root / p)
 
 
 def _discover_model(vendor_models: str) -> str:

@@ -1,6 +1,7 @@
 """配置装载（方案 5.7 + 附录 A；上游锚点 v2.3 §4.3 / v2.4 附录 C-1）。
 
-读取顺序：DEFAULT_TOML → 显式 path → ./doc2md.toml → $DOC2MD_HOME/doc2md.toml。
+读取顺序：DEFAULT_TOML → $DOC2MD_HOME/doc2md.toml → ./doc2md.toml → 显式 path
+（后者覆盖前者，深合并；CH-485 与 README/附录 A 统一）。
 CH-456（T9）：`run.profile` 三档在此落地为键集覆盖；用户显式配置优先于 profile。
 CH-469（O-15）：`SPEC` 表驱动的类型 / 区间 / 枚举校验 + 未知键警告。
 """
@@ -157,6 +158,12 @@ SPEC: dict[str, tuple[str, Any]] = {
 }
 
 _OCTAL_RE = re.compile(r"[0-7]{3}")
+_LAST_UNKNOWN: list[str] = []
+
+
+def last_unknown_keys() -> list[str]:
+    """最近一次 load() 遇到的未知键（doctor 展示用；不含值）。"""
+    return list(_LAST_UNKNOWN)
 
 
 def _base() -> dict[str, Any]:
@@ -171,6 +178,7 @@ def load(path: str | os.PathLike | None = None) -> dict:
     逐层深度合并；显式 --config 仍必须存在，且优先级最高。
     """
     cfg = _base()
+    _LAST_UNKNOWN.clear()
     home = (Path(os.environ.get("DOC2MD_HOME", "~/.doc2md")).expanduser()
             / TOML_BASENAME)
     cwd = Path.cwd() / TOML_BASENAME
@@ -196,6 +204,7 @@ def load(path: str | os.PathLike | None = None) -> dict:
         user = _read(cand)
         # CH-469（O-15）：未知键 = 静默失效的拼写错误，装载期点名（不改值、不阻断启动）
         for dotted in unknown_keys(user):
+            _LAST_UNKNOWN.append(f"{cand}:{dotted}")
             warnings.warn(f"{cand}: 未知配置键 {dotted}（不生效，请核对方案 附录 A）",
                           UserWarning, stacklevel=2)
         _deep_merge(cfg, user)
