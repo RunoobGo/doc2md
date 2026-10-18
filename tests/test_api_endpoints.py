@@ -12,6 +12,8 @@ from __future__ import annotations
 import pytest
 from conftest import hdr
 
+from doc2md import config
+
 pytestmark = [pytest.mark.milestone("DoD")]
 
 SCRIPT_UA = {"User-Agent": "doc2md-cli/2.4"}
@@ -67,6 +69,17 @@ def test_system_reload_role_matrix(api_client):
     assert r.status_code == 200 and r.get_json()["reloaded"] is True
     assert client.post("/system/reload", headers=hdr(tokens, "editor")).status_code == 403
     assert client.post("/system/reload", headers=hdr(tokens, "reader")).status_code == 403
+
+
+def test_system_reload_preserves_cli_root_binding(api_client):
+    """`serve --root` 是进程级绑定，reload 不得被配置文件的默认 root 覆盖。"""
+    client, tokens = api_client
+    app = client.application
+    app.config["doc2md"]["reload_from_files"] = True
+    r = client.post("/system/reload", headers=hdr(tokens, "admin"))
+    assert r.status_code == 200, r.get_data(as_text=True)[:300]
+    assert config.get(app.config["doc2md"]["cfg"], "paths.root") == str(
+        app.config["doc2md"]["root"])
 
 
 def test_system_reload_reflects_settings_override(api_client, tmp_path):

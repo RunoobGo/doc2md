@@ -254,6 +254,15 @@ def decrypt_bytes(blob: bytes, passphrase: str) -> bytes:
     return AESGCM(derive_key(passphrase, LEGACY_SALT)).decrypt(nonce, ct, MAGIC)
 
 
+def _sidecars(path: Path) -> tuple[Path, Path]:
+    return Path(str(path) + "-wal"), Path(str(path) + "-shm")
+
+
+def _remove_sidecars(path: Path) -> None:
+    for side in _sidecars(path):
+        side.unlink(missing_ok=True)
+
+
 def sqlite_backup(src: str | Path, dst: str | Path) -> Path:
     """SQLite 在线备份（WAL 安全）：用 backup API，不做文件级复制。
 
@@ -270,6 +279,9 @@ def sqlite_backup(src: str | Path, dst: str | Path) -> Path:
         src_c = sqlite3.connect(str(src))
         dst_c = sqlite3.connect(str(dst))
         src_c.backup(dst_c)
+        # 目标连接以 WAL 打开时可能留下 dst-wal/dst-shm；close 前 checkpoint，
+        # 避免备份数据只存在于即将被删除的 WAL 里。
+        dst_c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     except Exception:
         # Windows 不允许删除仍被打开的文件；先关连接再清 `.part`，否则
         # 「失败不留半成品」会在 PermissionError 上二次失败并掩盖原始错误。
@@ -278,11 +290,15 @@ def sqlite_backup(src: str | Path, dst: str | Path) -> Path:
                 con.close()
         dst_c = src_c = None
         dst.unlink(missing_ok=True)
+        _remove_sidecars(dst)
         raise
     finally:
         for con in (dst_c, src_c):
             if con is not None:
                 con.close()
+    # 备份目标是快照/临时库，不是运行中的库；sidecar 不得随快照长期滞留
+    #（实测：目标 close 后仍留下 .part-wal/.part-shm，含未 checkpoint 的副本）。
+    _remove_sidecars(dst)
     return dst
 
 
@@ -309,13 +325,14 @@ class BackupPlan:
         for base in (self.local_dir, self.external_dir):
             if not base or not Path(base).is_dir():
                 continue
-            for p in Path(base).glob("*.part"):
-                try:
-                    if p.stat().st_mtime <= cutoff:
-                        p.unlink()
-                        removed.append(p)
-                except OSError:
-                    continue
+            for pattern in ("*.part", "*.part-wal", "*.part-shm"):
+                for p in Path(base).glob(pattern):
+                    try:
+                        if p.stat().st_mtime <= cutoff:
+                            p.unlink()
+                            removed.append(p)
+                    except OSError:
+                        continue
         return removed
 
     def snapshot(self, state_db: Path, ts: datetime | None = None) -> Path:
@@ -335,6 +352,8 @@ class BackupPlan:
             check = _sqlite_quick_check(part)
             if check != "ok":
                 raise ValueError(f"snapshot quick_check failed: {check}")
+            # 只读 quick_check 也可能为 WAL 库建 -shm/-wal；它们不属于快照。
+            _remove_sidecars(part)
             with part.open("rb+") as fh:
                 _fsync(fh)
             _replace_retry(part, dst)
@@ -546,6 +565,7 @@ class BackupPlan:
                 con.close()
             if got != "ok":
                 raise ValueError(f"integrity_check failed: {got}")
+            _remove_sidecars(tmp)
             if dst.exists():
                 ts = datetime.now(timezone.utc).strftime(_TS_FMT)
                 backup = dst.parent / f"pre-restore-{ts}-{secrets.token_hex(4)}.sqlite"

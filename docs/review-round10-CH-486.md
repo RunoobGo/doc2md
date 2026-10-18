@@ -8,7 +8,7 @@
 
 ## 1. 执行摘要
 
-四组深审合并去重后形成 **30 个处置项**：按首次发现计 **9 HIGH / 9 MED / 4 LOW**，另有 8 项由 Windows 检出口径直接造成的测试失真。最终 **29 项落地**，S-01 的跨进程窗口部分落地，其余跨进程一致性、真实语料与目标机实测项登记为 B/C 类（见第 5 节）。
+四组深审合并去重后形成 **34 个处置项**：按首次发现计 **11 HIGH / 11 MED / 4 LOW**，另有 8 项由 Windows 检出口径直接造成的测试失真。最终 **33 项落地**，S-01 的跨进程窗口部分落地，其余跨进程一致性、真实语料与目标机实测项登记为 B/C 类（见第 5 节）。
 
 最重要的结论：
 
@@ -48,6 +48,9 @@
 | P-05 | MED | 无文本框文档也付一次 `txbxContent` 全树遍历 | 已修：`has_textbox` 预检 |
 | P-06 | MED | `batch` 的 `pool.submit` 在 try 外，BrokenProcessPool 时跳过 finally 清理 | 已修：submit 移入 try |
 | P-07 | LOW | 缝合替换后旧截断块仍留在 `tail`，后续窗口块可能被误判为伪影丢弃 | 已修：替换成功即从 `tail` 移除旧块 |
+| W-05 | HIGH | 实机轮出发现 SQLite 快照残留 `.part-wal/.part-shm`，可能夹带未 checkpoint 的正文且不被旧轮出规则清除 | 已修：备份目标 checkpoint 后清理 sidecar；`snapshot`/`restore` 的只读校验后也清理；`sweep_parts` 覆盖 `.part-wal/.part-shm` |
+| W-06 | MED | 手工创建的 `state.sqlite` 未被 ACL 收紧，备份/恢复产物已私有但主库仍可被其他本地用户读取 | 已修：`Store.__init__` 统一收紧数据目录 700 与 DB 600（Windows ACL / POSIX chmod） |
+| S-10 | MED | `serve --root` 的进程级 root 在 `/system/reload` 时被配置文件默认 root 覆盖，reload 返回 400 | 已修：reload 后重新钉回已绑定 root，并新增回归测试 |
 | D-01 | MED | 文档版本锚点 / DB 版本表 / DB6 旧口径漂移 | 已修：PIPELINE 2.8.0、DB 9、PLAN 3.20 三处同步，新增 CH-486 登记行 |
 | T-01 | MED | Windows 无 CI 腿，B-7 只有人工 | 已加 `windows-suite` 作业（gate + 全量 + doctor）；远端 run `39106866387` 已全绿，B-7 闭环 |
 | L-01 | LOW | Windows 平台专有用例（tzset/waitpid/sendmsg/symlink/ps sampler）在非授权环境红 | 已改为带原因的 skip 或平台分支；POSIX 语义用 `is_private`/分支补位 |
@@ -66,8 +69,8 @@
 
 | 项目 | 结果 |
 | --- | --- |
-| `pytest -m gate`（Windows 本机） | **340 项：339 passed / 0 failed / 1 platform skip（45.35s）** |
-| `pytest`（Windows 本机全量） | **925 项：917 passed / 0 failed / 8 platform skips（115.76s）** |
+| `pytest -m gate`（Windows 本机） | **342 项：341 passed / 0 failed / 1 platform skip（47.77s）** |
+| `pytest`（Windows 本机全量） | **928 项：920 passed / 0 failed / 8 platform skips（119.04s）** |
 | `ruff check .` | All checks passed |
 | `doc2md doctor` | exit 0；`pipeline 2.8.0`、`root_private` 可见 |
 | 黄金 MANIFEST | 5140 条全表匹配；31 份污染资产恢复 |
@@ -77,11 +80,35 @@
 
 8 个 skip 均为 Windows 上不存在的 POSIX 原语：`chmod` 语义 ×2、`time.tzset`、`os.WNOHANG`、`sendmsg`、symlink 检出 ×2、`ps`/`/proc` 采样 ×3（按测试文件计 8 项）。它们不是产品功能跳过，而是平台能力分支；Windows 侧由 ACL/`is_private`、junction、文件锁、spawn 池用例补位。
 
+### 4.1 本机实机验证矩阵（2026-10-18）
+
+| 场景 | 命令/方式 | 结果 |
+| --- | --- | --- |
+| 单文件 PDF/DOCX 转换 | `doc2md convert` 临时 root | 2/2 成功；zip 含 content.md / ir.json / report.html |
+| 批量转换 | 10 份 clean PDF，workers=1/2 | 10/10 成功；0.91s / 0.73s |
+| 不支持输入 | 50MiB `.bin` | 1.40ms 内 E4151，退出码 4 |
+| 320 页单档 | Python 进程 + WMI 采样 | 13.09s，峰值 working set 169.6MB，5789 blocks / 590661 chars |
+| 本地备份/恢复 | cron snapshot + v2 restore | integrity ok，正文一致，ACL private |
+| v1 历史容器 | `encrypt_bytes` 生成 + CLI restore | 恢复成功，integrity ok |
+| 恢复演练 | `backup drill --keep` | 8 步全过、表指纹 match |
+| cron daily/weekly | 无外置卷 | `ok=true`；weekly 外置步骤按配置 skipped |
+| 轮出与 part 清扫 | 20 年前 state/predelete + 旧 `.part` | 全部删除，无 `.part-wal/.part-shm` 残留 |
+| work 队列 | 单文件/目录 enqueue + `--once` | 3 个作业 done；status 计数一致 |
+| watch | 旧 mtime 文件 + `--once` | 转换并入库；`done=1` |
+| stale 回收 | 2 小时前 running 行 | `reclaimed_stale=1`，重跑 done |
+| API 链路 | serve + token + HTTP | POST /jobs、GET /docs、search、PATCH、E4091、reload、delete、events 全通过 |
+| 编辑器浏览器 | Qoder 内置浏览器加载/载入/保存 | 60 块加载；b1 保存后 rev 2，搜索索引刷新 |
+| Windows 计划任务 | 占位符替换 + UTF-16 `schtasks` 注册/查询/删除 | 注册与清理成功；XML 定义有效 |
+| Windows ACL/junction | `icacls`、`mklink /J`、`guard_walk`、`sweep_tmp` | 私有 ACL 生效；junction 被跳过，目标文件保留 |
+| 并发日志轮转 | 2 个进程同时写 `app.jsonl` | 两端 exit 0，54 行 JSON 全部可解析，无坏行 |
+
+未能在本机执行：`pwsh` 未安装（Windows PowerShell 5.1 无法解析安装脚本中的中文/PS7 语法）；外置 USB/SMB 卷、macOS、真实 Word/PDF 语料、域策略终端仍属 B 类。计划任务 XML 已用 `schtasks` 成功注册，证明定义本身可用；安装脚本的 `-VerifyOnly` 需 PowerShell 7。
+
 ## 5. B/C 类登记与提醒
 
 | 编号 | 事项 | 为什么仍需外部/人工 |
 | --- | --- | --- |
-| B-6 | Win11 真机 spawn 池、任务计划常驻、ACL 在域账户/漫游配置下的行为 | 当前仅 Windows 11 本机实测；域策略/受管终端需目标机验证 |
+| B-6 | Win11 真机 spawn 池、任务计划常驻、ACL 在域账户/漫游配置下的行为 | 本机已验 ACL/junction/spawn/XML 注册；**pwsh 7 未安装**，`install-doc2md-tasks.ps1 -VerifyOnly` 未执行；域策略/受管终端仍需目标机验证 |
 | B-7 | Windows CI 首次远端运行 | **已闭环**：run `39106866387` 六作业全绿；首轮 `39106420181` 仅 Windows checkout 长路径失败，`7b99d00` 启用 `core.longpaths` 后复跑通过 |
 | B-08 | Win11 / Mac mini 跨机性能基准 | 当前数字来自 Windows 本机与历史 macOS/Linux；需目标机同语料复测 |
 | B-10 | v1 历史容器、SMB/网络卷、并发 cron、失败回滚的真机恢复 | 需要真实外置卷/网络卷与人工拔盘 |

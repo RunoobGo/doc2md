@@ -216,6 +216,12 @@ class Store:
         self._conns: weakref.WeakSet[_ConnRef] = weakref.WeakSet()
         self._lock = threading.Lock()
         self._migrate()
+        # NFR-20：状态库含正文与编辑审计，目录/库文件不能依赖调用方先前的
+        # chmod。Windows 上 chmod 不落 ACL，统一走 ensure_private（POSIX chmod，
+        # Windows icacls）；WAL/SHM 随同目录继承私有 ACL。
+        from ..security.perms import ensure_private
+        ensure_private(self.path.parent, 0o700)
+        ensure_private(self.path, 0o600)
 
     def _new_conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.path), timeout=30.0, isolation_level=None)

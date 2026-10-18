@@ -17,6 +17,29 @@ pytestmark = [pytest.mark.milestone("M8")]
 
 
 @pytest.mark.gate
+def test_sqlite_backup_leaves_no_sidecars(tmp_path):
+    """快照/恢复目标关闭后不得残留 -wal/-shm（实机轮出发现过 .part-wal）。"""
+    from doc2md.ops.backup import sqlite_backup
+    src = tmp_path / "state.sqlite"
+    Store(src).close()
+    dst = tmp_path / "copy.sqlite"
+    sqlite_backup(src, dst)
+    assert dst.is_file()
+    assert not list(tmp_path.glob("copy.sqlite-wal"))
+    assert not list(tmp_path.glob("copy.sqlite-shm"))
+
+
+@pytest.mark.gate
+def test_store_db_is_private(tmp_path):
+    """状态库含正文/审计，Store 自身必须收紧 DB 与父目录。"""
+    from doc2md.security.perms import is_private
+    db = tmp_path / "state.sqlite"
+    Store(db).close()
+    assert is_private(db)
+    assert is_private(db.parent)
+
+
+@pytest.mark.gate
 def test_db8_has_del_seq_and_artifact_columns(store):
     assert DB_VERSION >= 8
     tcols = {r["name"] for r in store.q("PRAGMA table_info(tasks)")}

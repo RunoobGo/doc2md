@@ -881,6 +881,9 @@ def create_app(cfg: dict | None = None, root: Path | None = None,
         try:
             if app.config["doc2md"]["reload_from_files"]:
                 merged = config.load(app.config["doc2md"].get("config_path"))
+                # `serve --root` 是进程级绑定：配置文件里的相对 paths.root
+                # 不得在 reload 时把 store/writer 的根换掉（换根必须重启）。
+                merged.setdefault("paths", {})["root"] = str(root)
             else:
                 # 程序化 create_app(cfg) / 测试没有显式文件来源：以启动基线为
                 # 基准重放 override。退回 config.load() 会按当前 cwd 重新找
