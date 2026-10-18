@@ -1,0 +1,214 @@
+{
+  "collected_at": "2026-10-18",
+  "provenance": {
+    "word": "Microsoft Office 2052 real templates (.dotx -> .docx content-type only)",
+    "pdf": "Same Office templates exported by Microsoft Word 16 as PDF",
+    "local_dir": "work/real_samples (gitignored; template licensing/privacy)"
+  },
+  "word": {
+    "total": 23,
+    "convert_ok": 20,
+    "failed": [
+      {
+        "file": "Blog.docx",
+        "status": "unreadable:KeyError"
+      },
+      {
+        "file": "Office Word 2003 Look.docx",
+        "status": "reject:E4221"
+      },
+      {
+        "file": "Word 2010 look.docx",
+        "status": "reject:E4221"
+      }
+    ],
+    "feature_files": {
+      "textboxes": 11,
+      "numbering": 9,
+      "tables": 11,
+      "merged_cells": 3,
+      "sdt": 20,
+      "fields": 1,
+      "smart_tag": 0,
+      "hyperlinks": 2,
+      "images": 13,
+      "header_parts": 16,
+      "footer_parts": 20
+    },
+    "feature_totals": {
+      "textboxes": 116,
+      "numbering": 22,
+      "tables": 155,
+      "merged_cells": 10,
+      "sdt": 1495,
+      "fields": 1,
+      "smart_tag": 0,
+      "hyperlinks": 14,
+      "images": 46,
+      "header_parts": 33,
+      "footer_parts": 33
+    },
+    "headings_docx_total": 42
+  },
+  "pdf": {
+    "total": 9,
+    "convert_ok": 9,
+    "pages": [
+      2,
+      1,
+      2,
+      2,
+      2,
+      1,
+      1,
+      8,
+      8
+    ],
+    "body_sizes": [
+      8.0,
+      9.0,
+      9.5,
+      10.0,
+      10.6,
+      11.0
+    ],
+    "files_with_detected_headings": 2,
+    "numeric_table_blocks": 2
+  },
+  "pairs": [
+    {
+      "stem": "AdjacencyReport",
+      "docx_headings": 2,
+      "pdf_headings": 0,
+      "matched": 0,
+      "recall": 0.0,
+      "precision": null,
+      "extra_pdf_headings": [],
+      "missing_pdf_headings": [
+        "小标题2",
+        "小标题3"
+      ]
+    },
+    {
+      "stem": "ApothecaryLetter",
+      "docx_headings": 0,
+      "pdf_headings": 0,
+      "matched": 0,
+      "recall": null,
+      "precision": null,
+      "extra_pdf_headings": [],
+      "missing_pdf_headings": []
+    },
+    {
+      "stem": "ApothecaryNewsletter",
+      "docx_headings": 1,
+      "pdf_headings": 0,
+      "matched": 0,
+      "recall": 0.0,
+      "precision": null,
+      "extra_pdf_headings": [],
+      "missing_pdf_headings": [
+        "文章标题"
+      ]
+    },
+    {
+      "stem": "EssentialReport",
+      "docx_headings": 2,
+      "pdf_headings": 0,
+      "matched": 0,
+      "recall": 0.0,
+      "precision": null,
+      "extra_pdf_headings": [],
+      "missing_pdf_headings": [
+        "小标题2",
+        "小标题3"
+      ]
+    },
+    {
+      "stem": "OriginReport",
+      "docx_headings": 3,
+      "pdf_headings": 0,
+      "matched": 0,
+      "recall": 0.0,
+      "precision": null,
+      "extra_pdf_headings": [],
+      "missing_pdf_headings": [
+        "标题1",
+        "标题2",
+        "标题3"
+      ]
+    },
+    {
+      "stem": "OriginResume",
+      "docx_headings": 0,
+      "pdf_headings": 0,
+      "matched": 0,
+      "recall": null,
+      "precision": null,
+      "extra_pdf_headings": [],
+      "missing_pdf_headings": []
+    },
+    {
+      "stem": "RedAndBlackLetter",
+      "docx_headings": 0,
+      "pdf_headings": 0,
+      "matched": 0,
+      "recall": null,
+      "precision": null,
+      "extra_pdf_headings": [],
+      "missing_pdf_headings": []
+    },
+    {
+      "stem": "RedAndBlackReport",
+      "docx_headings": 20,
+      "pdf_headings": 6,
+      "matched": 0,
+      "recall": 0.0,
+      "precision": 0.0,
+      "extra_pdf_headings": [
+        "1.1无保留意见",
+        "1.2保留意见报告",
+        "1.3否定意见报告",
+        "1.4放弃表达意见报告",
+        "1.5上市公司内部控制审计报告",
+        "1.6持续经营"
+      ],
+      "missing_pdf_headings": [
+        "会计科目",
+        "债务",
+        "全面收益表（损益）",
+        "公司信息",
+        "关键点",
+        "展望未来",
+        "或有负债",
+        "战略要点"
+      ]
+    },
+    {
+      "stem": "TimelessReport",
+      "docx_headings": 20,
+      "pdf_headings": 6,
+      "matched": 0,
+      "recall": 0.0,
+      "precision": 0.0,
+      "extra_pdf_headings": [
+        "1.1无保留意见",
+        "1.2保留意见报告",
+        "1.3否定意见报告",
+        "1.4放弃表达意见报告",
+        "1.5上市公司内部控制审计报告",
+        "1.6持续经营"
+      ],
+      "missing_pdf_headings": [
+        "会计科目",
+        "债务",
+        "全面收益表（损益）",
+        "公司信息",
+        "关键点",
+        "展望未来",
+        "或有负债",
+        "战略要点"
+      ]
+    }
+  ]
+}

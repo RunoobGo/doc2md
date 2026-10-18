@@ -249,6 +249,10 @@ python tests/corpus/run_corpus.py --write-baseline  # 审阅后更新目标
 `tests/test_corpus_expected.py` 已把该比对纳入全量信息面（非 merge-gate）；失败时实际输出
 在 `work/corpus_diff/`。扫描件 `pdf_06_scanned_1p.pdf` 的目标是 E4221 拒收，不生成 Markdown。
 
+真实样本（B-13/B-15）的收集方法、特征清单与分析脚本见
+`tests/corpus/real/README.md`；Office 模板/用户文档二进制按许可与隐私要求保留在
+`work/real_samples/`，不默认入库。
+
 六条门禁：`shard_two_phase`、`malicious_filenames`、`injection_resistance`、
 `edit_optimistic_lock`、`delete_cascade`、`log_rotation`；另含本实现补强的 CJK 检索、渲染分级、
 目录递归防护与低配机专项断言（完整清单见方案 附录 F）。
