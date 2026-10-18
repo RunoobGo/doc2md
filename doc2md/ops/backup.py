@@ -42,6 +42,11 @@ _V2_HEADER_LEN = 7 + _V2_SALT_LEN + 4 + 8   # magic | salt | chunk_size | total_
 _SNAPSHOT_RE = re.compile(r"^state-(\d{8}T\d{6}Z)\.sqlite(\.enc)?$")
 # CH-483（R8-OPS-1）：删除前整库快照。随机后缀避免同一秒内两次删除互相覆盖。
 _PREDELETE_RE = re.compile(r"^predelete-(\d{8}T\d{6}Z)-[0-9a-f]{8}\.sqlite$")
+# CH-485（R9-OPS-2）：恢复前旧库备份也属于含正文的本地副本，需同样轮出/0600。
+_PRERESTORE_RE = re.compile(r"^pre-restore-(\d{8}T\d{6}Z)-[0-9a-f]{8}\.sqlite$")
+# CH-485（R9-OPS-1）：删前/恢复前快照的硬上限（避免 500 次删除 = 500×DB）。
+PREDELETE_KEEP_MAX = 50
+PREDELETE_MAX_BYTES = 2 * 1024 * 1024 * 1024
 _TS_FMT = "%Y%m%dT%H%M%SZ"
 
 
@@ -232,14 +237,24 @@ class BackupPlan:
 
     def predelete_snapshot(self, state_db: Path,
                            ts: datetime | None = None) -> Path:
-        """删除前整库快照（CH-483 / R8-OPS-1）：删除入口调用，失败必须阻断删除。"""
+        """删除前整库快照（CH-483 / R8-OPS-1）：删除入口调用，失败必须阻断删除。
+
+        CH-485：先过 NFR-6 磁盘门禁、文件 0600、并执行与 cron 同口径的轮出。
+        快照失败仍 fail-closed（删除不执行），但磁盘不足必须是可判定的
+        E4131，而不是被 API 统一改写成 E5031。
+        """
         import secrets
 
         ts = ts or datetime.now(timezone.utc)
         self.local_dir.mkdir(parents=True, exist_ok=True)
+        if self.cfg is not None:
+            from .diskguard import assert_free_space
+            assert_free_space(self.local_dir, state_db.stat().st_size,
+                              cfg=self.cfg, what="predelete_snapshot")
         dst = self.local_dir / (
             f"predelete-{ts.strftime(_TS_FMT)}-{secrets.token_hex(4)}.sqlite")
         sqlite_backup(state_db, dst)
+        _chmod600(dst, self.mode_warnings)
         mode = _parse_mode(self.work_dir_mode)
         self._enforce_mode(self.local_dir, mode)
         self._enforce_mode(self._resolve_work_root(), mode)
@@ -247,28 +262,43 @@ class BackupPlan:
         return dst
 
     def rotate_predelete(self, now: datetime | None = None) -> list[Path]:
-        """清理过期删前快照；**永远保留最新一份**（数据安全兜底）。"""
+        """清理过期/超量的删前与恢复前快照（CH-485 / FR-128）。
+
+        FR-128 的 14 天是**上限**，不是“至少保留 14 天”；因此最新一份也不能
+        免于过期删除。另按份数与总字节做硬上限，防止批量删除把备份目录灌满。
+        """
         now = now or datetime.now(timezone.utc)
         cutoff = now - timedelta(days=max(1, int(self.rotation_days)))
-        rows = []
-        for p in sorted(self.local_dir.glob("predelete-*.sqlite")):
-            m = _PREDELETE_RE.match(p.name)
-            if not m:
-                continue
-            try:
-                born = datetime.strptime(m.group(1), _TS_FMT).replace(tzinfo=timezone.utc)
-                mtime = datetime.fromtimestamp(p.stat().st_mtime, timezone.utc)
-            except (ValueError, OSError):
-                continue
-            rows.append((p, min(born, mtime)))
-        if len(rows) < 2:
-            return []
-        rows.sort(key=lambda x: x[1])
-        removed = []
-        for p, born in rows[:-1]:
-            if born < cutoff:
+        rows: list[tuple[Path, datetime, int]] = []
+        for pattern in ("predelete-*.sqlite", "pre-restore-*.sqlite"):
+            for p in sorted(self.local_dir.glob(pattern)):
+                m = _PREDELETE_RE.match(p.name) or _PRERESTORE_RE.match(p.name)
+                if not m:
+                    continue
+                try:
+                    born = datetime.strptime(
+                        m.group(1), _TS_FMT).replace(tzinfo=timezone.utc)
+                    st = p.stat()
+                    stamp = min(born, datetime.fromtimestamp(
+                        st.st_mtime, timezone.utc))
+                except (ValueError, OSError):
+                    continue
+                rows.append((p, stamp, st.st_size))
+        removed: list[Path] = []
+        for p, stamp, _size in list(rows):
+            if stamp < cutoff:
                 p.unlink(missing_ok=True)
                 removed.append(p)
+                rows.remove((p, stamp, _size))
+        # 先按时间从旧到新淘汰；至少留一份，避免单份超限时把唯一副本删掉。
+        rows.sort(key=lambda x: x[1])
+        total = sum(size for _p, _stamp, size in rows)
+        while len(rows) > 1 and (
+                len(rows) > PREDELETE_KEEP_MAX or total > PREDELETE_MAX_BYTES):
+            p, _stamp, size = rows.pop(0)
+            p.unlink(missing_ok=True)
+            removed.append(p)
+            total -= size
         return removed
 
     def _resolve_work_root(self) -> Path:

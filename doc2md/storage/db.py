@@ -19,7 +19,10 @@ import weakref
 from datetime import datetime, timezone
 from pathlib import Path
 
-DB_VERSION = 7   # state.sqlite 结构版本（user_version）；与 IR 的 SCHEMA_VERSION=14 是两套口径
+DB_VERSION = 8   # state.sqlite 结构版本（user_version）；与 IR 的 SCHEMA_VERSION=14 是两套口径
+# v8（CH-485 / R9-SVC-1 / R9-SVC-2）：tasks 增加 del_seq/force；blocks 增加
+# links/font/provenance JSON；docs 增加 gate_json——异步 drift 删除守护与
+# DB 作为产物事实源的基础。DDL 仍无条件幂等重放，旧库由下方 ALTER 补齐。
 # v7（CH-483 / R8-SVC-1）：新增 ix_deletions_doc_seq，同步转换窗口按
 # deletions 自增 id 查墓碑，避免删除后复活。
 # v6（CH-476 / R7-STOR-1，决策 D1）：新增 search_map（FTS 删除 rowid 映射）。
@@ -35,6 +38,7 @@ CREATE TABLE IF NOT EXISTS docs (
   source_key    TEXT NOT NULL,
   source_name   TEXT NOT NULL,
   source_name_raw TEXT DEFAULT '',
+  gate_json     TEXT DEFAULT '{{}}',
   format        TEXT NOT NULL,
   pages         INTEGER DEFAULT 0,
   sharded       INTEGER DEFAULT 0,
@@ -56,6 +60,9 @@ CREATE TABLE IF NOT EXISTS blocks (
   page     INTEGER,
   flags_json  TEXT DEFAULT '{{}}',
   marks_json  TEXT DEFAULT '{{}}',
+  links_json  TEXT DEFAULT '[]',
+  font_json   TEXT DEFAULT '{{}}',
+  provenance_json TEXT DEFAULT '{{}}',
   immutable INTEGER DEFAULT 0,
   revision INTEGER NOT NULL DEFAULT 1,
   updated_by TEXT DEFAULT '',
@@ -102,7 +109,9 @@ CREATE TABLE IF NOT EXISTS tasks (
   created_at TEXT NOT NULL,
   started_at TEXT, finished_at TEXT,
   error_code TEXT, detail_json TEXT DEFAULT '{{}}',
-  source_path TEXT, mode TEXT
+  source_path TEXT, mode TEXT,
+  del_seq INTEGER NOT NULL DEFAULT 0,
+  force INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS ix_tasks_idem ON tasks(idem_key);
 -- CH-448（DB_VERSION=4）：队列入队即带消费路径与转换档位，独立列而非塞 detail_json：
@@ -256,6 +265,15 @@ class Store:
         cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(blocks)")}
         if "revision" not in cols:
             self._conn.execute("ALTER TABLE blocks ADD COLUMN revision INTEGER NOT NULL DEFAULT 1")
+        # CH-485（DB8）：产物事实源字段。旧库补列，默认空 JSON 不改变既有行语义。
+        for col, ddl in (("links_json", "TEXT DEFAULT '[]'"),
+                         ("font_json", "TEXT DEFAULT '{}'"),
+                         ("provenance_json", "TEXT DEFAULT '{}'")):
+            if col not in cols:
+                self._conn.execute(f"ALTER TABLE blocks ADD COLUMN {col} {ddl}")
+        dcols = {r["name"] for r in self._conn.execute("PRAGMA table_info(docs)")}
+        if "gate_json" not in dcols:
+            self._conn.execute("ALTER TABLE docs ADD COLUMN gate_json TEXT DEFAULT '{}'")
         tcols = {r["name"] for r in self._conn.execute("PRAGMA table_info(tasks)")}
         if tcols and "source_path" not in tcols:
             # CH-448：存量库补列（异步队列的消费路径）；NULL = 非队列行，消费方直接判失败
@@ -263,6 +281,12 @@ class Store:
             self._conn.execute("ALTER TABLE tasks ADD COLUMN mode TEXT")
             self._conn.execute("CREATE INDEX IF NOT EXISTS ix_tasks_queued"
                                " ON tasks(status, created_at)")
+        # CH-485（DB8）：异步删除守护基准与 force 透传。旧任务 del_seq=0 为保守值
+        # （会看到全部历史墓碑）；升级后仍在队列里的旧任务建议重投，不静默放行。
+        if "del_seq" not in tcols:
+            self._conn.execute("ALTER TABLE tasks ADD COLUMN del_seq INTEGER NOT NULL DEFAULT 0")
+        if "force" not in tcols:
+            self._conn.execute("ALTER TABLE tasks ADD COLUMN force INTEGER NOT NULL DEFAULT 0")
         tcols = {r["name"] for r in self._conn.execute("PRAGMA table_info(tokens)")}
         if tcols and "role" not in tcols:
             # 方案 8.5 兼容期：存量 token 默认 admin

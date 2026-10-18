@@ -97,6 +97,8 @@ def _predelete_snapshot(cfg: dict, root: Path) -> Path | None:
         cfg=cfg)
     try:
         return plan.predelete_snapshot(state)
+    except Doc2mdError:
+        raise                                  # E4131（磁盘门禁）等契约错误原样上抛
     except Exception as exc:                    # noqa: BLE001 — 任何失败都不得放行删除
         raise E5031_StorageError(
             "pre-delete snapshot failed; delete aborted",
@@ -327,7 +329,8 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
         out = []
 
         def _finish_one(f, ir, doc_id, source_key, since):
-            j = sched.submit(doc_id, source_key, idem_key=_idem_for(f))
+            j = sched.submit(doc_id, source_key, idem_key=_idem_for(f),
+                             del_seq=since)
             # R6-SVC-3（CH-475，决策 D1）：幂等命中 / 附着既有作业时，该 doc_id 已由
             # 在途或既往作业负责落库——不再重跑 save_ir。既省一次全量写（性能优先），
             # 又杜绝「对已 done 作业再 mark 致终态翻转 / 对已编辑文档误触 E4091 报
@@ -581,6 +584,10 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
             raise E4001_BadRequest("confirm=true required for destructive delete",
                                  detail={"rule": "FR-128", "requires": "confirm=true"})
         cfg = cur()
+        # CH-485（R9-OPS-1）：先确认对象存在再拍全库快照；删除不存在的 doc
+        # 不应产生任何备份写入。
+        if store.q1("SELECT 1 FROM docs WHERE doc_id=?", (doc_id,)) is None:
+            raise E4041_NotFound(f"doc {doc_id} not found")
         _predelete_snapshot(cfg, root)
         return jsonify(delete_doc(
             store, doc_id, actor_id(None, default="admin"), root,
@@ -594,6 +601,8 @@ def create_app(cfg: dict | None = None, root: Path | None = None):
             raise E4001_BadRequest("confirm=true required for destructive delete",
                                  detail={"rule": "FR-128", "requires": "confirm=true"})
         cfg = cur()
+        if store.q1("SELECT 1 FROM docs WHERE source_key=?", (source_key,)) is None:
+            raise E4041_NotFound(f"source {source_key} not found")
         _predelete_snapshot(cfg, root)
         return jsonify(delete_source(
             store, source_key, actor_id(None, default="admin"), root,

@@ -27,7 +27,7 @@ def _mk_db(p: Path, value: str = "正文") -> Path:
 @pytest.mark.gate
 def test_db7_has_deletions_doc_ts_index(store):
     from doc2md.storage.db import DB_VERSION
-    assert DB_VERSION == 7
+    assert DB_VERSION >= 7
     names = {r["name"] for r in store.q("PRAGMA index_list('deletions')")}
     assert "ix_deletions_doc_seq" in names
 

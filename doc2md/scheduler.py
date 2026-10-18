@@ -32,7 +32,7 @@ class Scheduler:
 
     def submit(self, doc_id: str, source_key: str = "",
                idem_key: str | None = None, *, source_path: str | None = None,
-               mode: str | None = None) -> Job:
+               mode: str | None = None, del_seq: int | None = None) -> Job:
         """投递作业；命中去重路径时不新建。
 
         `source_path` / `mode`（CH-448）：异步队列的消费参数，独立列存放
@@ -40,7 +40,8 @@ class Scheduler:
         """
         with self.store.tx() as tx:
             return self._submit_tx(tx, doc_id, source_key, idem_key,
-                                   source_path=source_path, mode=mode)
+                                   source_path=source_path, mode=mode,
+                                   del_seq=del_seq)
 
     def submit_many(self, items) -> list[Job]:
         """批量投递（CH-476 / R7-PERF-h）：整批只开一个 `BEGIN IMMEDIATE`。
@@ -61,7 +62,7 @@ class Scheduler:
 
     def _submit_tx(self, tx, doc_id: str, source_key: str = "",
                    idem_key: str | None = None, *, source_path: str | None = None,
-                   mode: str | None = None) -> Job:
+                   mode: str | None = None, del_seq: int | None = None) -> Job:
         """`submit` 的语句序列（运行在调用方事务里）。"""
         if idem_key:
             row = tx.execute("SELECT job_id, doc_id FROM tasks WHERE idem_key=? LIMIT 1",
@@ -75,12 +76,18 @@ class Scheduler:
         if row:
             return Job(row["job_id"], doc_id, "queued", attached=True)
         job_id = "job-" + uuid.uuid4().hex[:12]
+        # CH-485（R9-SVC-1）：入队时冻结删除基准。异步消费在转换期间遇到的
+        # 更新墓碑（id > del_seq）必须在落库事务内拦截；同步路径由请求入口
+        # 的 since_seq 显式传入（不能在这里现取，见 _finish_one 注释）。
+        if del_seq is None:
+            del_seq = int(tx.execute(
+                "SELECT COALESCE(MAX(id),0) AS m FROM deletions").fetchone()["m"])
         try:
             tx.execute(
                 "INSERT INTO tasks(job_id, doc_id, source_key, status, idem_key,"
-                " created_at, source_path, mode) VALUES (?,?,?,?,?,?,?,?)",
+                " created_at, source_path, mode, del_seq) VALUES (?,?,?,?,?,?,?,?,?)",
                 (job_id, doc_id, source_key, "queued", idem_key, now_iso(),
-                 source_path, mode))
+                 source_path, mode, int(del_seq)))
         except sqlite3.IntegrityError:
             # 并发窗口：唯一索引挡住第二份进行中作业 → 附着
             row = tx.execute(

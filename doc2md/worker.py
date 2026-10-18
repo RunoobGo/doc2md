@@ -55,7 +55,7 @@ def claim(store: Store, limit: int) -> list[dict]:
     out: list[dict] = []
     with store.tx() as tx:
         rows = tx.execute(
-            "SELECT job_id, doc_id, source_key, source_path, mode FROM tasks"
+            "SELECT job_id, doc_id, source_key, source_path, mode, del_seq FROM tasks"
             " WHERE status='queued' ORDER BY created_at LIMIT ?", (limit,)).fetchall()
         for r in rows:
             tx.execute("UPDATE tasks SET status='running', started_at=?, error_code=''"
@@ -64,7 +64,8 @@ def claim(store: Store, limit: int) -> list[dict]:
                 continue
             out.append({"job_id": r["job_id"], "doc_id": r["doc_id"],
                         "source_key": r["source_key"] or "",
-                        "path": r["source_path"] or "", "mode": r["mode"]})
+                        "path": r["source_path"] or "", "mode": r["mode"],
+                        "del_seq": int(r["del_seq"] or 0)})
     return out
 
 
@@ -275,6 +276,17 @@ def _finish_ok(store: Store, sched: Scheduler, job: dict, res: dict, ir,
         # 产物按消费时内容入库；任务留痕，不偷偷改 task.doc_id 主键语义
         detail["content_drift"] = {"enqueued": enqueued, "consumed": consumed}
     with store.tx() as tx:
+        # CH-485（R9-SVC-1）：与同步路径同口径的墓碑检查。drift 让任务行的
+        # doc_id（入队时内容）与本次消费的 ir.doc_id 分离，不能只靠
+        # `mark rowcount=0` 识别删除；必须按实际消费的 doc/source 查
+        # “入队后新增”的墓碑。
+        dead = tx.execute(
+            "SELECT 1 FROM deletions WHERE (doc_id=? OR doc_id=?) AND id>? LIMIT 1",
+            (ir.doc_id, f"source:{ir.source_key}",
+             int(job.get("del_seq") or 0))).fetchone()
+        if dead is not None:
+            raise E4041_NotFound(
+                f"doc deleted during conversion: {ir.doc_id}")
         if not sched.mark(job["job_id"], "done", detail=detail, tx=tx):
             raise E4041_NotFound(
                 f"task row gone (doc deleted during conversion): {job['job_id']}")

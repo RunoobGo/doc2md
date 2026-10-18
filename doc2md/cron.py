@@ -185,7 +185,11 @@ def run(cfg: dict | None = None, root: Path | None = None, mode: str = "daily",
 
             removed = plan.rotate(include_external=(mode == "weekly" and external_rotatable),
                                   keep_newest=True)
+            # CH-485（R9-OPS-1）：删前/恢复前快照与 state-* 同轮清理；沿用
+            # 既有 rotation 步骤名，避免改变附录 E 的 10 步契约。
+            pre_removed = plan.rotate_predelete()
             rep.add("rotation", removed=[str(p) for p in removed],
+                    predelete_removed=[str(p) for p in pre_removed],
                     external_rotation=("done" if mode == "weekly" and external_rotatable
                                        else "skipped"))
 
