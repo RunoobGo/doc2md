@@ -128,15 +128,15 @@
 | B-13 | 真实 Word 模板语料（文本框、编号、sdt、域代码、页眉页脚） | **已开始收集并修复**：Office 2052 真实模板 23 份，20 份可转换；文本框中 `w:sdt`/嵌套文本框漏抽已修；特征矩阵见 `tests/corpus/real/manifest.json`；样本本地保留，仍需人工抽查 |
 | B-15 | 真实中文 PDF 标题/数字表/跨行链接语料 | **已开始收集并加规则**：9 份 Word 导出中文 PDF，正文 8.0–11.0pt；8/9 检出标题块，RedAndBlackReport recall 0.955、TimelessReport 0.435（自动代理）；仍需人工标注 10–20 份标题集合做最终 H1 precision/recall |
 | B-16 | 真实注入语料 + `_attribute` 归因 | 需安全语料与人工审阅 |
-| B-17 | 图片型 DOCX 的媒体全量驻留 | 需决定是否自建 OOXML 读取器/媒体上限；当前 `python-docx` 会载入 `word/media/*`，4 worker 会放大 |
+| B-17 | 图片型 DOCX 的媒体全量驻留 | 本机测量：871KB `StudentReport.docx` 转换 0.46s；短进程峰值采样未捕获，媒体全量驻留架构未改；需决定自建 OOXML 读取器/媒体上限 |
 | B-18 | API 与 worker 跨进程产物重建的最终一致 | **已实现并本机双进程验证**：`out/.locks/<doc>.lock` 跨进程 O_EXCL 锁 + 60s 陈旧回收 + 30s 超时 E5031；两个独立 Python 进程同时重建同一 600 块文档均 exit 0、zip 可读；线程串行回归已加 |
-| B-19 | 大文档 PATCH 的全篇重渲染/重打包 O(全文) | 需设计块级增量渲染；当前单块编辑仍 O(文档) |
+| B-19 | 大文档 PATCH 的全篇重渲染/重打包 O(全文) | 本机测量：2000 块文档单块 PATCH **0.033s**；仍为 O(全文) 重渲染/重打包，块级增量渲染未实施 |
 | B-20 | `/docs`、`/audit`、`/audit/deletions` 的硬分页上界 | **已实现**：默认 500、显式 limit 硬顶 500，保留 total/offset/limit；600 块 API 回归已加 |
 
 **提醒（每批交付时重复）**：B-7（Windows CI）已由 run `39106866387` 闭环；B-18/B-20 已在本机实现；B-6 仍是域策略/受管终端的目标机实证路径；B-10 是“以为备份了”的最后防线；B-13/B-15/B-16 是结构修复的真实语料验收；B-17/B-19 仍是后续架构项，不应在发布说明中写成已解决。
 
 ## 6. 变更与回滚
 
-- 版本：`PIPELINE_VERSION` 2.7.0→**2.8.0**（相邻表/域代码修复改变部分输入产物）、`DB_VERSION` 8→**9**（新增索引，幂等 DDL）、`PLAN_VERSION` 3.19→**3.20**。
+- 版本：`PIPELINE_VERSION` 2.7.0→**2.9.1**（相邻表/域代码/无编号标题等输出修复）、`DB_VERSION` 8→**9**（新增索引，幂等 DDL）、`PLAN_VERSION` 3.19→**3.22**。
 - 回滚：`.gitattributes` 与黄金资产恢复可整体回退；ACL 入口在 Windows 失败时降级为告警，不会阻断转换；`ix_tasks_created` 为纯增量索引，旧代码可忽略；`precheck_edits` 为 CLI/watch 显式参数，API/worker 保留原补偿路径。
 - 已提交并推送：`500159a`（CH-486 主体）与 `7b99d00`（Windows CI 长路径修复）；远端 CI run `39106866387` 六作业全绿。未创建 PR（直推 `main`，远端提示绕过必需检查，属既有 CH-470 行为）。
