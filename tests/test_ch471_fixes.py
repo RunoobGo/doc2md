@@ -60,6 +60,20 @@ def test_modal_size_whole_vs_shard_diverge():
     assert modal_size(_TAIL) == 20.0
 
 
+def test_modal_size_hist_path_matches_line_scan(small_pdf):
+    """CH-492（P-1）：直方图归并路径与逐行扫描回退路径必须同值。
+
+    base_size 是「分片≡单片」判据根（convert.py CH-471/PIPE-1）；归并若在
+    计数或平票插入序上偏离逐行扫描，golden 与分片等价性会静默劣化。
+    """
+    from doc2md.pipeline.s1_parse import read_pdf
+    pages = read_pdf(small_pdf)
+    with_hist = modal_size(pages)
+    for p in pages:
+        p.size_hist = {}                     # 清直方图 → 强制逐行扫描回退
+    assert modal_size(pages) == with_hist
+
+
 def test_pipe1_old_per_shard_modal_flips_heading():
     """复现缺陷：尾片按**自身**众数分析（旧 convert 行为）会把该行判成段落。"""
     ir = analyze(_TAIL)                       # base_size=None → 片内自算 20
@@ -462,8 +476,8 @@ def test_api_sync_parallel_dispatch_by_threshold(api_client, tmp_path, monkeypat
     """
     import shutil
 
+    import doc2md.api as api
     import doc2md.pipeline.batch as batch
-    import doc2md.worker as worker
 
     client, tokens = api_client
     d = tmp_path / "drop"
@@ -482,8 +496,10 @@ def test_api_sync_parallel_dispatch_by_threshold(api_client, tmp_path, monkeypat
     jobs = r.get_json()["jobs"]
     assert len(jobs) == 3 and all(j.get("doc_id") for j in jobs), jobs
 
-    # 降阈值（→ max(2,1)=2），3 文件走并行：桩 run_batch 记录输入顺序、_read_ir 造 IR
-    client.put("/settings", json={"perf": {"sync_min_parallel": 1}},
+    # 降阈值（→ max(2,1)=2）+ 关闭字节条件（sync_min_bytes=0），3 文件走并行：
+    # 桩 run_batch 记录输入顺序、_read_ir 造 IR
+    client.put("/settings", json={"perf": {"sync_min_parallel": 1,
+                                           "sync_min_bytes": 0}},
                headers=_h(tokens, "admin"))
 
     def fake_batch(paths, **kw):
@@ -493,7 +509,7 @@ def test_api_sync_parallel_dispatch_by_threshold(api_client, tmp_path, monkeypat
                 for i, p in enumerate(paths)]
 
     monkeypatch.setattr(batch, "run_batch", fake_batch)
-    monkeypatch.setattr(worker, "_read_ir",
+    monkeypatch.setattr(api, "read_ir",
                         lambda zp: _doc_ir(doc_id=str(zp).split("doc:", 1)[1]))
     calls.clear()
     r2 = client.post("/jobs", json={"path": str(d)}, headers=h)
@@ -501,6 +517,18 @@ def test_api_sync_parallel_dispatch_by_threshold(api_client, tmp_path, monkeypat
     j2 = r2.get_json()["jobs"]
     assert len(j2) == 3 and {j["doc_id"] for j in j2} == {"pb0", "pb1", "pb2"}, j2
     assert all(j.get("status") not in ("error", "conflict") for j in j2), j2
+
+    # CH-492（QA M-1 双条件）：件数够但批内总字节不足 → 仍走串行（小文件大批量
+    # 走池是负优化：实测 8 个最小 PDF 慢 7.8 倍）。sync_min_bytes=10GB 远超
+    # 3 个小 PDF 的总字节 → 字节条件拦截，不建池。
+    client.put("/settings", json={"perf": {"sync_min_parallel": 1,
+                                           "sync_min_bytes": 10_000_000_000}},
+               headers=_h(tokens, "admin"))
+    calls.clear()
+    r3 = client.post("/jobs", json={"path": str(d)}, headers=h)
+    assert calls == [], "件数够但总字节不足应走串行（双条件的字节侧拦截）"
+    j3 = r3.get_json()["jobs"]
+    assert len(j3) == 3 and all(j.get("doc_id") for j in j3), j3
 
 
 # --- SVC-5 / SVC-6（D4）：绑定强制 loopback + 冻结 offline_assert ----------------

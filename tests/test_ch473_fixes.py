@@ -772,7 +772,8 @@ def test_svc7_sync_pool_runs_under_global_gate(api_client, tmp_path, monkeypatch
         return [{"file": str(p), "status": "error", "code": "E5000"} for p in paths]
 
     monkeypatch.setattr(batch, "run_batch", spy)
-    client.put("/settings", json={"perf": {"sync_min_parallel": 1}},
+    client.put("/settings", json={"perf": {"sync_min_parallel": 1,
+                                           "sync_min_bytes": 0}},
                headers=_h(tokens, "admin"))
     r = client.post("/jobs", json={"path": str(d)}, headers=_h(tokens, "editor"))
     assert r.status_code == 202

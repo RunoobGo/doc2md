@@ -1947,6 +1947,9 @@ def test_svc2_sync_pool_path_forwards_mode_to_run_batch(tmp_cfg, api_client, tmp
         return [{"file": str(f), "status": "error", "code": "E5000"} for f in files]
 
     monkeypatch.setattr(batch_mod, "run_batch", fake_run_batch)
+    # CH-492（QA M-1 双条件）：本用例验的是并行路径本身，关闭字节条件回到纯件数判定
+    client.put("/settings", json={"perf": {"sync_min_bytes": 0}},
+               headers=headers(tokens, "admin"))
     r = client.post("/jobs", json={"path": str(src), "mode": "single"},
                     headers=headers(tokens, "editor"))
     assert r.status_code == 202, r.get_data(as_text=True)[:300]
@@ -1988,6 +1991,9 @@ def test_svc3_pool_gate_timeout_returns_503_with_retry_after(tmp_cfg, api_client
     monkeypatch.setattr(api_mod, "_SYNC_POOL_GATE", gate)
     monkeypatch.setattr(batch_mod, "run_batch",
                         lambda *a, **k: pytest.fail("闸门占用期间不得建池"))
+    # CH-492（QA M-1 双条件）：本用例验的是闸门超时路径，关闭字节条件回到纯件数判定
+    client.put("/settings", json={"perf": {"sync_min_bytes": 0}},
+               headers=headers(tokens, "admin"))
 
     t0 = time.monotonic()
     r = client.post("/jobs", json={"path": str(src)}, headers=headers(tokens, "editor"))

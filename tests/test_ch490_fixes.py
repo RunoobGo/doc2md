@@ -15,7 +15,7 @@ pytestmark = [pytest.mark.milestone("DoD")]
 @pytest.mark.gate
 def test_artifact_lock_heartbeat_prevents_stale_steal(tmp_path):
     """持锁超过 stale 窗口但心跳存活时，第二个线程不得抢锁。"""
-    from doc2md.api import _artifact_lock
+    from doc2md.artifacts import _artifact_lock
 
     a_acquired = threading.Event()
     b_acquired = threading.Event()
@@ -147,7 +147,7 @@ def test_paths_logs_is_runtime_immutable(tmp_cfg):
 @pytest.mark.gate
 def test_artifact_lock_stale_without_heartbeat_is_reclaimed(tmp_path):
     """没有心跳的旧锁文件（模拟崩溃遗留）仍按 stale 窗口回收。"""
-    from doc2md.api import _artifact_lock
+    from doc2md.artifacts import _artifact_lock
 
     lock_dir = tmp_path / ".locks"
     lock_dir.mkdir()

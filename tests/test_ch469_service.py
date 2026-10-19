@@ -608,6 +608,67 @@ def test_cli_watch_gate_reject_does_not_downgrade_exit_code(tmp_path, monkeypatc
     assert "E4151" in err and "E4221" in err
 
 
+def test_cli_watch_once_scan_error_counts_exit_biz(tmp_path, monkeypatch, capsys):
+    """QA 缺陷 1（CH-492）：--once 模式下扫描级 Doc2mdError 必须计入 rc。
+
+    原实现 except 分支只打印不抬 rc——cron/launchd 按 `watch --once` 退出码
+    判成功时，目录打错 / 超限 / 被删会静默假成功（exit=0；对照组 convert
+    同场景 exit=4）。stderr 的 E4133 行保持只打印语义不变。
+    """
+    from doc2md import cli
+    from doc2md.errors import E4133_DirTooWide
+
+    class FakeTracker:
+        def __init__(self, stable_seconds: float = 0.0):
+            self.stable_seconds = 0.0
+
+        def poll_all(self, d, lim):
+            raise E4133_DirTooWide("not a directory")
+
+    monkeypatch.setattr("doc2md.security.watcher.StabilityTracker", FakeTracker)
+
+    class Args:
+        cmd, dir, once, interval, root = "watch", str(tmp_path / "no-such"), True, 0.0, str(tmp_path / "w")
+        config = None
+
+    assert cli.cmd_watch(Args()) == cli.EXIT_BIZ
+    assert "E4133" in capsys.readouterr().err
+
+
+def test_cli_watch_resident_scan_error_keeps_polling(tmp_path, monkeypatch, capsys):
+    """QA 缺陷 1（CH-492）：常驻模式（无 --once）扫描失败只打印、继续轮询。
+
+    常驻模式的下一轮本就带补齐语义（security/watcher.poll_all），一次扫描
+    失败不得中断循环；rc 亦不在常驻路径返回。这里以「失败后仍再次 poll、
+    KeyboardInterrupt 模拟 Ctrl-C」证明循环未被一次扫描失败打断。
+    """
+    from doc2md import cli
+    from doc2md.errors import E4133_DirTooWide
+
+    calls = {"n": 0}
+
+    class FakeTracker:
+        def __init__(self, stable_seconds: float = 0.0):
+            self.stable_seconds = 0.0
+
+        def poll_all(self, d, lim):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise E4133_DirTooWide("not a directory")
+            raise KeyboardInterrupt                      # 模拟常驻模式下 Ctrl-C
+
+    monkeypatch.setattr("doc2md.security.watcher.StabilityTracker", FakeTracker)
+
+    class Args:
+        cmd, dir, once, interval, root = "watch", str(tmp_path), False, 0.0, str(tmp_path / "w")
+        config = None
+
+    with pytest.raises(KeyboardInterrupt):
+        cli.cmd_watch(Args())
+    assert calls["n"] == 2                               # 失败后循环继续轮询
+    assert "E4133" in capsys.readouterr().err
+
+
 def test_cli_watch_closes_store(tmp_path, monkeypatch):
     """异常退出路径也要收尾 thread-local 连接（常驻循环独占一条写连接）。"""
     from doc2md import cli

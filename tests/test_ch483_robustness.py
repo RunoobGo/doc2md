@@ -65,7 +65,7 @@ def test_stale_same_path_job_is_rejected(tmp_cfg, tmp_path, monkeypatch):
                  "doc_id": "doc-new", "blocks": 1}]
 
     monkeypatch.setattr(worker, "run_batch", fake_batch)
-    monkeypatch.setattr(worker, "_read_ir", lambda z: ir)
+    monkeypatch.setattr(worker, "read_ir", lambda z: ir)
     rep = worker.drain_once(store, tmp_cfg, tmp_path, workers=1)
     assert rep.rejected == 1 and rep.done == 1, (rep.done, rep.rejected, rep.notes)
     old_row = sched.get(old.job_id)

@@ -79,7 +79,7 @@ def test_e4091_rebuild_restores_edited_zip(api_client, headers, saved_doc,
 @pytest.mark.gate
 def test_artifact_lock_serializes_threads(tmp_path):
     """B-18：同一 out 目录的 doc 重建必须串行，不能两个线程同时 package。"""
-    from doc2md.api import _artifact_lock
+    from doc2md.artifacts import _artifact_lock
     active = 0
     peak = 0
     order: list[int] = []
@@ -143,18 +143,18 @@ def test_package_is_atomic(tmp_path, golden_dir, cfg):
 
 @pytest.mark.gate
 def test_rebuild_artifact_from_db_after_loss(store, tmp_path):
-    from doc2md.api import _rebuild_artifact
+    from doc2md.artifacts import rebuild_artifact
     ir = _ir()
     meta = ir.meta()
     save_ir(store, ir, meta=meta, gate={"mode": "auto", "page_detail": []})
     out = tmp_path / "out"
     zp = out / f"{ir.doc_id}.zip"
-    _rebuild_artifact(store, ir.doc_id, {"paths": {"root": str(tmp_path),
-                                                   "out": str(out)}}, tmp_path)
+    rebuild_artifact(store, ir.doc_id, {"paths": {"root": str(tmp_path),
+                                                  "out": str(out)}}, tmp_path)
     assert zp.exists()
     zp.unlink()
-    _rebuild_artifact(store, ir.doc_id, {"paths": {"root": str(tmp_path),
-                                                   "out": str(out)}}, tmp_path)
+    rebuild_artifact(store, ir.doc_id, {"paths": {"root": str(tmp_path),
+                                                  "out": str(out)}}, tmp_path)
     assert zp.exists()
     with zipfile.ZipFile(zp) as z:
         assert json.loads(z.read(f"{ir.doc_id}/ir.json"))["meta"]["doc_id"] == ir.doc_id

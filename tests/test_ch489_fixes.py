@@ -249,7 +249,7 @@ def test_drain_reads_and_saves_duplicate_path_once(tmp_path, tmp_cfg, monkeypatc
         "blocks": 1, "code": "", "message": ""}])
     reads: list[str] = []
     saves: list[int] = []
-    monkeypatch.setattr(worker, "_read_ir", lambda z: reads.append(z) or ir)
+    monkeypatch.setattr(worker, "read_ir", lambda z: reads.append(z) or ir)
     monkeypatch.setattr(worker, "save_ir", lambda *_a, **_kw: saves.append(1))
     try:
         rep = worker.drain_once(store, tmp_cfg, root, workers=1)
@@ -323,13 +323,13 @@ def test_llm_candidate_allowed_ops_follow_configured_whitelist():
 # --- 旧库无 gate 也可从 DB 重建产物 -------------------------------------------
 @pytest.mark.gate
 def test_rebuild_artifact_without_gate_json(store, tmp_path):
-    from doc2md.api import _rebuild_artifact
+    from doc2md.artifacts import rebuild_artifact
 
     doc_id = "g" * 16
     ir = IR(doc_id=doc_id, source_key="g" * 24, source_name="old.pdf",
             blocks=[Block(id="b1", text="旧库正文")])
     save_ir(store, ir)                       # 不传 gate → docs.gate_json = "{}"
     out = tmp_path / "out"
-    p = _rebuild_artifact(store, doc_id, {
+    p = rebuild_artifact(store, doc_id, {
         "paths": {"root": str(tmp_path), "out": str(out)}}, tmp_path)
     assert p is not None and p.exists(), "无 gate_json 的旧库也应能从 blocks 重建"

@@ -330,9 +330,9 @@ def test_scrub_fingerprint_is_stable():
 
 def test_event_payload_scrubbed_in_db(store):
     """事件入库走同一脱敏实现（NFR-20：库内不留正文）。"""
-    from doc2md.api import _emit
+    from doc2md.events import emit
     long = "正文正文正文" * 12
-    _emit(store, "job_done", "d1", "j1", {"note": long})
+    emit(store, "job_done", "d1", "j1", {"note": long})
     row = store.q1("SELECT payload_json FROM events ORDER BY seq DESC LIMIT 1")
     assert long not in row["payload_json"]
     assert "<sha256:" in row["payload_json"]
