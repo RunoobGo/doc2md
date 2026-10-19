@@ -85,10 +85,31 @@ class RawPage:
     index: int                      # 0-based
     lines: list[Line] = field(default_factory=list)
     height: float = 0.0             # PDF 页高（pt）；DOCX / 合成页为 0（无几何）
+    # CH-492（P-1）：S1 单趟累计的字号直方图 round(size,1) → 字符数，供
+    # s3_structure.modal_size 归并，免去全文档第二次逐行遍历。手工构造的页
+    # （测试 / 直接调用方）缺省为空 dict → modal_size 回退逐行扫描，行为不变。
+    size_hist: dict[float, int] = field(default_factory=dict)
 
     @property
     def chars(self) -> int:
         return sum(len(ln.text.strip()) for ln in self.lines)
+
+
+def _size_hist(lines: list[Line]) -> dict[float, int]:
+    """CH-492（P-1）：单趟累计字号直方图。
+
+    口径与 `s3_structure.modal_size` 的逐行累加**逐字节一致**——key 取
+    `round(ln.size, 1)`（CH-485/R9-PIPE-2 的 0.1 精度纪律：10.5 不得被
+    抬成 10.0），value 为 Σ max(1, len(ln.text.strip()))；`ln.size` 为 0
+    的行不计入（DOCX 分页符行与 w:tbl 表格行 size 恒 0，与原 modal_size
+    的 `if ln.size:` 同口径）。改此口径前先读 s3_structure.modal_size。
+    """
+    h: dict[float, int] = {}
+    for ln in lines:
+        if ln.size:
+            k = round(ln.size, 1)
+            h[k] = h.get(k, 0) + max(1, len(ln.text.strip()))
+    return h
 
 
 def sniff(path: str | Path) -> str:
@@ -126,6 +147,27 @@ def sniff(path: str | Path) -> str:
                                 detail={"file": p.name, "magic": head.hex()})
 
 
+def _pdf_tail_has_encrypt(path: str | Path) -> bool:
+    """尽力而为的口令加密探测（CH-492 / F-05）：PDF 的 `/Encrypt` 条目
+    （trailer 字典或 XRef 流字典）以明文存储（加密只覆盖字符串与流），
+    读文件尾 128KB 匹配 `/Encrypt <n> <n> R` 或 `/Encrypt <<`。
+
+    仅用于 open 失败后的诊断 flag（`detail.password_required`），不参与
+    任何行为判定。有界风险：误报 = 损坏文件尾窗恰含明文 `/Encrypt`（要求
+    literal token 出现在 trailer/xref 区，实践中近乎为零）；漏报 =
+    `/Encrypt` 仅在 128KB 尾窗外的前代 xref 流（回退旧行为，与不探测相同）。
+    """
+    import re
+    try:
+        size = Path(path).stat().st_size
+        with open(path, "rb") as f:
+            f.seek(max(0, size - 128 * 1024))
+            tail = f.read()
+    except OSError:
+        return False
+    return re.search(rb"/Encrypt\s+(\d+\s+\d+\s+R|<<)", tail) is not None
+
+
 def _open_source(open_fn, path: str | Path, kind: str):
     """源文档打开边界：打不开 → 415/E4151（方案 附录 D：magic 判定不支持的类型
     （含不可读）；打开源文件 `OSError` 同归此码）。
@@ -143,9 +185,15 @@ def _open_source(open_fn, path: str | Path, kind: str):
     except Doc2mdError:
         raise
     except Exception as exc:  # noqa: BLE001 — 打开边界统一收敛为「输入不可读」
+        detail = {"file": Path(path).name, "exc": type(exc).__name__}
+        if kind == "pdf" and _pdf_tail_has_encrypt(path):
+            # CH-492（F-05）：口令加密与结构损坏在 pdfplumber 侧同为
+            # PdfminerException（detail 无法区分）；尾窗 /Encrypt 明文探测
+            # 给用户一个「可能需要口令」的诊断 flag（尽力而为，见 helper）。
+            detail["password_required"] = True
         raise E4151_UnsupportedType(
             f"unreadable {kind}: {Path(path).name}",
-            detail={"file": Path(path).name, "exc": type(exc).__name__},
+            detail=detail,
         ) from exc
 
 
@@ -192,8 +240,10 @@ def read_pdf(path: str | Path, page_span: tuple[int, int] | None = None,
                 else:
                     lines = _lines_single_column(raw_lines, chars, cs_index)
                 _attach_links(lines, [(ln.top, ln.bottom) for ln in lines], page)
-                out.append(RawPage(index=i, lines=lines,
-                                   height=float(getattr(page, "height", 0.0) or 0.0)))
+                rp = RawPage(index=i, lines=lines,
+                             height=float(getattr(page, "height", 0.0) or 0.0))
+                rp.size_hist = _size_hist(lines)   # CH-492（P-1）：单趟直方图
+                out.append(rp)
                 page.flush_cache()
     return out
 
@@ -481,20 +531,6 @@ def _row_cells(chars: list[dict]) -> list[str] | None:
     if len(cells) < 2:
         return None
     return ["".join(seg).strip() for seg in cells]
-
-
-def _is_bold(c: dict) -> bool:
-    if c.get("bold"):
-        return True
-    fontname = str(c.get("fontname", "")).lower()
-    return "bold" in fontname or "black" in fontname or c.get("weight", 0) >= 600
-
-
-def _is_italic(c: dict) -> bool:
-    if c.get("italic"):
-        return True
-    return "italic" in str(c.get("fontname", "")).lower() or "oblique" in str(
-        c.get("fontname", "")).lower()
 
 
 _W_NS = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
@@ -1015,7 +1051,10 @@ def read_docx(path: str | Path, fmt: str | None = None) -> list[RawPage]:
     pages: list[RawPage] = []
     chunk = 40
     for i in range(0, max(1, (len(lines) + chunk - 1) // chunk)):
-        pages.append(RawPage(index=i, lines=lines[i * chunk:(i + 1) * chunk]))
+        seg = lines[i * chunk:(i + 1) * chunk]
+        rp = RawPage(index=i, lines=seg)
+        rp.size_hist = _size_hist(seg)    # CH-492（P-1）：单趟直方图
+        pages.append(rp)
     return pages
 
 

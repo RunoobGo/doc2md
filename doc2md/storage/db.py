@@ -277,6 +277,13 @@ class Store:
             self._conn.execute(
                 "INSERT OR IGNORE INTO search_map(fts_rowid, doc_id, block_id)"
                 " SELECT rowid, doc_id, block_id FROM search_blocks")
+        # CH-491（B-3 回退记录）：曾把下面 5 处 `PRAGMA table_info` 探测门控进
+        # `if cur_ver < DB_VERSION:`，假设「缺列的库必然版本不足」。该假设不成立：
+        # `tests/test_ch471_fixes.py::test_fts_migration_rebuilds_aux_atomically`
+        # 构造的库 user_version 已是当前值、search_blocks 却被外部退化为无 aux 形态，
+        # 门控后迁移不再触发 → 检索静默失效。这正是 CH-476 决策 D1「DDL 无条件
+        # 重放」要防的情形（「加 schema 必须 bump user_version」不是可靠纪律）。
+        # 故探测保持无条件；省下的 5 次字典表扫描相对正确性不值得，登记 CH-492。
         # 幂等补列（schema 迁移，v2.2 遗留能力）
         cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(blocks)")}
         if "revision" not in cols:

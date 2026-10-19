@@ -572,11 +572,6 @@ class LlmClient:
             out.append(payload)
         return out
 
-    def _build_payload(self, blocks, whitelist) -> dict:
-        """兼容入口：返回首个候选窗口；无候选时退回纯元数据 payload。"""
-        payloads = self.payload_batches(blocks, whitelist)
-        return payloads[0] if payloads else self._payload(blocks, whitelist, [])
-
     # -- 传输 -----------------------------------------------------------------
     def _post(self, path: str, payload: dict) -> dict:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")

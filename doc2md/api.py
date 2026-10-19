@@ -9,17 +9,15 @@
 """
 from __future__ import annotations
 
-import contextlib
 import copy
 import hashlib
 import json
 import os
 import threading
-import time
-import uuid
 from pathlib import Path
 
-from . import PIPELINE_VERSION, SCHEMA_VERSION, auth, config
+from . import PIPELINE_VERSION, auth, config
+from .artifacts import drop_orphan_artifact, read_ir, rebuild_artifact
 from .cron import sweep_tmp
 from .edits import patch_block, rollback
 from .errors import (
@@ -31,8 +29,9 @@ from .errors import (
     E4091_DocOverwrite,
     E5031_StorageError,
 )
+from .events import emit
 from .ops.backup import BackupPlan
-from .ops.logging import RotatingJsonlWriter, scrub_record
+from .ops.logging import RotatingJsonlWriter
 from .pipeline.convert import convert
 from .scheduler import Scheduler
 from .security.dirguard import scan_or_raise, walk_limits
@@ -48,6 +47,7 @@ from .storage.repo import (
     save_ir,
     search,
 )
+from .worker import enqueue_many
 
 SCRIPT_UA_HINTS = ("python-requests", "curl/", "doc2md-cli", "httpx", "go-http-client")
 
@@ -109,13 +109,6 @@ def _predelete_snapshot(cfg: dict, root: Path) -> Path | None:
             detail={"reason": type(exc).__name__}) from exc
 
 
-_ARTIFACT_META_KEYS = {
-    "doc_id", "source_key", "source_name", "source_name_raw", "format",
-    "pages", "sharded", "shard_count", "schema_version", "warnings",
-}
-_ARTIFACT_META_EXTRA = {"shard_stats", "llm_prompt", "notes"}
-
-
 def _artifact_zip(out_dir: str | Path, doc_id: str) -> Path:
     """产物路径的唯一构造点（CH-489）：doc_id 必须是单个路径段。
 
@@ -133,143 +126,19 @@ def _artifact_zip(out_dir: str | Path, doc_id: str) -> Path:
     return path
 
 
-# 固定数量的分片锁：按 doc 串行、不同 doc 可并发，且不随文档数无限增长。
-_REBUILD_LOCKS = tuple(threading.Lock() for _ in range(64))
-
-
-def _doc_lock(doc_id: str) -> threading.Lock:
-    return _REBUILD_LOCKS[hash(doc_id) % len(_REBUILD_LOCKS)]
-
-
-@contextlib.contextmanager
-def _artifact_lock(out_dir: Path, doc_id: str, *, timeout: float = 30.0,
-                   stale_seconds: float = 60.0,
-                   heartbeat_seconds: float = 10.0):
-    """跨进程按 doc 串行重建（B-18；CH-490 心跳与所有权）。
-
-    进程内已有分片锁；API 与 worker 是两个进程，仍可能同时 package 同一
-    doc。锁文件放 out/.locks，O_EXCL 建锁。CH-490 起：
-    - 持锁期间后台线程周期性刷新 mtime；重建超过 60s 不再被误判为陈旧；
-    - 锁文件带唯一 token，释放时只清自己的锁——即使发生陈旧回收，旧持有者
-      也不会删掉新持有者的锁；
-    - 心跳/文件消失时心跳线程自行退出，不影响主流程。
+def _batch_bytes(paths) -> int:
+    """批内总字节（CH-492 / QA M-1）：文件数不是成本驱动因子，总字节才是
+    并行收益的代理量——8 个 3 页 PDF 走池比串行慢 7.8 倍，8 个 100 页赚
+    2.1 倍。与 `perf.sync_min_parallel` 构成双条件（件数够且字节够才建池）。
+    stat 失败（文件已删等）按 0 计——保守走向串行，不因探测失败误建池。
     """
-    lock_dir = Path(out_dir) / ".locks"
-    lock_dir.mkdir(parents=True, exist_ok=True)
-    path = lock_dir / f"{doc_id}.lock"
-    deadline = time.monotonic() + timeout
-    token = uuid.uuid4().hex
-    payload = f"{os.getpid()} {time.time():.0f} {token}".encode("ascii")
-    stale_seconds = max(0.05, float(stale_seconds))
-    heartbeat_seconds = max(0.01, min(float(heartbeat_seconds), stale_seconds / 2))
-    while True:
+    total = 0
+    for p in paths:
         try:
-            fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-            try:
-                os.write(fd, payload)
-            finally:
-                os.close(fd)
-            break
-        except FileExistsError:
-            try:
-                age = time.time() - path.stat().st_mtime
-            except OSError:
-                age = 0.0
-            if age > stale_seconds:
-                path.unlink(missing_ok=True)
-                continue
-            if time.monotonic() >= deadline:
-                raise E5031_StorageError(
-                    "artifact rebuild busy", detail={"doc_id": doc_id})
-            time.sleep(0.05)
-    stop = threading.Event()
-
-    def heartbeat() -> None:
-        while not stop.wait(heartbeat_seconds):
-            try:
-                if token not in path.read_text(encoding="ascii"):
-                    return
-                os.utime(path, None)
-            except OSError:
-                return
-
-    beat = threading.Thread(target=heartbeat, name="doc2md-artifact-lock",
-                            daemon=True)
-    beat.start()
-    try:
-        yield
-    finally:
-        stop.set()
-        beat.join(timeout=max(1.0, heartbeat_seconds * 3))
-        try:
-            if token in path.read_text(encoding="ascii"):
-                path.unlink(missing_ok=True)
+            total += p.stat().st_size
         except OSError:
             pass
-
-
-def _rebuild_artifact(store: Store, doc_id: str, cfg: dict, root: Path) -> Path | None:
-    """同进程/跨进程按 doc 串行重建；避免旧 revision 后写覆盖新 zip。"""
-    out_dir = config.path_setting(cfg, "paths.out", root, str(root / "out"))
-    with _doc_lock(doc_id), _artifact_lock(Path(out_dir), doc_id):
-        return _rebuild_artifact_body(store, doc_id, cfg, root, out_dir=Path(out_dir))
-
-
-def _rebuild_artifact_body(store: Store, doc_id: str, cfg: dict,
-                           root: Path, *, out_dir: Path | None = None) -> Path | None:
-    """CH-485（R9-SVC-2）：从 DB 重建 zip。
-
-    DB 已是完整事实源：blocks 保存 font/links/provenance，docs 保存 package 实际
-    使用的 meta 与 S1.5 gate。PATCH/rollback/E4091/恢复后调用，保证导出与库面
-    一致，而不是依赖初始转换留下的旧 zip。CH-489：`gate_json` 为空只表示旧库
-    没有页级门禁明细，不表示 blocks 不可重建；报告降级为空 gate 而不是拒绝重建。
-    """
-    from .ir import IR
-    from .pipeline import s4_render
-    from .pipeline.convert import package
-
-    d = get_doc(store, doc_id)
-    gate_raw = d.get("gate_json") or "{}"
-    meta = d.get("meta") or {}
-    try:
-        gate = json.loads(gate_raw) if isinstance(gate_raw, str) else gate_raw
-    except ValueError:
-        gate = {}
-    blocks = list_blocks(store, doc_id)
-    extra = {k: v for k, v in meta.items()
-             if k not in _ARTIFACT_META_KEYS and k not in _ARTIFACT_META_EXTRA}
-    ir = IR(
-        doc_id=d["doc_id"], source_key=d["source_key"],
-        source_name=d.get("source_name", "unnamed"),
-        source_name_raw=d.get("source_name_raw", ""),
-        format=d.get("format", "pdf"), pages=int(d.get("pages", 0) or 0),
-        blocks=blocks, sharded=bool(d.get("sharded")),
-        shard_count=int(d.get("shard_count", 1) or 1),
-        warnings=list(meta.get("warnings", []) or []),
-        schema_version=int(meta.get("schema_version", SCHEMA_VERSION)),
-        extra_meta=extra,
-    )
-    md = s4_render.render(
-        ir,
-        preserve_strike=bool(config.get(cfg, "s4.preserve_marks_strike", False)),
-        link_internal=str(config.get(cfg, "s4.link_internal", "plain")),
-    )
-    out_dir = Path(out_dir) if out_dir is not None else config.path_setting(
-        cfg, "paths.out", root, str(root / "out"))
-    out = package(ir, md, meta, out_dir, cfg, gate=gate)
-    # package 期间文档可能被删除：提交后的删除路径会再 purge 一次，这里也做
-    # 发布后复核，避免返回一个已无库行可寻址的 zip（FR-128）。
-    try:
-        alive = get_doc(store, doc_id) is not None
-    except Doc2mdError:
-        alive = False
-    if not alive:
-        try:
-            out.unlink()
-        except OSError:
-            pass
-        return None
-    return out
+    return total
 
 
 def create_app(cfg: dict | None = None, root: Path | None = None,
@@ -487,7 +356,6 @@ def create_app(cfg: dict | None = None, root: Path | None = None,
         # 低配机上「一次丢一个目录」不应把 HTTP 线程占住（也不应同时起步 N 个解析进程）。
         # 默认 false = 同步转换，既有红线契约（方案 5.4：jobs[].doc_id 立即可用）不变。
         if bool(config.get(cur(), "perf.queue_async", False)):
-            from .worker import enqueue_many
             # CH-485（R9-SVC-7）：不在这里静默剔除扫描后消失的文件；
             # enqueue_many 的预检会以 E4041 整体失败，避免“响应少一项”。
             targets = files
@@ -502,7 +370,7 @@ def create_app(cfg: dict | None = None, root: Path | None = None,
                                cfg=cur(), force=force)
             for it in out:
                 if not it["attached"]:
-                    _emit(store, "job_queued", it["doc_id"], it["job_id"],
+                    emit(store, "job_queued", it["doc_id"], it["job_id"],
                           {"source": "api"}, logw())
             return jsonify({"jobs": out, "mode": "queued",
                             "consume_with": "doc2md work"}), 202
@@ -545,7 +413,7 @@ def create_app(cfg: dict | None = None, root: Path | None = None,
                       "doc_id": doc_id, "source_key": source_key}
             j = sched.submit_rejected(f.name, "E4091", detail,
                                       idem_key=_idem_for(f))
-            _emit(store, "job_rejected", doc_id or None, j.job_id,
+            emit(store, "job_rejected", doc_id or None, j.job_id,
                   {"code": "E4091", "source": source}, logw())
             return {"file": f.name, "job_id": j.job_id, "doc_id": doc_id,
                     "status": "conflict", "code": "E4091",
@@ -590,20 +458,19 @@ def create_app(cfg: dict | None = None, root: Path | None = None,
                         raise E4041_NotFound(f"task row gone: {j.job_id}")
                     save_ir(store, ir, tx=tx, force=force, meta=meta, gate=gate,
                             prepared=prepared)
-                    _emit(store, "job_done", doc_id, j.job_id,
+                    emit(store, "job_done", doc_id, j.job_id,
                           {"blocks": len(ir.blocks)}, logw(), tx=tx)
             except E4041_NotFound:
                 # 行可能已被删除级联收走，也可能是 submit 新建后被墓碑拦截。
                 # 后者补 rejected 终态（mark 返回 False 时不再写事件，避免孤儿行）。
                 if sched.mark(j.job_id, "rejected", "E4041",
                               {"reason": "doc_deleted_during_conversion"}):
-                    _emit(store, "job_rejected", doc_id, j.job_id,
+                    emit(store, "job_rejected", doc_id, j.job_id,
                           {"code": "E4041", "source": "api"}, logw())
                 # CH-484：删除×在途转换——convert 刚写进 out/{doc_id}.zip 的产物
                 # 随本轮回滚成为孤儿（库面已不复活，字节却仍占盘）。仅在 doc 确已
                 # 出 docs 时 best-effort 清掉，绝不误删存活文档的载体。
-                from .worker import _drop_orphan_artifact
-                _drop_orphan_artifact(store, root, cur(), doc_id)
+                drop_orphan_artifact(store, root, cur(), doc_id)
                 out.append({"file": f.name, "job_id": j.job_id, "doc_id": doc_id,
                             "status": "rejected", "code": "E4041",
                             "reason": "doc_deleted_during_conversion"})
@@ -612,12 +479,12 @@ def create_app(cfg: dict | None = None, root: Path | None = None,
                 sched.mark(j.job_id, "rejected", e.code,
                            {"reason": "edited_blocks_present",
                             "edited_blocks": e.detail.get("edited_blocks")})
-                _emit(store, "job_rejected", doc_id, j.job_id,
+                emit(store, "job_rejected", doc_id, j.job_id,
                       {"code": e.code, "source": "api"}, logw())
                 # CH-485（R9-SVC-2）：本次 package 已覆盖旧 zip；从 DB 的编辑后
                 # 内容重建，恢复“导出 == 库面”。失败不改变已判定的 conflict。
                 try:
-                    _rebuild_artifact(store, doc_id, cur(), root)
+                    rebuild_artifact(store, doc_id, cur(), root)
                 except Exception as exc:  # noqa: BLE001 — 重建是补偿动作
                     logw().write({"code": "E_ARTIFACT_REBUILD",
                                   "doc_id": doc_id,
@@ -643,10 +510,14 @@ def create_app(cfg: dict | None = None, root: Path | None = None,
         # 里偶发 worker 失败（本机实测）→ 小/中批仍走进程内串行：确定、无池抖动，
         # 并保留「错误按 HTTP 码传播」既有契约（413/E4131、415/E4151…）与即时 doc_id。
         # 并行阈值可调（perf.sync_min_parallel，见决策/登记 B）。
+        # CH-492（QA M-1 拐点实测）：文件数不是成本驱动因子——8 个 3 页 PDF 走池
+        # 比串行慢 7.8 倍（池固定开销 ~0.6s vs 串行 ~0.089s），8 个 100 页赚 2.1 倍
+        # （1.000s vs 2.08s），中文件打平。故加总字节双条件：件数够且工作量大才
+        # 建池。阈值 1MiB 标定：8 个小 PDF ≈160KB（串行）、8 个大 PDF ≈2.4MB（池）。
         parallel_min = max(2, int(config.get(cur(), "perf.sync_min_parallel", 8) or 0))
-        if len(pending) >= parallel_min:
+        parallel_bytes = max(0, int(config.get(cur(), "perf.sync_min_bytes", 1048576) or 0))
+        if len(pending) >= parallel_min and _batch_bytes(pending) >= parallel_bytes:
             from .pipeline.batch import default_workers, run_batch
-            from .worker import _read_ir
             # CH-473（R5-SVC-7）：进程池全局信号量——见 _SYNC_POOL_GATE 注释。
             # 池的整个生命周期（建池 → 转换 → 读产物）都在临界区内，退出即释放。
             # CH-476（R7-SVC-3）：等待改为有界——超时明确回 503 + Retry-After，
@@ -673,7 +544,7 @@ def create_app(cfg: dict | None = None, root: Path | None = None,
                         j = sched.submit_rejected(f.name, r.get("code", "E4221"),
                                                   {"reason": r.get("message", "")},
                                                   idem_key=_idem_for(f))
-                        _emit(store, "job_rejected", None, j.job_id,
+                        emit(store, "job_rejected", None, j.job_id,
                               {"code": r.get("code", "E4221"), "source": "api_batch"},
                               logw())
                         out.append({"file": f.name, "job_id": j.job_id,
@@ -682,7 +553,7 @@ def create_app(cfg: dict | None = None, root: Path | None = None,
                         out.append({"file": f.name, "status": "error",
                                     "code": r.get("code", "E5000")})
                     else:
-                        ir = _read_ir(r.get("zip", ""))
+                        ir = read_ir(r.get("zip", ""))
                         if ir is None:
                             out.append({"file": f.name, "doc_id": r.get("doc_id", ""),
                                         "status": "error", "code": "E5031"})
@@ -713,7 +584,7 @@ def create_app(cfg: dict | None = None, root: Path | None = None,
                 if e.code == "E4221":
                     j = sched.submit_rejected(f.name, e.code, e.detail,
                                               idem_key=_idem_for(f))
-                    _emit(store, "job_rejected", None, j.job_id,
+                    emit(store, "job_rejected", None, j.job_id,
                           {"code": e.code, "source": "api_sync"}, logw())
                     out.append({"file": f.name, "job_id": j.job_id,
                                 "status": "rejected", "code": e.code})
@@ -789,7 +660,7 @@ def create_app(cfg: dict | None = None, root: Path | None = None,
             # CH-489：DB 已是产物事实源。zip 被误删/恢复流程尚未补产物时，
             # 读面按 DB 重建一次；重建失败仍是明确的存储错误，不返回空正文。
             try:
-                _rebuild_artifact(store, doc_id, cur(), root)
+                rebuild_artifact(store, doc_id, cur(), root)
             except Doc2mdError:
                 raise
             except Exception as exc:            # noqa: BLE001 — 统一 E5031 契约
@@ -832,10 +703,10 @@ def create_app(cfg: dict | None = None, root: Path | None = None,
         res = patch_block(store, doc_id, block_id, b, actor_id(b),
                           require_base_revision=bool(
                               config.get(cur(), "api.base_revision_required", True)))
-        _emit(store, "text_edited", doc_id, None, {"block_id": block_id,
+        emit(store, "text_edited", doc_id, None, {"block_id": block_id,
                                                    "revision": res["revision"]}, logw())
         try:
-            _rebuild_artifact(store, doc_id, cur(), root)
+            rebuild_artifact(store, doc_id, cur(), root)
         except Exception as exc:            # noqa: BLE001 — 编辑已提交，回报补偿失败
             res["artifact_rebuild_error"] = type(exc).__name__
         return jsonify(res)
@@ -854,7 +725,7 @@ def create_app(cfg: dict | None = None, root: Path | None = None,
         actor = actor_id(b)
         res = rollback(store, doc_id, block_id, to_rev, actor)
         try:
-            _rebuild_artifact(store, doc_id, cur(), root)
+            rebuild_artifact(store, doc_id, cur(), root)
         except Exception as exc:            # noqa: BLE001 — 回滚已提交，回报补偿失败
             res["artifact_rebuild_error"] = type(exc).__name__
         return jsonify(res)
@@ -1027,7 +898,7 @@ def create_app(cfg: dict | None = None, root: Path | None = None,
                 raise E4001_BadRequest(f"invalid configuration: {exc}") from None
             app.config["doc2md"]["cfg"] = candidate
             write_override(override, candidate, app.config["doc2md"]["cfg_baseline"])
-        _emit(store, "settings_updated", None, None, {"keys": sorted(b.keys())}, logw())
+        emit(store, "settings_updated", None, None, {"keys": sorted(b.keys())}, logw())
         return jsonify({"updated": sorted(b.keys())})
 
     @app.post("/system/reload")
@@ -1081,7 +952,7 @@ def create_app(cfg: dict | None = None, root: Path | None = None,
                 f"unreadable configuration source: {type(exc).__name__}: {str(exc)[:200]}") from None
         with app.config["doc2md"]["cfg_lock"]:
             app.config["doc2md"]["cfg"] = merged
-        _emit(store, "system_reload", None, None, {}, logw())
+        emit(store, "system_reload", None, None, {}, logw())
         return jsonify({"reloaded": True, "ts": now_iso()})
 
     @app.post("/tokens")
@@ -1187,30 +1058,3 @@ def write_override(path: Path, merged: dict, baseline: dict) -> dict:
     tmp.replace(path)
     _fsync_dir(path.parent)                     # R5-SVC-5：目录项抗掉电
     return diff
-
-
-def _emit(store: Store, code: str, doc_id: str | None, job_id: str | None,
-          payload: dict, writer: RotatingJsonlWriter | None = None,
-          tx=None) -> None:
-    """事件入库 + 同记录落内置日志（NFR-19：轮转由服务自身执行，不靠 newsyslog/cron）。
-
-    CH-459（A-4）：`tx` 形参允许把事件插入并入调用方事务（worker._finish_ok 与
-    同步 /jobs 路径的 detail/mark/event/入库四写合并为单次提交）。传入 tx 时
-    日志行仍由本函数落盘、先于调用方提交——jsonl 是运维面 at-least-once 语义，
-    DB 才是状态真源；不传 tx 时行为与从前完全一致（自有事务）。
-
-    payload 不得含正文片段（NFR-20）：入库走 `scrub_record`，写日志走写入器自身的
-    scrub——CH-459（A-12）两处已统一为同一实现（不看键名、只看长度）。
-    """
-    sql = ("INSERT INTO events(ts, code, doc_id, job_id, payload_json)"
-           " VALUES (?,?,?,?,?)")
-    args = (now_iso(), code, doc_id, job_id,
-            json.dumps(scrub_record(payload), ensure_ascii=False))
-    if tx is not None:
-        tx.execute(sql, args)
-    else:
-        with store.tx() as t:
-            t.execute(sql, args)
-    if writer is not None:
-        writer.write({"code": code, "doc_id": doc_id, "job_id": job_id, **payload})
-        writer.flush()

@@ -137,12 +137,6 @@ def _longest_run(flags: list[bool]) -> tuple[int, int]:
     return best, best_start
 
 
-def _avg_chars(pages: list[RawPage]) -> float:
-    if not pages:
-        return 0.0
-    return sum(_page_metrics(p)[0] for p in pages) / len(pages)
-
-
 class GateCollector:
     """门禁采集器（CH-459 / A-5 + A-8）：采集与判定拆开的两段式实现。
 
@@ -152,7 +146,8 @@ class GateCollector:
       - `feed(pages, offset=)` 逐片喂页，只保留判定必需的标量（每页 4 个数）
         与页级明细对象；页对象本身喂完即可释放；
       - `finish()` 是纯函数判定，不再触碰任何页对象——A-5 的「每页指标算两轮」
-        由此消失（`avg_chars` 不再对全文档重跑 `_page_metrics`）。
+        由此消失（判定所需的均值由 `feed()` 逐片累计，不再对全文档重跑
+        `_page_metrics`）。
 
     消费面如实标注（CH-473 / PIPE-12）：**当前生产路径只有 `check()` 一个入口，
     它一次性喂入全文档页列表（`feed(pages)`，offset=0）**；带非零 `offset` 的

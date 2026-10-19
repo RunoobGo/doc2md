@@ -19,18 +19,19 @@
 """
 from __future__ import annotations
 
-import json
 import sqlite3
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import config
-from .errors import E4041_NotFound, E4091_DocOverwrite
+from .artifacts import drop_orphan_artifact, read_ir, rebuild_artifact
+from .errors import E4041_NotFound, E4091_DocOverwrite, E4092_SourceSuperseded
+from .events import emit
 from .pipeline.batch import default_workers, run_batch
 from .scheduler import Scheduler
 from .storage.db import Store, now_iso
-from .storage.repo import prepare_ir_rows, purge_files, save_ir
+from .storage.repo import prepare_ir_rows, save_ir
 
 
 @dataclass
@@ -134,13 +135,76 @@ def queue_claim_size(cfg: dict | None, workers: int) -> int:
 
 def drain_once(store: Store, cfg: dict, root, *, workers: int | None = None,
                writer=None) -> WorkReport:
-    """认领一批 → 进程池转换 → 逐条落库。队列空时返回 drained=0。"""
+    """认领一批 → 进程池转换 → 逐条落库。队列空时返回 drained=0。
+
+    CH-492（Q-3）：本函数只保留主编排（薄壳）——三个阶段按职责拆到
+    `_claim_batch`（领取 + 分组 + 转换）、`_run_one`（单作业 ok 路径落库）、
+    `_handle_reject`（拒绝路径），控制流与错误处理路径逐行等价。
+    """
     rep = WorkReport()
     n = workers if workers is not None else default_workers(cfg)
     n = max(1, int(n))
+    batch = _claim_batch(store, cfg, root, n, rep)
+    if batch is None:
+        return rep
+    by_path, results = batch
+    sched = Scheduler(store)
+    # CH-489：同一路径可能排着多个作业，`run_batch` 只产出一次；IR 回读与插入
+    # 行预计算按产物 zip 缓存，避免同正文被重复读/重复预处理。
+    ir_cache: dict[str, object] = {}
+    saved_docs: set[str] = set()
+    for res in results:
+        group = by_path.get(res["file"], [])
+        # CH-483（R8-SVC-2）：同一路径可能排着多个不同 doc_id 的作业（入队后
+        # 文件被替换）。本轮只转换一次，产物只对应 consumed doc_id；其余旧作业
+        # 必须 rejected/E4092，不能全部标 done（否则旧 doc_id 查询 404）。
+        # 只有“能明确对上 consumed doc_id”时才淘汰组内其它作业；对不上
+        # （历史测试替身 / 转换端未回报 doc_id）保持原来的全组处理语义。
+        matched = None
+        if res["status"] == "ok":
+            consumed = res.get("doc_id") or ""
+            for cand in reversed(group):
+                if consumed and cand.get("doc_id") == consumed:
+                    matched = cand
+                    break
+        for job in group:
+            if res["status"] == "ok" and matched is not None and job is not matched:
+                # CH-491（B-1）：错误码改引用 errors 的类常量，不再写字面量——
+                # 类/字面量双轨会让「定义了类、调用点用字符串」的漂移无类型保护。
+                _handle_reject(
+                    store, sched, rep, job, res, writer,
+                    code=E4092_SourceSuperseded.code,
+                    detail={"reason": "source_superseded",
+                            "enqueued_doc_id": job.get("doc_id") or "",
+                            "consumed_doc_id": res.get("doc_id") or ""},
+                    note=f"{job['job_id']}: source superseded")
+                continue
+            if res["status"] == "ok":
+                _run_one(store, sched, cfg, root, rep, job, res, writer,
+                         ir_cache=ir_cache, saved_docs=saved_docs)
+            elif res["status"] == "rejected":
+                _handle_reject(store, sched, rep, job, res, writer,
+                               code=res.get("code", "E4221"),
+                               detail={"reason": res.get("message", "")})
+            else:
+                sched.mark(job["job_id"], "failed", res.get("code", "E5000"),
+                           {"reason": res.get("message", "")[:200]})
+                rep.failed += 1
+                _event(store, job, res, "job_failed", writer)
+    return rep
+
+
+def _claim_batch(store: Store, cfg: dict, root, n: int,
+                 rep: WorkReport) -> tuple[dict[str, list[dict]], list[dict]] | None:
+    """领取一批 queued 作业并按 (mode, force) 分组跑进程池（CH-492 Q-3 提取）。
+
+    队列空返回 None（调用方以 drained=0 收尾）。`rep` 记入 drained 与
+    「无路径作业」的 failed/notes——入队时未带路径（历史行 / 只给了
+    doc_id）的作业明确失败，不静默挂起。
+    """
     jobs = claim(store, queue_claim_size(cfg, n))
     if not jobs:
-        return rep
+        return None
     rep.drained = len(jobs)
     by_path: dict[str, list[dict]] = {}
     for j in jobs:
@@ -164,126 +228,113 @@ def drain_once(store: Store, cfg: dict, root, *, workers: int | None = None,
     for (mode, force), group in by_plan.items():
         results.extend(run_batch(group, cfg=cfg, out_dir=_out_dir(cfg, root),
                                  workers=n, mode=mode, force=force))
-    sched = Scheduler(store)
-    # CH-489：同一路径可能排着多个作业，`run_batch` 只产出一次；IR 回读与插入
-    # 行预计算按产物 zip 缓存，避免同正文被重复读/重复预处理。
-    ir_cache: dict[str, object] = {}
-    saved_docs: set[str] = set()
-    for res in results:
-        group = by_path.get(res["file"], [])
-        # CH-483（R8-SVC-2）：同一路径可能排着多个不同 doc_id 的作业（入队后
-        # 文件被替换）。本轮只转换一次，产物只对应 consumed doc_id；其余旧作业
-        # 必须 rejected/E4092，不能全部标 done（否则旧 doc_id 查询 404）。
-        # 只有“能明确对上 consumed doc_id”时才淘汰组内其它作业；对不上
-        # （历史测试替身 / 转换端未回报 doc_id）保持原来的全组处理语义。
-        matched = None
-        if res["status"] == "ok":
-            consumed = res.get("doc_id") or ""
-            for cand in reversed(group):
-                if consumed and cand.get("doc_id") == consumed:
-                    matched = cand
-                    break
-        for job in group:
-            if res["status"] == "ok" and matched is not None and job is not matched:
-                detail = {"reason": "source_superseded",
-                          "enqueued_doc_id": job.get("doc_id") or "",
-                          "consumed_doc_id": res.get("doc_id") or ""}
-                sched.mark(job["job_id"], "rejected", "E4092", detail)
-                rep.rejected += 1
-                rep.notes.append(f"{job['job_id']}: source superseded")
-                _event(store, job, res, "job_rejected", writer)
-                continue
-            if res["status"] == "ok":
-                zip_key = str(res.get("zip", ""))
-                if zip_key in ir_cache:
-                    ir = ir_cache[zip_key]
-                else:
-                    ir = _read_ir(zip_key)
-                    ir_cache[zip_key] = ir
-                if ir is None:
-                    # CH-469：产物 status=ok 但 zip 里读不到 ir.json（损坏 / 缺项 /
-                    # IR 版本不符）时，原实现跳过入库却仍标 done + 发 job_done——
-                    # 队列说「完成」、`GET /docs/<id>` 却 404，正文只剩一个不可寻址的
-                    # zip，既骗过监控又断掉重试线索。改为明确失败（可安全重投）。
-                    sched.mark(job["job_id"], "failed", "E5031",
-                               {"reason": "artifact_ir_unreadable",
-                                "zip": str(res.get("zip", ""))[-64:]})
-                    rep.failed += 1
-                    rep.notes.append(f"{job['job_id']}: ir unreadable")
-                    _event(store, job, res, "job_failed", writer)
-                    continue
-                try:
-                    skip_save = ir.doc_id in saved_docs
-                    prepared = None if skip_save else prepare_ir_rows(ir)
-                    drift = _finish_ok(
-                        store, sched, job, res, ir, writer=writer,
-                        meta=res.get("meta"), gate=res.get("gate"),
-                        prepared=prepared, skip_save=skip_save)
-                except E4041_NotFound:
-                    # CH-476（R7-SVC-1）：删除×在途转换竞争——任务行已被 delete_doc
-                    # 级联收走，_finish_ok 已回滚（docs/blocks/search 未写回）。
-                    # 记 rejected 并补一条留痕事件（events 无 FK，行本身可达；
-                    # 正文不复活是主目标，可观测性是次目标）。
-                    sched.mark(job["job_id"], "rejected", "E4041",
-                               {"reason": "doc_deleted_during_conversion"})
-                    _event(store, job, res, "job_rejected", writer)
-                    _drop_orphan_artifact(store, root, cfg, res.get("doc_id") or "")
-                    rep.rejected += 1
-                    rep.notes.append(f"{job['job_id']}: doc deleted during conversion")
-                    continue
-                except E4091_DocOverwrite as e:
-                    # CH-471（STOR-5）：库内已有编辑 → 拒绝覆盖（编辑原样保留）。
-                    # 无人值守的 work/watch 路径默认不 force：宁可显式 rejected
-                    # 也不静默丢编辑；需要覆盖由调用方带 force 重投。
-                    sched.mark(job["job_id"], "rejected", e.code,
-                               {"reason": "edited_blocks_present",
-                                "edited_blocks": e.detail.get("edited_blocks")})
-                    rep.rejected += 1
-                    rep.notes.append(f"{job['job_id']}: overwrite conflict (edits kept)")
-                    _event(store, job, res, "job_rejected", writer)
-                    # CH-485（R9-SVC-2）：package 已覆盖旧 zip；从 DB 编辑内容重建。
-                    try:
-                        from .api import _rebuild_artifact
-                        _rebuild_artifact(store, res.get("doc_id") or job.get("doc_id") or "",
-                                          cfg, root)
-                    except Exception as exc:  # noqa: BLE001 — 补偿失败不影响终态
-                        if writer:
-                            writer.write({"code": "E_ARTIFACT_REBUILD",
-                                          "doc_id": res.get("doc_id") or job.get("doc_id") or "",
-                                          "exc": type(exc).__name__})
-                    continue
-                except Exception as exc:  # noqa: BLE001 — 单任务不得毒死常驻消费者
-                    # 坏 IR 重号块（sqlite3.IntegrityError）等非瞬时库面错误：
-                    # 原实现直接冒泡，常驻 work 退出、计划任务反复重启，回收后
-                    # 同一件再次毒死队列。记 failed 后继续下一件。
-                    detail = {"reason": "finish_failed",
-                              "exc": type(exc).__name__}
-                    try:
-                        sched.mark(job["job_id"], "failed", "E5031", detail)
-                    except sqlite3.Error:
-                        pass
-                    try:
-                        _event(store, job, res, "job_failed", writer)
-                    except sqlite3.Error:
-                        pass
-                    rep.failed += 1
-                    rep.notes.append(
-                        f"{job['job_id']}: finish failed ({type(exc).__name__})")
-                    continue
-                saved_docs.add(ir.doc_id)
-                rep.done += 1
-                rep.drift += 1 if drift else 0
-            elif res["status"] == "rejected":
-                sched.mark(job["job_id"], "rejected", res.get("code", "E4221"),
-                           {"reason": res.get("message", "")})
-                rep.rejected += 1
-                _event(store, job, res, "job_rejected", writer)
-            else:
-                sched.mark(job["job_id"], "failed", res.get("code", "E5000"),
-                           {"reason": res.get("message", "")[:200]})
-                rep.failed += 1
-                _event(store, job, res, "job_failed", writer)
-    return rep
+    return by_path, results
+
+
+def _run_one(store: Store, sched: Scheduler, cfg: dict, root, rep: WorkReport,
+             job: dict, res: dict, writer, *, ir_cache: dict,
+             saved_docs: set) -> None:
+    """单作业的 ok 路径：IR 回读 → 落库 → 终态与事件（CH-492 Q-3 提取）。
+
+    调用方保证 `res["status"] == "ok"` 且该作业不是被产物覆盖淘汰的旧作业
+    （superseded 走 `_handle_reject`）。`ir_cache` / `saved_docs`（CH-489）：
+    同一路径多个作业共用同一产物 zip 时只读一次 IR、只算一次插入行；首个
+    作业落库后其余作业只推进任务状态与事件（`skip_save=True`），不再对同一
+    正文重复写 docs/blocks/FTS。
+    """
+    zip_key = str(res.get("zip", ""))
+    if zip_key in ir_cache:
+        ir = ir_cache[zip_key]
+    else:
+        ir = read_ir(zip_key)
+        ir_cache[zip_key] = ir
+    if ir is None:
+        # CH-469：产物 status=ok 但 zip 里读不到 ir.json（损坏 / 缺项 /
+        # IR 版本不符）时，原实现跳过入库却仍标 done + 发 job_done——
+        # 队列说「完成」、`GET /docs/<id>` 却 404，正文只剩一个不可寻址的
+        # zip，既骗过监控又断掉重试线索。改为明确失败（可安全重投）。
+        sched.mark(job["job_id"], "failed", "E5031",
+                   {"reason": "artifact_ir_unreadable",
+                    "zip": str(res.get("zip", ""))[-64:]})
+        rep.failed += 1
+        rep.notes.append(f"{job['job_id']}: ir unreadable")
+        _event(store, job, res, "job_failed", writer)
+        return
+    try:
+        skip_save = ir.doc_id in saved_docs
+        prepared = None if skip_save else prepare_ir_rows(ir)
+        drift = _finish_ok(
+            store, sched, job, res, ir, writer=writer,
+            meta=res.get("meta"), gate=res.get("gate"),
+            prepared=prepared, skip_save=skip_save)
+    except E4041_NotFound:
+        # CH-476（R7-SVC-1）：删除×在途转换竞争——任务行已被 delete_doc
+        # 级联收走，_finish_ok 已回滚（docs/blocks/search 未写回）。
+        # 记 rejected 并补一条留痕事件（events 无 FK，行本身可达；
+        # 正文不复活是主目标，可观测性是次目标）。
+        sched.mark(job["job_id"], "rejected", "E4041",
+                   {"reason": "doc_deleted_during_conversion"})
+        _event(store, job, res, "job_rejected", writer)
+        drop_orphan_artifact(store, root, cfg, res.get("doc_id") or "")
+        rep.rejected += 1
+        rep.notes.append(f"{job['job_id']}: doc deleted during conversion")
+        return
+    except E4091_DocOverwrite as e:
+        # CH-471（STOR-5）：库内已有编辑 → 拒绝覆盖（编辑原样保留）。
+        # 无人值守的 work/watch 路径默认不 force：宁可显式 rejected
+        # 也不静默丢编辑；需要覆盖由调用方带 force 重投。
+        sched.mark(job["job_id"], "rejected", e.code,
+                   {"reason": "edited_blocks_present",
+                    "edited_blocks": e.detail.get("edited_blocks")})
+        rep.rejected += 1
+        rep.notes.append(f"{job['job_id']}: overwrite conflict (edits kept)")
+        _event(store, job, res, "job_rejected", writer)
+        # CH-485（R9-SVC-2）：package 已覆盖旧 zip；从 DB 编辑内容重建。
+        try:
+            rebuild_artifact(store, res.get("doc_id") or job.get("doc_id") or "",
+                             cfg, root)
+        except Exception as exc:  # noqa: BLE001 — 补偿失败不影响终态
+            if writer:
+                writer.write({"code": "E_ARTIFACT_REBUILD",
+                              "doc_id": res.get("doc_id") or job.get("doc_id") or "",
+                              "exc": type(exc).__name__})
+        return
+    except Exception as exc:  # noqa: BLE001 — 单任务不得毒死常驻消费者
+        # 坏 IR 重号块（sqlite3.IntegrityError）等非瞬时库面错误：
+        # 原实现直接冒泡，常驻 work 退出、计划任务反复重启，回收后
+        # 同一件再次毒死队列。记 failed 后继续下一件。
+        detail = {"reason": "finish_failed",
+                  "exc": type(exc).__name__}
+        try:
+            sched.mark(job["job_id"], "failed", "E5031", detail)
+        except sqlite3.Error:
+            pass
+        try:
+            _event(store, job, res, "job_failed", writer)
+        except sqlite3.Error:
+            pass
+        rep.failed += 1
+        rep.notes.append(
+            f"{job['job_id']}: finish failed ({type(exc).__name__})")
+        return
+    saved_docs.add(ir.doc_id)
+    rep.done += 1
+    rep.drift += 1 if drift else 0
+
+
+def _handle_reject(store: Store, sched: Scheduler, rep: WorkReport, job: dict,
+                   res: dict, writer, *, code: str, detail: dict,
+                   note: str | None = None) -> None:
+    """拒绝终态：mark rejected + 计数 + 留痕事件（CH-492 Q-3 提取）。
+
+    覆盖两种拒绝形态：同路径多作业的产物覆盖（source_superseded /
+    E4092，带 note）与转换端回报的 rejected（res 的 code/message，无 note）。
+    """
+    sched.mark(job["job_id"], "rejected", code, detail)
+    rep.rejected += 1
+    if note is not None:
+        rep.notes.append(note)
+    _event(store, job, res, "job_rejected", writer)
 
 
 def _finish_ok(store: Store, sched: Scheduler, job: dict, res: dict, ir,
@@ -315,7 +366,6 @@ def _finish_ok(store: Store, sched: Scheduler, job: dict, res: dict, ir,
     CH-476（R7-PERF-2）：漂移判定用子进程回报的 `doc_id`，父进程不再对源文件做
     第三次全量流式读（入队 / 子进程 / 此处各一遍，20MB+ 文档每任务白读两遍）。
     """
-    from .api import _emit
     detail = {"path": job["path"], "zip": res["zip"], "blocks": res["blocks"]}
     # `res["doc_id"]` 是产物所依据那份内容的哈希（子进程转换前取）。比「转换结束后
     # 再哈希一次」更贴合物理事实：源文件在转换**期间**被改写时，旧口径会把
@@ -360,57 +410,20 @@ def _finish_ok(store: Store, sched: Scheduler, job: dict, res: dict, ir,
         if not skip_save:
             save_ir(store, ir, tx=tx, meta=meta, gate=gate,
                     force=bool(job.get("force")), prepared=prepared)
-        _emit(store, "job_done", res.get("doc_id") or job.get("doc_id"), job["job_id"],
-              {"blocks": int(res.get("blocks", 0) or 0), "source": "work",
-               "file": str(job.get("path", ""))[-64:]}, writer, tx=tx)
+        emit(store, "job_done", res.get("doc_id") or job.get("doc_id"), job["job_id"],
+             {"blocks": int(res.get("blocks", 0) or 0), "source": "work",
+              "file": str(job.get("path", ""))[-64:]}, writer, tx=tx)
     return drift
-
-
-def _read_ir(zip_path: str):
-    """从产物 zip 回读 IR（子进程不回传对象；父进程以产物为准重建入库内容）。
-
-    读不到即返回 None——由调用方决定终态（CH-469：不得据此标 done）。
-    `BadZipFile` 不是 `OSError` 子类、`IR.from_dict` 的字段类型问题抛 `TypeError`，
-    两者都要收进来，否则一个坏产物会让整个消费批次崩掉。
-    """
-    import zipfile
-
-    from .ir import IR
-    try:
-        with zipfile.ZipFile(zip_path) as z:
-            name = next((n for n in z.namelist() if n.endswith("ir.json")), None)
-            if not name:
-                return None
-            return IR.from_dict(json.loads(z.read(name).decode("utf-8")))
-    except (OSError, ValueError, KeyError, TypeError, zipfile.BadZipFile):
-        return None
-
-
-def _drop_orphan_artifact(store: Store, root, cfg: dict, doc_id: str) -> None:
-    """CH-484：E4041 回滚后清掉本轮刚落盘、已不可寻址的产物孤儿。
-
-    只在 `doc_id` 确已不在 `docs` 时清——mark rowcount=0 也可能来自「任务行单独
-    消失、文档仍在库」，那份 `out/{doc_id}.zip` 是**活文档**的正文载体，清它等于
-    删数据（数据安全护栏）。best-effort：删除失败不翻转已判定的 rejected 终态，
-    孤儿至多留在盘上、绝不影响库面正确性。
-    """
-    if not doc_id or store.q1("SELECT 1 FROM docs WHERE doc_id=? LIMIT 1",
-                              (doc_id,)) is not None:
-        return
-    purge_files(doc_id, root,
-                out_dir=config.path_setting(cfg, "paths.out", root, str(Path(root) / "out")),
-                tmp_dir=config.path_setting(cfg, "paths.tmp", root, str(Path(root) / "tmp")))
 
 
 def _event(store: Store, job: dict, res: dict, code: str, writer,
            doc_id: str | None = None) -> None:
-    """事件入库 + 落 work.jsonl（复用 api._emit，NFR-19/20 同一口径，CH-444）。"""
-    from .api import _emit
+    """事件入库 + 落 work.jsonl（复用 events.emit，NFR-19/20 同一口径，CH-444）。"""
     payload = {"blocks": int(res.get("blocks", 0) or 0), "source": "work",
                "file": str(job.get("path", ""))[-64:]}
     if code != "job_done" and res.get("code"):
         payload["code"] = res["code"]
-    _emit(store, code, doc_id or job.get("doc_id"), job["job_id"], payload, writer)
+    emit(store, code, doc_id or job.get("doc_id"), job["job_id"], payload, writer)
 
 
 def queue_stats(store: Store) -> dict:

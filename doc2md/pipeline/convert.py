@@ -11,6 +11,7 @@ import sqlite3
 import time
 import uuid
 import zipfile
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -56,13 +57,20 @@ class Result:
 
 def convert(path: str | Path, *, cfg: dict | None = None, mode: str | None = None,
             out_dir: str | Path | None = None, raw_name: str | None = None,
-            force: bool = False, precheck_edits: bool = False) -> Result:
-    """转换入口：离线断言（NFR-1）+ 冻结键校验（T9）在此施加，再进管线本体。"""
+            force: bool = False, precheck_edits: bool = False,
+            progress: Callable[[str, dict], None] | None = None) -> Result:
+    """转换入口：离线断言（NFR-1）+ 冻结键校验（T9）在此施加，再进管线本体。
+
+    `progress`（CH-491 / B-6）：可选阶段回调 `(stage, info)`，stage 取值
+    `s1` / `s1_5` / `s3` / `s4` / `package`。仅 CLI 串行路径传入（批量 worker
+    跨进程，回调不可 pickle）；不传时零开销、行为与产物字节完全不变。
+    """
     cfg = cfg or config.load()
     config.validate(cfg)
     with offline_guard(bool(config.get(cfg, "run.offline_assert", True))):
         return _convert(path, cfg=cfg, mode=mode, out_dir=out_dir, raw_name=raw_name,
-                        force=force, precheck_edits=precheck_edits)
+                        force=force, precheck_edits=precheck_edits,
+                        progress=progress)
 
 
 def _edited_conflict(cfg: dict, doc_id: str) -> int:
@@ -93,7 +101,14 @@ def _edited_conflict(cfg: dict, doc_id: str) -> int:
 
 def _convert(path: str | Path, *, cfg: dict, mode: str | None,
              out_dir: str | Path | None, raw_name: str | None,
-             force: bool = False, precheck_edits: bool = False) -> Result:
+             force: bool = False, precheck_edits: bool = False,
+             progress: Callable[[str, dict], None] | None = None) -> Result:
+    def _tick(stage: str, **info) -> None:
+        """CH-491（B-6）：阶段打点。回调由 CLI 串行路径传入；批量 worker 跨进程
+        不可 pickle，故不传（零开销）。产物字节与不打点时完全一致。"""
+        if progress is not None:
+            progress(stage, info)
+
     p = Path(path)
     # CH-459（A-13）：sniff 一次直传 read_any——原实现 read_any 内嗅探后
     # 分片前又 sniff(p) 一次，同一文件多开一遍（magic + zip 目录）。
@@ -132,11 +147,13 @@ def _convert(path: str | Path, *, cfg: dict, mode: str | None,
         legacy_doc_timeout_s=int(config.get(cfg, "s1.legacy_doc_timeout_s", 120)),
         tmp_dir=config.path_setting(cfg, "paths.tmp", "."))
     total = len(pages_all)
+    _tick("s1", pages=total)
     gate = s1_5_gate.check(pages_all,
                            min_chars=int(config.get(cfg, "s1_5.min_chars_per_page", 120)),
                            mode=str(config.get(cfg, "s1_5.sample_pages", "auto")),
                            reject_on_any=bool(
                                config.get(cfg, "s1_5.reject_on_any_bad_page", True)))
+    _tick("s1_5", passed=bool(gate.passed), sampled=len(gate.detail().get("pages", [])))
 
     # CH-469：page_detail 是全页列表构建（320 页文档开销可观）。原实现在打包与
     # Result 两处各调一次 gate.detail()（auto 模式 = 全页明细建两遍），此处收敛为一次。
@@ -190,6 +207,7 @@ def _convert(path: str | Path, *, cfg: dict, mode: str | None,
     ir.shard_count = effective_shards
     if ir.sharded:
         ir.warnings.append(WARN_SHARD_NOT_MERGED)   # W1044：分片转换说明（报告口径）
+    _tick("s3", blocks=len(ir.blocks), shards=effective_shards)
 
     # LLM 层（注入立场 + 白名单；CH-456 / T2：offline 占位或本地 llama-server）
     wl = list(config.get(cfg, "llm.op_whitelist", DEFAULT_OP_WHITELIST))
@@ -201,6 +219,7 @@ def _convert(path: str | Path, *, cfg: dict, mode: str | None,
         ir,
         preserve_strike=bool(config.get(cfg, "s4.preserve_marks_strike", False)),
         link_internal=str(config.get(cfg, "s4.link_internal", "plain")))
+    _tick("s4", chars=len(md))
 
     metrics = _metrics(md, ir)
     metrics["elapsed_ms"] = round((time.monotonic() - t0) * 1000, 1)
@@ -217,6 +236,7 @@ def _convert(path: str | Path, *, cfg: dict, mode: str | None,
         zip_path = package(ir, md, meta, Path(out_dir), cfg,
                            gate=gate_detail if bool(
                                config.get(cfg, "s1_5.page_detail_in_report", True)) else None)
+        _tick("package", zip=str(zip_path))
     return Result(doc_id=doc_id, source_key=source_key, source_name=safe, markdown=md,
                   ir=ir, meta=meta, metrics=metrics, gate=gate_detail,
                   applied_ops=llm["applied_ops"], rejected_ops=llm["rejected"],

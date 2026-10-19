@@ -849,15 +849,29 @@ def modal_size(pages: list[RawPage]) -> float:
 
     按行计数会被大号标题主导（每页 1~2 行标题字号 14~16，正文行多但单行字数少
     时仍可能反超）；字符加权后标题无法绑架正文口径。
+
+    CH-492（P-1）：优先归并 S1 单趟累计的 `RawPage.size_hist`（O(页数×键数)
+    归并，省掉全文档第二次逐行遍历）；无直方图的页（手工构造 / 直接调用方）
+    回退原逐行扫描。两条路径的键、计数与**插入序**完全一致——
+    `Counter.most_common(1)` 的平票判定取插入序最前者，归并序 = 各字号在
+    文档行序中的首次出现序 = 单遍序——故 `base_size` 逐字节不变
+    （base_size 是「分片≡单片」判据根，见 convert.py CH-471/PIPE-1）。
     """
     from collections import Counter
     c: Counter = Counter()
     for p in pages:
-        for ln in p.lines:
-            if ln.size:
-                # CH-485（R9-PIPE-2）：10.5pt 被 round(...,0) 抬成 10.0 后，
-                # 第三回退的“字号>正文”会把所有单级编号短行误判成标题。
-                c[round(ln.size, 1)] += max(1, len(ln.text.strip()))
+        if p.size_hist:
+            # CH-492（P-1）：必须是**累加**归并——`Counter.update` 按键相加，
+            # 且新键按首次出现序插入（平票判定的前提）。切勿改成
+            # `dict.update`：那是覆盖语义，后页计数会冲掉前页（本规格
+            # 实测：3000 例中 1122 例因此与单遍结果不符）。
+            c.update(p.size_hist)
+        else:
+            for ln in p.lines:
+                if ln.size:
+                    # CH-485（R9-PIPE-2）：10.5pt 被 round(...,0) 抬成 10.0 后，
+                    # 第三回退的“字号>正文”会把所有单级编号短行误判成标题。
+                    c[round(ln.size, 1)] += max(1, len(ln.text.strip()))
     return c.most_common(1)[0][0] if c else 10.0
 
 

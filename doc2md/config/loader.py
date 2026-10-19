@@ -122,6 +122,7 @@ SPEC: dict[str, tuple[str, Any]] = {
     "perf.queue_async": BOOL,
     "perf.enqueue_hash_threads": _int(1, 32),
     "perf.sync_min_parallel": _int(1, 100_000),
+    "perf.sync_min_bytes": _int(0, 10_000_000_000),
     "perf.min_free_mb": _int(0, 10_000_000),
     "perf.disk_safety_factor": _int(0, 100),
     "perf.stale_job_minutes": _int(0, 100_000),

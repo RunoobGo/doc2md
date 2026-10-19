@@ -67,6 +67,10 @@ enqueue_hash_threads = 8               # CH-476（R7-PERF-3）：异步入队时
 sync_min_parallel = 8                  # CH-471（SVC-3）：同步 POST /jobs 走 run_batch 进程池的
                                        # 文件数阈值；低于它仍进程内串行（小批次建池成本>收益，
                                        # 且保留错误按 HTTP 码传播契约）。大批量据此并行。
+sync_min_bytes = 1048576               # CH-492（QA M-1 拐点实测）：与 sync_min_parallel 构成
+                                       # 双条件（件数够且批内总字节达此值才建池）——文件数不是
+                                       # 成本驱动因子：8 个 3 页 PDF 走池比串行慢 7.8 倍（池税
+                                       # ~0.6s），8 个 100 页赚 2.1 倍。0 = 关闭字节条件（纯件数）。
 min_free_mb = 512                      # NFR-6：写产物 / 备份前的剩余磁盘门禁（不足 → 413/E4131）
 disk_safety_factor = 3                 # 需求 = 待写字节 × 该系数（zip + 临时 + 解压余量）
 stale_job_minutes = 30                 # CH-448：work 进程被 OOM 杀掉后，running 超过此分钟数

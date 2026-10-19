@@ -56,6 +56,21 @@ def _jline(obj, indent: int | None = None) -> str:
     """
     return json.dumps(obj, ensure_ascii=True, indent=indent)
 
+
+def _err_payload(exc, message: str, **extra) -> dict:
+    """错误行 payload（CH-492 / F-05）：detail 非空时带上。
+
+    CLI 面此前不展示 detail——口令加密 PDF 的 `password_required` 诊断 flag
+    对 CLI 用户不可见，而 CLI 恰是「用户自助定位」的主场景（QA M-3 实证缺口）。
+    detail 是受控字段（file / exc / password_required），不含文档内容（NFR-20）。
+    """
+    payload = {"status": "error", "code": exc.code, "message": message}
+    payload.update(extra)
+    if getattr(exc, "detail", None):
+        payload["detail"] = exc.detail
+    return payload
+
+
 # CH-441：doctor 自检的依赖清单 = pyproject 运行时依赖的导入名（单一口径，防漂移）。
 # 实装只用 pdfplumber / python-docx / cryptography / Flask；
 # pypdf、Jinja2、PyYAML、watchdog 从未被 doc2md 包导入（S1 走 pdfplumber，
@@ -143,6 +158,10 @@ def build_parser() -> argparse.ArgumentParser:
                          "server = 本地 llama-server（llm.bind:llm.port）")
     cv.add_argument("--llm-no-fallback", action="store_true",
                     help="server 模式服务不可用时明确失败（E5041 / 退出码 4），不回退 offline")
+    cv.add_argument("--format", choices=("zip", "md", "both"), default="zip",
+                    help="产物形态（CH-491）：zip = 现状（content.md + ir.json + report.html）；"
+                         "md = 只写 Markdown 直出文件；both = 两者都写。"
+                         "md 与 zip 内 content.md 逐字节相同")
 
     wk = sub.add_parser("work", help="消费 tasks 队列（CH-449，低配机异步转换）")
     _add_common(wk)
@@ -175,6 +194,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     dr = sub.add_parser("doctor", help="环境自检")
     _add_common(dr)
+
+    se = sub.add_parser("search", help="检索已入库文档（API /search 的 CLI 等价物，CH-491）")
+    _add_common(se)
+    se.add_argument("query", help="检索词（CJK 单字 + bigram / 非 CJK 原样段）")
+    se.add_argument("--full", action="store_true",
+                    help="走 blocks.text 全表 LIKE，覆盖 FTS 索引窗口外的块尾部")
+    se.add_argument("--limit", type=int,
+                    help="返回条数上限（默认 20，上限 500；超限截到 500 而非报错）")
     return ap
 
 
@@ -358,7 +385,7 @@ def cmd_backup_restore(args: argparse.Namespace) -> int:
     rebuilt = 0
     rebuild_errors: list[str] = []
     try:
-        from .api import _rebuild_artifact
+        from .artifacts import rebuild_artifact
         from .storage.db import Store
         st = Store(dst)
         try:
@@ -369,7 +396,7 @@ def cmd_backup_restore(args: argparse.Namespace) -> int:
                 if (out_dir / f"{row['doc_id']}.zip").exists():
                     continue
                 try:
-                    _rebuild_artifact(st, row["doc_id"], cfg, root)
+                    rebuild_artifact(st, row["doc_id"], cfg, root)
                     rebuilt += 1
                 except Exception as exc:  # noqa: BLE001 — 恢复已成功，逐篇报告
                     rebuild_errors.append(f"{row['doc_id']}:{type(exc).__name__}")
@@ -394,6 +421,67 @@ def _gate_summary(detail: dict) -> dict:
     """CLI 只回摘要（页级明细留在报告 / --json）；避免 stderr 被 20×N 字段刷满。"""
     return {"mode": detail.get("mode"), "sampled_pages": detail.get("sampled_pages"),
             "reasons": detail.get("reasons"), "stats": detail.get("stats")}
+
+
+def _emit_md(zip_path: Path, out_dir: Path, md_name: str) -> Path:
+    """CH-491（B-5）：从产物 zip 提取 content.md 直出。
+
+    从 zip 原样读出再落盘，保证与 zip 内 content.md **逐字节相同**（含 front-matter），
+    不重新序列化——重新拼装会因 json 缩进/键序漂移破坏等价性。
+    """
+    import zipfile
+
+    from .errors import E4041_NotFound
+    with zipfile.ZipFile(zip_path) as z:
+        names = [n for n in z.namelist() if n.endswith("content.md")]
+        if not names:
+            raise E4041_NotFound("artifact content.md missing")
+        body = z.read(names[0])
+    md_path = out_dir / md_name
+    md_path.write_bytes(body)
+    return md_path
+
+
+def _md_name(res: dict) -> str:
+    """md 直出文件名：优先消毒后的源文件名（用户可读），回退 doc_id。"""
+    meta = res.get("meta") or {}
+    name = str(meta.get("source_name") or "").strip()
+    if name:
+        from .security.names import assert_name_safe
+        assert_name_safe(name)          # 与 package() 同一道闸，失败即拒收
+        return name if name.lower().endswith(".md") else f"{name}.md"
+    return f"{res.get('doc_id', 'doc')}.md"
+
+
+def _apply_format(res: dict, out: Path, fmt: str) -> str:
+    """按 --format 落 md 直出；返回 md 路径（未产出时为空串）。
+
+    三态语义：`zip` = 只留 zip（现状）；`md` = 提取 md 后移除 zip（md 已含
+    front-matter 与正文，zip 的 ir.json/report.html 属审阅面，md 模式不保留）；
+    `both` = 两者都留。md 与 zip 内 content.md 逐字节相同。
+    """
+    if res.get("status") != "ok":
+        return ""
+    zp = res.get("zip") or ""
+    if not zp:
+        return ""
+    if fmt == "zip":
+        return ""
+    try:
+        md_path = _emit_md(Path(zp), out, _md_name(res))
+    except Exception as exc:            # noqa: BLE001 — md 直出失败不翻转转换结果
+        print(_jline({"file": Path(str(res.get("file", ""))).name,
+                      "status": "md_emit_failed",
+                      "code": "E5031",
+                      "message": f"{type(exc).__name__}"}), file=sys.stderr)
+        return ""
+    if fmt == "md":
+        # md 已落盘且字节等价，移除 zip 避免「md 模式却留 zip」的语义混淆。
+        try:
+            Path(zp).unlink()
+        except OSError:
+            pass
+    return str(md_path)
 
 
 def cmd_convert(args: argparse.Namespace) -> int:
@@ -426,31 +514,45 @@ def cmd_convert(args: argparse.Namespace) -> int:
                             workers=workers, force=bool(args.force),
                             precheck_edits=True)
         for res in results:
+            res["md"] = _apply_format(res, out, args.format)
             rc = max(rc, _report(res, as_json=args.json))
         return rc
 
     from .errors import Doc2mdError, E4221_GateReject
     from .pipeline.convert import convert
+
+    # CH-491（B-6）：五阶段进度打点。仅串行路径接入（批量 worker 跨进程，回调
+    # 不可 pickle）；`--json` 时静音——机器可读面不得混入人读进度行。
+    quiet = bool(args.json)
+
+    def _progress(stage: str, info: dict) -> None:
+        if quiet:
+            return
+        bits = " ".join(f"{k}={v}" for k, v in info.items())
+        print(f"[{stage}] {bits}", file=sys.stderr)
+
     for f in files:
         try:
             res = convert(f, cfg=cfg, mode=args.mode, out_dir=out,
-                          force=bool(args.force), precheck_edits=True)
+                          force=bool(args.force), precheck_edits=True,
+                          progress=_progress)
         except E4221_GateReject as exc:
             print(_jline({"file": f.name, "status": "rejected", "code": exc.code,
                           "gate": _gate_summary(exc.detail or {})}), file=sys.stderr)
             rc = max(rc, EXIT_GATE)
             continue
         except Doc2mdError as exc:
-            print(_jline({"file": f.name, "status": "error", "code": exc.code,
-                          "message": str(exc)}), file=sys.stderr)
+            print(_jline(_err_payload(exc, str(exc), file=f.name)), file=sys.stderr)
             rc = max(rc, EXIT_BIZ)
             continue
-        rc = max(rc, _report({"file": f.name, "status": "ok", "doc_id": res.doc_id,
-                              "blocks": len(res.ir.blocks), "chars": res.metrics["chars"],
-                              "zip": str(res.zip_path) if res.zip_path else "",
-                              "sharded": res.meta.get("sharded"),
-                              "shard_stats": res.meta.get("shard_stats", {})},
-                             as_json=args.json))
+        row = {"file": f.name, "status": "ok", "doc_id": res.doc_id,
+               "blocks": len(res.ir.blocks), "chars": res.metrics["chars"],
+               "zip": str(res.zip_path) if res.zip_path else "",
+               "sharded": res.meta.get("sharded"),
+               "shard_stats": res.meta.get("shard_stats", {}),
+               "meta": res.meta}
+        row["md"] = _apply_format(row, out, args.format)
+        rc = max(rc, _report(row, as_json=args.json))
     return rc
 
 
@@ -461,6 +563,8 @@ def _report(res: dict, *, as_json: bool) -> int:
     payload = {"file": name, "status": status, "doc_id": res.get("doc_id", ""),
                "blocks": res.get("blocks", 0), "chars": res.get("chars", 0),
                "zip": res.get("zip", "")}
+    if res.get("md"):
+        payload["md"] = res["md"]
     if res.get("code"):
         payload["code"] = res["code"]
     if res.get("message"):
@@ -471,10 +575,13 @@ def _report(res: dict, *, as_json: bool) -> int:
         print(_jline(payload))
     elif status == "ok":
         st = res.get("shard_stats") or {}
-        print(f"{name}: doc_id={payload['doc_id']} blocks={payload['blocks']} "
-              f"chars={payload['chars']} sharded={res.get('sharded')} "
-              f"shards={st.get('shards', 1)} stitched={st.get('stitched', 0)} "
-              f"dropped_dupes={st.get('dropped_dupes', 0)} zip={payload['zip']}")
+        line = (f"{name}: doc_id={payload['doc_id']} blocks={payload['blocks']} "
+                f"chars={payload['chars']} sharded={res.get('sharded')} "
+                f"shards={st.get('shards', 1)} stitched={st.get('stitched', 0)} "
+                f"dropped_dupes={st.get('dropped_dupes', 0)} zip={payload['zip']}")
+        if res.get("md"):
+            line += f" md={res['md']}"
+        print(line)
     else:
         print(_jline(payload), file=sys.stderr)
     if status == "ok":
@@ -506,8 +613,8 @@ def cmd_work(args: argparse.Namespace) -> int:
                 try:
                     it = worker.enqueue(sched, f)
                 except Doc2mdError as exc:
-                    print(_jline({"file": f.name, "status": "error", "code": exc.code,
-                                  "message": exc.message}), file=sys.stderr)
+                    print(_jline(_err_payload(exc, exc.message, file=f.name)),
+                          file=sys.stderr)
                     skipped += 1
                     rc = max(rc, EXIT_BIZ)
                     continue
@@ -564,8 +671,14 @@ def cmd_watch(args: argparse.Namespace) -> int:
             try:
                 ready = tracker.poll_all(args.dir, lim)
             except Doc2mdError as exc:
-                print(_jline({"status": "error", "code": exc.code,
-                              "message": str(exc)}), file=sys.stderr)
+                print(_jline(_err_payload(exc, str(exc))), file=sys.stderr)
+                if args.once:
+                    # CH-492（QA 缺陷 1）：--once（cron 模式）下扫描级失败必须计入
+                    # rc——原实现只打印不抬 rc，目录打错 / 超限 / 被删时退出码 0，
+                    # cron/launchd 按退出码判成功即静默假成功（convert 同场景为
+                    # EXIT_BIZ，对齐之）。常驻模式不抬 rc：下一轮轮询可能恢复，
+                    # 且 rc 不在常驻路径返回（仅 --once 分支 return rc）。
+                    rc = max(rc, EXIT_BIZ)
                 ready = []
             for f in ready:
                 p = Path(f)
@@ -579,8 +692,8 @@ def cmd_watch(args: argparse.Namespace) -> int:
                         it = worker.enqueue(sched, p)
                         print(_jline(it))
                     except Doc2mdError as exc:
-                        print(_jline({"watched": p.name, "status": "error",
-                                      "code": exc.code, "message": exc.message}),
+                        print(_jline(_err_payload(exc, exc.message,
+                                                  watched=p.name)),
                               file=sys.stderr)
                         rc = max(rc, EXIT_BIZ)
                     continue
@@ -605,8 +718,8 @@ def cmd_watch(args: argparse.Namespace) -> int:
                     # 脚本侧按退出码分流时会走错分支——与其它路径同口径取 max。
                     rc = max(rc, EXIT_GATE)
                 except Doc2mdError as exc:
-                    print(_jline({"watched": p.name, "status": "error", "code": exc.code,
-                                  "message": exc.message}), file=sys.stderr)
+                    print(_jline(_err_payload(exc, exc.message,
+                                              watched=p.name)), file=sys.stderr)
                     rc = max(rc, EXIT_BIZ)
             if args.once:
                 return rc
@@ -638,6 +751,33 @@ def cmd_tokenizer(args: argparse.Namespace) -> int:
     res = gguf.verify_manifest(args.manifest, args.gguf)
     print(_jline(res, indent=2))
     return EXIT_OK if all(res[k] for k in ("gguf_ok", "vocab_ok", "name_ok", "n_vocab_ok")) else EXIT_SYS
+
+
+# --- search ---------------------------------------------------------------------
+def cmd_search(args: argparse.Namespace) -> int:
+    """CH-491（B-4）：CLI 检索入口——补齐 CLI/API 能力不对齐。
+
+    `GET /search`（`api.py:949`）此前是 API 独占，离线单机用户不启 serve 就
+    无法检索已入库文档。本命令复用 `storage/repo.py::search`，与 API 同一
+    实现、同一默认口径（limit 默认 20、上限 500 截断不报错），结果集逐条相同。
+    """
+    from .storage.db import Store
+    from .storage.repo import search
+    cfg = _cfg(args)
+    root = _root(cfg)
+    db = root / "state.sqlite"
+    if not db.exists():
+        print(_jline({"code": "E4041", "message": f"no library at {db}"}),
+              file=sys.stderr)
+        return EXIT_BIZ
+    limit = args.limit if args.limit is not None else 20
+    store = Store(db)
+    try:
+        result = search(store, args.query, limit, full=bool(args.full))
+    finally:
+        store.close()
+    print(_jline(result, indent=2))
+    return EXIT_OK
 
 
 # --- doctor ---------------------------------------------------------------------
@@ -746,7 +886,7 @@ def _vendor_models(cfg) -> list[str]:
 COMMANDS = {"serve": cmd_serve, "cron": cmd_cron, "convert": cmd_convert,
             "watch": cmd_watch, "work": cmd_work,
             "tokenizer": cmd_tokenizer, "doctor": cmd_doctor,
-            "backup": cmd_backup}
+            "backup": cmd_backup, "search": cmd_search}
 
 
 def main(argv: list[str] | None = None) -> int:
