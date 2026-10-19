@@ -23,9 +23,10 @@ doc2md serve [--host H --port P --root DIR --config F]   # API 服务（默认 1
 doc2md serve token [--role R --label L | --revoke TOKEN | --list]
 doc2md cron --daily | --weekly [--no-backup]
 doc2md convert <file|dir> [--mode auto|single|two_phase --out DIR --workers N --json --follow-symlinks \
-              --llm-mode offline|server --llm-no-fallback]
+              --force --format zip|md|both --llm-mode offline|server --llm-no-fallback]
 doc2md work [--once --max-jobs N --workers N --idle S --enqueue PATH --status]
 doc2md watch <dir> [--once --interval S]
+doc2md search QUERY [--full] [--limit N]           # 检索已入库文档（API /search 的 CLI 等价物；CH-491）
 doc2md tokenizer export F [--vocab V --manifest M]
 doc2md tokenizer verify --manifest M --gguf F
 doc2md backup drill [--keep]                     # 隔离沙箱内跑完整恢复闭环（ops/backup.md）
@@ -33,9 +34,21 @@ doc2md backup restore SRC [--to PATH] [--force]  # 离线恢复（v1/v2 容器�
 doc2md doctor
 ```
 
-退出码：`0` 成功 / `2` 用法错误 / `3` 门禁拒收（E4221 等） / `4` 业务错误 / `5` 系统错误。
-`2` 也覆盖两类安全拒收：`serve --host` 非回环且未设 `api.allow_remote_bind`、`serve token` 的
-`--role` 不在 `api.token_roles`；`4` 覆盖 `serve token --revoke` 的未知 token（E4041）。
+`--format`（CH-491）：`zip`（默认，行为不变）= `content.md` + `ir.json` + `report.html`；`md` = 只写 Markdown 直出文件（与 zip 内 `content.md` 逐字节相同，提取后移除 zip）；`both` = 两者都写。文件名取消毒后的源文件名。
+
+`doc2md search`（CH-491）：不启 serve 也能检索已入库文档，与 `GET /search` 同一实现、同一默认口径（`limit` 默认 20、上限 500 截断不报错），结果集逐条相同；`--full` 走 `blocks.text` 全表 LIKE，覆盖 FTS 索引窗口外的块尾部；库不存在时明确 `E4041` / 退出码 4。
+
+转换期间 stderr 打五阶段进度（`s1` / `s1_5` / `s3` / `s4` / `package`），`--json` 时静音（CH-491）。
+
+退出码：`0` 成功 / `2` 用法错误 / `3` 门禁拒收（E4221 等） / `4` 业务错误 / `5` 系统错误。多文件转换按「取最严重」聚合（逐条算码后 `max`）。
+`2` 覆盖三类「调用方写错」：`serve --host` 非回环且未设 `api.allow_remote_bind`、`serve token` 的
+`--role` 不在 `api.token_roles`、**配置错**（`doc2md.toml` 语法错误、`--config` 指向不存在的文件、`doctor` 检出冻结键/配置语义非法）。
+`4` 覆盖业务失败：`serve token --revoke` 的未知 token（E4041）、转换撞上 E4091 已有编辑且未 `--force`、
+`backup drill` 演练失败（`DrillFailure`）、`backup restore` 恢复失败（`E5031`）、`work` 入队拒收。
+`5` 覆盖系统/环境失败：`serve` 端口占用等 `OSError`、`cron` 任一步骤失败、**`doctor` 判定环境不健康**（依赖 `MISSING` /
+server 模式 LLM 不可达 / 显式指定的 `.doc` 后端不可用 / 磁盘不足 `free_mb < min_free_mb` 或探测失败 `-1`）、
+`work` 存在失败作业、未归类异常（消息只带异常类名，不含正文，NFR-20）。
+逐命令的完整退出码表见 `docs/dev-plan.md` 附录 B。
 CI 里 `doc2md convert --json` 的 stderr 会打印门禁摘要（键为 `mode` / `sampled_pages` / `reasons` / `stats`，CH-462 实核）。
 
 ## 快速开始
@@ -59,14 +72,14 @@ curl -s "localhost:8090/search?q=例外" -H "X-Doc2md-Token: $TOK"
 
 ## 低配机器（Win11 无 GPU / Mac mini 16GB）
 
-> 下表驻留/吞吐数字来自 Linux 4 vCPU / 8GB 沙箱（本机 macOS arm64 复测见 12.1）；Win11 与 Mac mini 真机同口径数字登记 B-6/B-8，未实测前不得当作目标机结论。
+> **测量口径（CH-491 统一）**：下表驻留数字一律为「**320 页样本 / 单进程 / `ru_maxrss`**」，取自 **Linux 4 vCPU / 8GB 沙箱**（本机 macOS arm64 复测见方案 12.1）。同一事实此前在本文、`config/default_toml.py`、`config/doc2md.example.toml`、方案第七章与第十二章**五处写法不一**（1290→176 / 1025→177 / 1025→176 /「32 页 ≈ 180MB」），原因是各自省略了基准档；现统一为下面的**三档序列**，完整三档与耗时、解析阶段单独归因见方案 **12.3**。Win11 与 Mac mini 真机同口径数字登记为 B-6 / B-8，未实测前不得当作目标机结论。
 
 文本管线是 CPU + 内存带宽问题，GPU 无收益；下列口径全部有实测支撑（方案 第七章 + 第十二章证据）：
 
 | 键 | 默认 | 说明 |
 | --- | --- | --- |
-| `[s1].chunk_pages` | `32` | S1 分块重开 + 每页缓存清理。320 页样本转换峰值驻留 **1290MB（改造前）→ 176MB**，产物字节级等价 |
-| `[perf].workers` | `0` | 批量转换进程数，`0 = min(4, CPU)`。内存 ≈ workers × chunk_pages（4 进程并发：分块关合计约 4100MB，分块 32 约 708MB），8GB 机器别调到 8 |
+| `[s1].chunk_pages` | `32` | S1 分块重开 + 每页缓存清理。320 页样本峰值驻留三档：**1290MB**（改造前 HEAD，整本一次读完）→ **1025MB**（`chunk_pages=0`，仅每页 `flush_cache`）→ **176MB**（`chunk_pages=32`，默认档；早期登记的 177MB 与本轮复测 176MB 属同一量级抖动，统一取 176）。产物字节级等价 |
+| `[perf].workers` | `0` | 批量转换进程数，`0 = min(4, CPU)`。内存 ≈ workers × 页窗口（4 进程并发跑同一 320 页样本：分块关约 **4100MB**、分块 32 约 **708MB**），8GB 机器别调到 8 |
 | `[perf].queue_async` | `false` | `true` → `POST /jobs` 只入队（实测 13 个作业 **13ms** 返回 202），后台 `doc2md work` 消化；`GET /jobs` 看进度 |
 | `[perf].min_free_mb` / `disk_safety_factor` | `512` / `3` | NFR-6 磁盘门禁：写产物/备份前校验剩余空间，不足 → **413 / E4131**，不留截断 zip |
 | `[perf].stale_job_minutes` | `30` | 崩溃遗留的 `running` 队列任务超时重回 `queued`（仅限队列来源，不动同步请求行） |
@@ -186,16 +199,52 @@ rename 轮转只能有一个属主，三类进程三份文件。
 定时两档每轮只写几行，实际不会触界；**常驻 serve 会把 Werkzeug 的访问行一并写进 `.err`**，靠这一步封顶。
 Windows 任务计划不捕获标准输出，日志目录里没有 `launchd-*` 档，这一步在那里是空证据、不是异常。
 
-## 文档与变更跟踪
+## 文档地图
 
-| 文档 | 作用 |
+`docs/` 现有 **20 份 / 12,621 行**（`wc -l` 实测，CH-491）。此前本文只索引 `docs/` 里的 2 份（`dev-plan.md` 与 `plan-delta-v1.1.md`），其余 **18 份**无任何入口——查规格的人无从判断「`review-round8-CH-483.md` 是权威还是历史」。下表按两个角度给出完整地图；**地位列是判读依据，不是推荐阅读顺序**。
+
+### 表一：按问题找权威
+
+| 我想知道 | 去哪看 |
 | --- | --- |
-| **`docs/dev-plan.md`** | **开发方案主文档（唯一权威）**。主题篇（一–九章）为当前有效规格，正文不含变更编号，其中 3.5–3.7 给代码层结构、依赖纪律与技术栈选型边界；附录 A–G 是配置 / CLI / API / 错误码 / 数据库 / 门禁 / 模块清单的查询表；登记篇（十–十二章）集中记录阶段性变更与优化项、实测证据与未验证项 |
-| `docs/plan-delta-v1.1.md` | 已归档存根，指向方案（原 v1.0 附录 H 的增量登记已整体迁入 v2.0 第十一/十二章） |
-| `ops/backup.md` | 备份介质与恢复演练细则 |
-| `ops/windows/install-doc2md-tasks.ps1` | Windows 任务计划安装 / 校验 / 卸载（与 launchd 同等能力） |
+| 规格 / 契约 / 配置键 / CLI / API / 错误码 / 数据库 / 门禁 | `docs/dev-plan.md` 主题篇（一–九章）+ **附录 A–G**（配置 / CLI / API / 错误码 / 数据库 / 门禁 / 模块清单的查询表） |
+| 某次改动为什么做、证据与未验证项是什么 | `docs/dev-plan.md` 登记篇（十–十二章：登记流 / 逐条变更 CH-xxx / 实测证据与诚实标注的未验证项） |
+| 代码层结构、依赖纪律、技术栈选型边界 | `docs/dev-plan.md` §3.5–3.7 + 附录 G（模块与代码清单） |
+| 怎么装定时任务 / 常驻服务 / 备份 / 本地模型 | 本文对应小节（launchd / Windows 任务计划 / 备份加密 / 日志）+ `ops/backup.md` / `ops/llm.md` |
+| 这个错误码意味着什么、我该怎么办 | `docs/dev-plan.md` 附录 D（段位与触发口径）；「下一步动作」类指引见各失败面的 `detail` |
+| 本工具支持什么、不支持什么 | `docs/dev-plan.md` §1.2 目标与非目标（图片 / 公式 / 扫描件 OCR 均为非目标） |
+| 低配机内存与吞吐怎么调 | 本文「低配机器」小节的**三档驻留序列** + `docs/dev-plan.md` §第七章与 **12.3**（完整三档与测量方法） |
 
-跟踪约定：契约变更、缺陷、更优做法一律按登记流写入方案 第十一章（当前编号至 `CH-490`，下一条自 `CH-491`），实测数字进第十二章并标注语料与测量方法；规格发生变化时同步主题篇章节与本文相应小节，并递增 `doc2md.PLAN_VERSION`（管线契约变化另递增 `PIPELINE_VERSION`；状态库结构变化另递增 `DB_VERSION`，CH-476 起为 `6`、CH-483 起为 `7`、CH-485 起为 `8`、CH-486 起为 `9`）。
+### 表二：`docs/` 全清单与地位（20 份）
+
+| 文件 | 行数 | 地位 | 什么时候读 |
+| --- | --- | --- | --- |
+| **`docs/dev-plan.md`** | 1,867 | **唯一权威** | 任何时候要查规格。主题篇为当前有效规格（正文不含变更编号），登记篇记录变更与证据 |
+| `docs/pm-review-CH-491.md` | 258 | 过程存档（产品审查） | 要查「功能缺口 F-01…F-14 / 文档失真 D-01…D-20」的清单与验收口径时 |
+| `docs/review-round13-CH-491.md` | 322 | 过程存档（第十三轮技术审查） | 要查本轮架构 / 性能 / 死代码类发现的原始论证时 |
+| `docs/review-round12-CH-490.md` | 44 | 过程存档 | 追某轮审查的原始论证时（勿据以实施） |
+| `docs/review-round11-CH-489.md` | 111 | 过程存档 | 同上 |
+| `docs/review-round10-CH-486.md` | 143 | 过程存档 | 同上 |
+| `docs/review-round9-CH-485.md` | 1,112 | 过程存档 | 同上 |
+| `docs/review-round8-CH-483.md` | 1,754 | 过程存档 | 同上 |
+| `docs/review-round7-CH-476.md` | 329 | 过程存档 | 同上 |
+| `docs/review-round6-CH-475.md` | 228 | 过程存档 | 同上 |
+| `docs/review-round4-CH-471.md` | 470 | 过程存档 | 同上 |
+| `docs/compliance-audit-CH-487.md` | 90 | 过程存档 · **孤儿（待回灌）** | CH-487 的合规审计结论。`dev-plan` 与本文件互相无引用，结论无入口——**登记 CH-492 决定是否回灌与如何挂引用** |
+| `docs/spike-vlm-layout-hints.md` | 267 | 过程存档 · **孤儿（待回灌）** | VLM 版面线索的技术预研。同样零引用，**CH-492 决定是否把结论落进 9.2 待办或 12.7** |
+| `docs/Doc2md项目开发方案V1.0.md` | 1,142 | 历史蓝本 | 追 v1 沿革（12.10 有引用）；已被 `dev-plan.md` 取代 |
+| `docs/PDF-DOCX转Markdown离线管线-v2方案(Mac_mini_M4适配).md` | 1,182 | **已吸收存档** | 内容已被 v2.0 重写吸收（12.10 v2.0 行），**零引用** |
+| `docs/pdf-docx-to-md-plan-v2.1-macmini-m4.md` | 1,946 | **已吸收存档** | 同上，v2.1 增量已并入 v2.0 |
+| `docs/PDF-DOCX转Markdown管线-v2.2-优化完善与变更记录.md` | 491 | **已吸收存档** | 同上，CH-422…CH-446 已迁入第十一/十二章 |
+| `docs/PDF-DOCX转Markdown管线-v2.3-全面优化与变更记录.md` | 415 | **已吸收存档** | 同上 |
+| `docs/PDF-DOCX转Markdown管线-v2.4-全面优化与变更记录.md` | 417 | **已吸收存档** | 同上 |
+| `docs/plan-delta-v1.1.md` | 33 | 存根 | 不读，仅指向主文档 |
+
+> **归档口径（CH-491 决策）**：上表标「已吸收存档」的 5 份（合计 4,451 行）**本轮只做地位标注，不做物理移动**——保留历史优先。是否 `git mv` 到 `docs/archive/` 登记为 **CH-492** 再议。标「孤儿」的 2 份同理，先补引用还是先归档，一并归入 CH-492。
+
+运维侧另有两份细则，不在 `docs/` 下：**`ops/backup.md`**（备份介质与恢复演练细则，94 行）、**`ops/llm.md`**（本地 LLM 模型接入实操：选型 / 下载 GGUF / llama-server / 故障排查，170 行）；Windows 任务计划的安装 / 校验 / 卸载见 `ops/windows/install-doc2md-tasks.ps1`（280 行）。
+
+跟踪约定：契约变更、缺陷、更优做法一律按登记流写入方案 第十一章（当前编号至 `CH-492`，下一条自 `CH-493`），实测数字进第十二章并标注语料与测量方法；规格发生变化时同步主题篇章节与本文相应小节，并递增 `doc2md.PLAN_VERSION`（管线契约变化另递增 `PIPELINE_VERSION`；状态库结构变化另递增 `DB_VERSION`，CH-476 起为 `6`、CH-483 起为 `7`、CH-485 起为 `8`、CH-486 起为 `9`）。
 
 ## 验收与测试
 
@@ -224,13 +273,14 @@ push 面 `full-suite` 必须保持无矩阵且钉死 `3.12`、每个作业必须
 > 也成立，需为 `main` 打开「Require a pull request before merging」，那是改变日常工作流的决策项。
 
 ```bash
-pytest -m gate            # 红线层：六条 merge-gate + 低配机专项 + CH-469 两批安全/契约专项 + CH-473 第五轮 12 项 + CH-475 第六轮 7 项 + CH-476 第七轮 91 项 + CH-477 版本对账 4 项 + CH-478 批次① 有序列表端到端 4 项 + 批次② 等价门缩进敏感度 4 项 + CH-479 CI 版本矩阵口径 4 项 + CH-480 常驻资产同构 7 项 + CH-481 捕获档截断 8 项 + CH-482 代码块缩进重建 10 项 + CH-489 第十一轮 15 项 + CH-490 本机收口 7 项（全绿方可合并）
-                          # 当前 402 项（CH-490；构成与完整耗时历史见 docs/dev-plan.md 附录 F / 12.1。项数是硬口径，耗时只作历史）
+pytest -m gate            # 红线层：六条 merge-gate + 低配机专项 + CH-469 两批安全/契约专项 + CH-473 第五轮 12 项 + CH-475 第六轮 7 项 + CH-476 第七轮 91 项 + CH-477 版本对账 4 项 + CH-478 批次① 有序列表端到端 4 项 + 批次② 等价门缩进敏感度 4 项 + CH-479 CI 版本矩阵口径 4 项 + CH-480 常驻资产同构 7 项 + CH-481 捕获档截断 8 项 + CH-482 代码块缩进重建 10 项 + CH-488 复杂语料 36 项 + CH-489 第十一轮 15 项 + CH-490 本机收口 7 项 + CH-491 静态对账 2 项（全绿方可合并）
+                          # 当前 404 项（CH-491；构成与完整耗时历史见 docs/dev-plan.md 附录 F / 12.1。项数是硬口径，耗时只作历史）
                           # 耗时历史记录：Linux 沙箱轮次 72–110s、T8 优化后 53.0s、CH-469 本机（macOS arm64 / Py 3.15）28.7s、CH-473 62.7s、CH-475 30.0s、CH-476 33.9s、CH-477 33.25s / 31.98s、CH-478 批次① 31.54s、批次② 31.16s、CH-479 38.55s / 收口复跑 33.74s、CH-480 36.13s / 收口复跑 35.43s（新七条红线只做 plistlib 解析与 XML 读 DOM，差值属同机负载抖动）、CH-481 36.14s / 34.92s / 35.91s、CH-482 35.71s（`--junitxml` 35.36s）——项数是硬口径，耗时只作历史
 pytest tests/             # 全量（marker 实际取值：M0+M2 / M3 / M5 / M6c / M8 / M9a / DoD / PERF，见 pytest.ini）
 python3 tests/make_golden.py            # 重建黄金样本（输出目录随脚本位置，--golden 可覆盖）
 python3 tests/make_golden.py --force    # 强制重生成
 ```
+
 
 黄金样本集逐字节可复现（CH-442）：同一脚本跑两遍产物 sha256 全表一致，`MANIFEST.json`
 的哈希绑定可复核。分发包**不含** `tests/golden/bigfile.bin`（120MB，CH-443 已把
