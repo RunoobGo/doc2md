@@ -56,10 +56,15 @@ class Scheduler:
         """
         jobs: list[Job] = []
         with self.store.tx() as tx:
+            # CH-493（P-5）：整批共用一个删除基准。原实现每个作业各查一次
+            # `MAX(deletions.id)`，而同一 `BEGIN IMMEDIATE` 事务内该值不可能变
+            # （无其它写入者可提交）→ N 次冗余往返改为 1 次，取值逐条相同。
+            del_seq = int(tx.execute(
+                "SELECT COALESCE(MAX(id),0) AS m FROM deletions").fetchone()["m"])
             for doc_id, source_key, idem_key, source_path, mode in items:
                 jobs.append(self._submit_tx(tx, doc_id, source_key, idem_key,
                                             source_path=source_path, mode=mode,
-                                            force=force))
+                                            del_seq=del_seq, force=force))
         return jobs
 
     def _submit_tx(self, tx, doc_id: str, source_key: str = "",

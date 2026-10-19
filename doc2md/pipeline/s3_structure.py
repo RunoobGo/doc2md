@@ -229,14 +229,17 @@ def _strip_page_furniture(pages: list[RawPage], base_size: float) -> list[RawPag
     body_sizes: dict[float, int] = {}
     for page in pages:
         seen: set[str] = set()
+        height = page.height
         for ln in page.lines:
             t = (ln.text or "").strip()
             if not t:
                 continue
-            if not _in_margin(ln, page.height) and ln.size > 0:
-                key_size = round(ln.size, 1)
-                body_sizes[key_size] = body_sizes.get(key_size, 0) + max(1, len(t))
-            if not _in_margin(ln, page.height):
+            # CH-493（P-2）：`_in_margin` 每行只算一次——原实现对同一行算了两次
+            # （实测 pdf_09 的 125 行触发 250 次调用）。
+            if not _in_margin(ln, height):
+                if ln.size > 0:
+                    key_size = round(ln.size, 1)
+                    body_sizes[key_size] = body_sizes.get(key_size, 0) + max(1, len(t))
                 continue
             key = _furniture_key(t)
             if key and key not in seen:
@@ -246,19 +249,34 @@ def _strip_page_furniture(pages: list[RawPage], base_size: float) -> list[RawPag
                  if body_sizes else base_size)
     out: list[RawPage] = []
     for page in pages:
-        kept = []
+        kept: list = []
+        # CH-493（P-2）：仅在输入页自带直方图时，按**保留后**的行重算一份
+        # （与 `s1_parse._size_hist` 同口径）。原实现重建 RawPage 时丢掉
+        # `size_hist`，任何在本函数之后调 `modal_size` 的调用方都会静默退回全文档
+        # 逐行扫描，抵消 CH-492（P-1）的优化——目前两条生产路径都在本函数**之前**
+        # 调 `modal_size`，故属潜伏项而非现行缺陷。重算而非照搬原直方图：照搬会把
+        # 已剔除的页眉页脚字号算进正文口径。手工构造的页本来就没有直方图，不为它们
+        # 付这遍开销（实测 2400 行 ≈0.25ms，得不偿失）。
+        track_hist = bool(page.size_hist)
+        hist: dict[float, int] = {}
+        height = page.height
         for ln in page.lines:
             t = (ln.text or "").strip()
-            if t and _in_margin(ln, page.height):
+            if t and _in_margin(ln, height):
                 if _PAGE_NUM.fullmatch(t) or _PAGE_NUM_INLINE.search(t):
                     continue
-                if counts.get(_furniture_key(t), 0) >= 2 and (
+                key = _furniture_key(t)   # CH-493（P-2）：每行最多一次（原最多 3 次）
+                if counts.get(key, 0) >= 2 and (
                         ln.size <= 0
                         or ln.size < body_hint - 0.5
-                        or len(_furniture_key(t)) <= 24):
+                        or len(key) <= 24):
                     continue
             kept.append(ln)
-        out.append(RawPage(index=page.index, lines=kept, height=page.height))
+            if track_hist and ln.size:
+                k = round(ln.size, 1)
+                hist[k] = hist.get(k, 0) + max(1, len(t))
+        out.append(RawPage(index=page.index, lines=kept, height=page.height,
+                           size_hist=hist))
     return out
 
 
@@ -501,6 +519,10 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
     quote_lines: list = []                     # CH-476：与 quote_buf 同步的 Line
     row_buf: list[list[str]] = []
     row_x0: list[float] = []
+    # CH-493（P-3）：行首 x0 的**累加和**。原实现每追加一行都 `sum(row_x0)` 从零
+    # 重算整组均值 → O(行数²)（实测 8000 行表单的平方项 ≈30ms）。改为增量维护
+    # 后是 O(1)，且与 `sum()` 同为「从 0 起、按行序左折」，浮点结果逐位相同。
+    row_x0_sum = 0
     row_lines: list = []                       # 行缓冲（组不成表时退回段落用）
     quote_page = 0
     row_page = 0
@@ -553,7 +575,7 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
         quote_lines = []
 
     def flush_rows(as_table: bool) -> None:
-        nonlocal row_buf, row_x0, row_lines
+        nonlocal row_buf, row_x0, row_x0_sum, row_lines
         if not row_lines:
             return
         # CH-489：DOCX 的 `w:tbl` 是显式表格对象，单行表也必须是表格；
@@ -572,6 +594,7 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
                     _attach_link(blocks[-1], ln)
                 _mark_provenance(blocks[-1], (ln,))
         row_buf, row_x0, row_lines = [], [], []
+        row_x0_sum = 0
 
     for page in pages:
         layout = _page_layout(page)
@@ -752,11 +775,12 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
                 elif ln.table_start:
                     flush_rows(True)            # 新 DOCX 表格：即使首行 x0 相同也要切开
                     row_page = page.index
-                elif abs(ln.x0 - (sum(row_x0) / len(row_x0))) > _ROW_X0_TOL:
+                elif abs(ln.x0 - (row_x0_sum / len(row_x0))) > _ROW_X0_TOL:
                     flush_rows(True)            # 行首跳变：切组，各自判定
                     row_page = page.index
                 row_buf.append(list(ln.row))
                 row_x0.append(ln.x0)
+                row_x0_sum += ln.x0
                 row_lines.append(ln)
                 continue
             if row_buf:

@@ -310,11 +310,23 @@ def stitch_shards(shard_irs: list[IR], max_pages: int = 300,
     # 再由缝合阶段按片界重打，避免报告把片内块当分片问题筛出来。
     for b in blocks:
         b.flags.pop("shard_edge", None)
+    # CH-493（P-8）：`_owner` 是线性扫 spans，原实现每个块调 1~2 次 → O(块数×片数)
+    # （千页文档 ~34 片 × 十万块 = 数百万次比较）。块按页升序、同页块密集，按页
+    # 记忆化后最坏退化为「每页一次线性扫」；spans 在本循环内不变，缓存安全。
+    _owner_cache: dict[int, int] = {}
+
+    def owner(page: int) -> int:
+        v = _owner_cache.get(page)
+        if v is None:
+            v = _owner(page, spans)
+            _owner_cache[page] = v
+        return v
+
     while i < len(blocks):
         b = blocks[i]
         nxt = blocks[i + 1] if i + 1 < len(blocks) else None
-        own = _owner(b.page or 0, spans)
-        cross = nxt is not None and own >= 0 and own != _owner(nxt.page or 0, spans)
+        own = owner(b.page or 0)
+        cross = nxt is not None and own >= 0 and own != owner(nxt.page or 0)
         if cross:
             seams += 1
             b.flags["shard_edge"] = True

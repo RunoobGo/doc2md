@@ -474,7 +474,15 @@ def delete_source(store: Store, source_key: str, actor: str, root: Path | None =
             "artifact removal incomplete; rows kept for retry",
             detail={"source_key": source_key, "failed": len(failed),
                     "removed": len(removed)})
-    by_doc = {d: [p for p in removed if d in Path(p).name] for d in ids}
+    # CH-493（P-4）：产物按 doc 归因。原实现内层 `Path(p).name` 对每个 doc_id
+    # 都重建一遍 → O(D×F) 次路径构造（D=100 / F=300 时 3 万次，约 30ms 纯开销）。
+    # 改为先构造一次 name，再按 removed 原序一次扫描填充，逐 doc 的列表顺序不变。
+    by_doc: dict[str, list] = {d: [] for d in ids}
+    for p in removed:
+        nm = Path(p).name
+        for d in ids:
+            if d in nm:
+                by_doc[d].append(p)
     for d in ids:
         delete_doc(store, d, actor, None,
                    files_removed=(by_doc.get(d, []), []),

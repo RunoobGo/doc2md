@@ -368,10 +368,17 @@ def create_app(cfg: dict | None = None, root: Path | None = None,
             out = enqueue_many(sched, targets, mode=mode,
                                idem_keys=[_idem_for(f) for f in targets],
                                cfg=cur(), force=force)
-            for it in out:
-                if not it["attached"]:
-                    emit(store, "job_queued", it["doc_id"], it["job_id"],
-                          {"source": "api"}, logw())
+            # CH-493（P-10）：整批 job_queued 事件并入一个写事务。`submit_many`
+            # 已经把 N 次任务行提交压成 1 次，事件侧却仍是每件一次
+            # `BEGIN IMMEDIATE` + COMMIT + flush（目录投递 N 可达数百）。
+            # 日志行仍逐条落盘（jsonl 是运维面 at-least-once、先于 DB 提交），
+            # 顺序与内容不变；DB 侧改为整批原子提交。
+            fresh = [it for it in out if not it["attached"]]
+            if fresh:
+                with store.tx() as tx:
+                    for it in fresh:
+                        emit(store, "job_queued", it["doc_id"], it["job_id"],
+                             {"source": "api"}, logw(), tx=tx)
             return jsonify({"jobs": out, "mode": "queued",
                             "consume_with": "doc2md work"}), 202
 

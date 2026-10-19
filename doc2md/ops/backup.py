@@ -89,10 +89,46 @@ def _replace_retry(src: Path, dst: Path, *, attempts: int = 5,
             time.sleep(delay)
 
 
+def _lock_holder_dead(p: Path) -> bool:
+    """锁文件里记的持有者 PID 是否**确证**已不在（CH-493 / R-A1）。
+
+    `stale_seconds` 默认 24h 是「持有者崩了但锁还在」的兜底，代价是崩溃后长达
+    24h 内所有 `backup` / `backup restore` 一律被判 `BackupBusy`（本机实测：
+    PID 44418 的遗留锁在 37 分钟后仍挡住两条 CH-483 用例）。O_EXCL 锁没有
+    「持有者存活」信息，只能靠 mtime 猜，所以猜得很保守。
+
+    这里补一个**确证**口径：锁文件首字段就是持有者 PID，读出来做一次存活探测。
+    只有在「读得到 PID 且该 PID 确证不存在」时才回收锁；任何无法确证的情形
+    （空文件 / 格式不符 / 平台不支持探测 / 权限不足）一律返回 False，退回原
+    mtime 口径——宁可多等，不可误抢活锁。
+    """
+    try:
+        raw = p.read_text(encoding="ascii", errors="replace")
+    except OSError:
+        return False
+    token = raw.split(" ", 1)[0].strip()
+    if not token.isdigit():
+        return False                       # 旧格式 / 空锁：无从确证，退回 mtime
+    pid = int(token)
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)                    # 探测存在性，不发信号
+    except ProcessLookupError:
+        return True                        # 确证：进程已不在
+    except (OSError, ValueError):
+        return False                       # 权限不足 / 平台不支持：无法确证
+    return False                           # 进程还在 → 锁有效
+
+
 @contextlib.contextmanager
 def backup_lock(directory: str | Path, name: str = "backup.lock",
                 stale_seconds: float = 24 * 3600):
-    """跨平台的备份互斥锁（O_EXCL 标记文件；进程崩溃后按 mtime 过期）。"""
+    """跨平台的备份互斥锁（O_EXCL 标记文件；进程崩溃后按 mtime 过期）。
+
+    CH-493（R-A1）：mtime 过期之外再加一道「持有者 PID 确证已死」的回收口径，
+    崩溃遗留锁不必等满 `stale_seconds`。见 `_lock_holder_dead`。
+    """
     d = Path(directory)
     d.mkdir(parents=True, exist_ok=True)
     p = d / name
@@ -108,7 +144,7 @@ def backup_lock(directory: str | Path, name: str = "backup.lock",
                 age = time.time() - p.stat().st_mtime
             except OSError:
                 age = 0.0
-            if age > stale_seconds:
+            if age > stale_seconds or _lock_holder_dead(p):
                 p.unlink(missing_ok=True)
                 continue
             raise BackupBusy(f"backup already running: {p}")
@@ -436,11 +472,17 @@ class BackupPlan:
                     continue
                 rows.append((p, stamp, st.st_size))
         removed: list[Path] = []
-        for p, stamp, _size in list(rows):
+        # CH-493（P-7）：原实现 `rows.remove((p, stamp, size))` 是**按值**匹配的
+        # O(n) 扫描，套在循环里成 O(n²)；且按值匹配在两份元数据相同时会删错行。
+        # 改为一次遍历重建保留集，顺序与内容都不变。
+        keep: list[tuple] = []
+        for p, stamp, size in rows:
             if stamp < cutoff:
                 p.unlink(missing_ok=True)
                 removed.append(p)
-                rows.remove((p, stamp, _size))
+            else:
+                keep.append((p, stamp, size))
+        rows[:] = keep
         # 先按时间从旧到新淘汰；至少留一份，避免单份超限时把唯一副本删掉。
         rows.sort(key=lambda x: x[1])
         total = sum(size for _p, _stamp, size in rows)

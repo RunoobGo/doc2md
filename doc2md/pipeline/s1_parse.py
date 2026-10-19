@@ -209,26 +209,31 @@ def read_pdf(path: str | Path, page_span: tuple[int, int] | None = None,
     out: list[RawPage] = []
     # CH-469：整读且不分块时不再为「数页数」单独 open 一次——那次 open 与首个
     # 分块的 open 重复解析 xref/trailer（320 页 / chunk=50 时共 8 次打开）。
-    # 分块模式仍需预先知道页数来算片边界，保持原口径。
-    lazy_total = page_span is None and not (chunk_pages and chunk_pages > 0)
-    total = 0 if lazy_total else _pdf_page_count(path)
+    # CH-493（P-9）：分块模式同样懒取页数——首个分块的 handle 上就能读到
+    # `len(pdf.pages)`，没必要先单独 open 一次只为数页（320 页 / chunk=32：
+    # 11 次开 → 10 次开，重复解析的 xref/trailer 随页数线性变重）。
+    # 唯一必须**前置**页数的是退化 page_span（上界 ≤ 下界），那里保持原口径：
+    # 不开文件直接返回空。
+    start, span_end = 0, None
     if page_span:
-        start, end = max(0, page_span[0]), min(total, page_span[1])
-    else:
-        start, end = 0, total
-    if not lazy_total and end <= start:
-        return out
-    step = chunk_pages if chunk_pages and chunk_pages > 0 else (end - start)
-    lo_range = range(start, end, step) if not lazy_total else range(0, 1)
-
-    for lo in lo_range:
-        hi = min(lo + step, end)
+        start, span_end = max(0, page_span[0]), page_span[1]
+        if span_end <= start:
+            return out
+    total, end = -1, 0
+    step = chunk_pages if chunk_pages and chunk_pages > 0 else 0
+    lo = start
+    while total < 0 or lo < end:
         # 每个分块独立 open/close：pdfminer 的 LRUCachingObjectCache / 页对象
         # 随 PDF 实例一起释放，驻留峰值从「整本文档」降为「一个分块」。
         with _open_source(lambda: pdfplumber.open(str(path)), path, "pdf") as pdf:
-            if lazy_total:              # 单片路径：页数在同一个 handle 上读出
+            if total < 0:               # 页数在同一个 handle 上读出
                 total = len(pdf.pages)
-                lo, hi = 0, total
+                end = total if span_end is None else min(total, span_end)
+                if end <= start:
+                    break
+                if not step:
+                    step = end - start
+            hi = min(lo + step, end)
             for i in range(lo, hi):
                 page = pdf.pages[i]
                 chars = page.chars or []
@@ -245,6 +250,7 @@ def read_pdf(path: str | Path, page_span: tuple[int, int] | None = None,
                 rp.size_hist = _size_hist(lines)   # CH-492（P-1）：单趟直方图
                 out.append(rp)
                 page.flush_cache()
+        lo = hi                            # CH-493（P-9）：推进到下一个分块
     return out
 
 
@@ -402,10 +408,8 @@ def _attach_links(lines: list[Line], geoms: list[tuple[float, float]], page) -> 
                 break
 
 
-def _pdf_page_count(path: str | Path) -> int:
-    import pdfplumber
-    with _open_source(lambda: pdfplumber.open(str(path)), path, "pdf") as pdf:
-        return len(pdf.pages)
+# CH-493（P-9）：删去 `_pdf_page_count`。页数改由首个分块的 handle 读取后，
+# 该函数再无调用点（`tests/test_ch491_doc_sync.py` 的死代码红线随即判出）。
 
 
 def _char_index(chars: list[dict]) -> tuple[list[int], list[float]]:

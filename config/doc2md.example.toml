@@ -20,8 +20,8 @@ offline_assert = true                  # NFR-1：转换期出站连接即抛 Off
 
 [s1]
 chunk_pages = 32                       # CH-447：分块解析驻留上限（0 = 整本一次读完）
-                                       # 8GB Win11 / 16GB Mac mini 建议 32；320 页样本
-                                       # 峰值驻留实测 1025MB → 177MB
+                                       # 8GB Win11 / 16GB Mac mini 建议 32；320 页样本 / 单进程 /
+                                       # ru_maxrss 三档：1290MB → 1025MB（0）→ 176MB（32，默认档）
 legacy_doc_backend = "auto"            # CH-487：.doc → .docx（auto/libreoffice/word/none）
 legacy_doc_timeout_s = 120             # 外部转换超时；超时按 E4151 拒收
 

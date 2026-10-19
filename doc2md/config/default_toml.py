@@ -18,7 +18,9 @@ offline_assert = true                  # 出站网络断言（NFR-离线纪律�
 
 [s1]
 chunk_pages = 32                       # CH-447：每重新打开一次文档最多解析多少页（0 = 整本一次读完）
-                                       # 32 页 ≈ 180MB 峰值驻留（实测 320 页样本 1025MB → 177MB），
+                                       # 320 页样本 / 单进程 / ru_maxrss 三档：1290MB（改造前整本一次
+                                       # 读完）→ 1025MB（chunk_pages=0）→ 176MB（chunk_pages=32，默认档）；
+                                       # 早期登记的 177MB 与本轮复测 176MB 属同量级抖动，统一取 176。
                                        # 8GB 内存的 Win11 与 16GB Mac mini 同档安全
 legacy_doc_backend = "auto"            # CH-487：.doc → .docx 后端（auto/libreoffice/word/none）
 legacy_doc_timeout_s = 120             # 单次外部转换超时；超时按 E4151 拒收
