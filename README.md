@@ -1,6 +1,6 @@
 # Doc2md
 
-文本型 PDF / DOCX / 旧版 DOC → Markdown 的**离线**转换管线（v2.12.0）。
+文本型 PDF / DOCX / 旧版 DOC → Markdown 的**离线**转换管线（v2.12.1）。
 单机、无出站网络、无云端依赖；LLM 修补助手同样只连本地 `127.0.0.1`。
 
 ## 安装
@@ -201,7 +201,7 @@ Windows 任务计划不捕获标准输出，日志目录里没有 `launchd-*` �
 
 ## 文档地图
 
-`docs/` 现有 **22 份 / 14,035 行**（`wc -l` 实测，CH-493；CH-491 时为 20 份 / 12,621 行，增量即 CH-492 两份实施规格与 dev-plan 自身增行）。此前本文只索引 `docs/` 里的 2 份（`dev-plan.md` 与 `plan-delta-v1.1.md`），其余 **20 份**无任何入口——查规格的人无从判断「`review-round8-CH-483.md` 是权威还是历史」。下表按两个角度给出完整地图；**地位列是判读依据，不是推荐阅读顺序**。
+`docs/` 现有 **22 份 / 14,074 行**（`wc -l` 实测，CH-494；CH-491 时为 20 份 / 12,621 行，增量即 CH-492 两份实施规格与 dev-plan 自身增行）。此前本文只索引 `docs/` 里的 2 份（`dev-plan.md` 与 `plan-delta-v1.1.md`），其余 **20 份**无任何入口——查规格的人无从判断「`review-round8-CH-483.md` 是权威还是历史」。下表按两个角度给出完整地图；**地位列是判读依据，不是推荐阅读顺序**。
 
 ### 表一：按问题找权威
 
@@ -219,7 +219,7 @@ Windows 任务计划不捕获标准输出，日志目录里没有 `launchd-*` �
 
 | 文件 | 行数 | 地位 | 什么时候读 |
 | --- | --- | --- | --- |
-| **`docs/dev-plan.md`** | 2,007 | **唯一权威** | 任何时候要查规格。主题篇为当前有效规格（正文不含变更编号），登记篇记录变更与证据 |
+| **`docs/dev-plan.md`** | 2,046 | **唯一权威** | 任何时候要查规格。主题篇为当前有效规格（正文不含变更编号），登记篇记录变更与证据 |
 | `docs/spec-ch492-p1-a1.md` | 1,000 | 过程存档（CH-492 实施规格） | 要查 P-1 单趟字号直方图 / A-1 api↔worker 解耦的原始论证与等价性实测时（**代码已落地**，勿据以重复实施） |
 | `docs/spec-ch492-q2-deferred.md` | 274 | 过程存档 · **受限待办** | 要查 CH-492 主动搁置项与其受限原因时（同样勿据以实施） |
 | `docs/pm-review-CH-491.md` | 258 | 过程存档（产品审查） | 要查「功能缺口 F-01…F-14 / 文档失真 D-01…D-20」的清单与验收口径时 |
@@ -246,7 +246,7 @@ Windows 任务计划不捕获标准输出，日志目录里没有 `launchd-*` �
 
 运维侧另有两份细则，不在 `docs/` 下：**`ops/backup.md`**（备份介质与恢复演练细则，94 行）、**`ops/llm.md`**（本地 LLM 模型接入实操：选型 / 下载 GGUF / llama-server / 故障排查，170 行）；Windows 任务计划的安装 / 校验 / 卸载见 `ops/windows/install-doc2md-tasks.ps1`（280 行）。
 
-跟踪约定：契约变更、缺陷、更优做法一律按登记流写入方案 第十一章（当前编号至 `CH-492`，下一条自 `CH-493`），实测数字进第十二章并标注语料与测量方法；规格发生变化时同步主题篇章节与本文相应小节，并递增 `doc2md.PLAN_VERSION`（管线契约变化另递增 `PIPELINE_VERSION`；状态库结构变化另递增 `DB_VERSION`，CH-476 起为 `6`、CH-483 起为 `7`、CH-485 起为 `8`、CH-486 起为 `9`）。
+跟踪约定：契约变更、缺陷、更优做法一律按登记流写入方案 第十一章（当前编号至 `CH-494`，下一条自 `CH-495`），实测数字进第十二章并标注语料与测量方法；规格发生变化时同步主题篇章节与本文相应小节，并递增 `doc2md.PLAN_VERSION`（管线契约变化另递增 `PIPELINE_VERSION`；状态库结构变化另递增 `DB_VERSION`，CH-476 起为 `6`、CH-483 起为 `7`、CH-485 起为 `8`、CH-486 起为 `9`）。
 
 ## 验收与测试
 
@@ -262,11 +262,11 @@ Windows 任务计划不捕获标准输出，日志目录里没有 `launchd-*` �
 
 跨版本覆盖分两套工作流（CH-479）：上面的 `ci.yml` 是 **push 面**，`full-suite` 只在 `3.12` 单档跑一次
 （红线层本就是三档矩阵，把全量也扩成三档会让每次推送多两条 30 分钟腿，而覆盖增量只落在非红线的
-551 项用例上，CH-480 后为 560、CH-481 后为 563、CH-482 后为 567 项）；**周期面** `.github/workflows/ci-full-matrix.yml` 每周一 02:17 UTC（另有
+551 项用例上，CH-480 后为 560、CH-481 后为 563、CH-482 后为 567、CH-494 后为 611 项）；**周期面** `.github/workflows/ci-full-matrix.yml` 每周一 02:17 UTC（另有
 `workflow_dispatch` 供取证）用 3.11/3.12/3.13 三档跑全量 + 黄金逐字节复现 + `doctor`，补上这些非红线项的
 跨版本空白。这个分工由 `tests/test_ch479_ci_matrix.py` 的四条红线钉住：两工作流的版本集合必须相等、
 push 面 `full-suite` 必须保持无矩阵且钉死 `3.12`、每个作业必须带 `timeout-minutes`、周期腿不得挂
-`push`/`pull_request` 触发。周期腿首证 = run `39032817663`（手动 `workflow_dispatch`，三档各 `811 passed`，含黄金逐字节复现与 `doctor` 自检），push 面 = run `39032796293`（三档各 `260 passed, 551 deselected` + `811 passed` 全量）；上一轮（CH-481）push 面 = run `39041920410`（三档各 `275 passed, 563 deselected`，全量 `838 passed` 干净退出）；上一轮（CH-482）push 面 = run `39043948338`（三档各 `285 passed, 567 deselected`，全量 `852 passed` 干净退出，`doctor` 打 `2.5.0`）；最新一轮（CH-483）push 面 = run `39050319814`（三档各 `308 passed, 575 deselected`，全量 `883 passed` 干净退出，`doctor` 打 `2.6.0`）；CH-484 push 面 = run `39092382196`（三档各 `311 passed, 575 deselected`，全量 `886 passed` 干净退出，回填 run `39092772664`）；CH-485 本机 gate **339 passed / 0 skipped（34.63s）**、全量 **920 passed / 0 skipped（71.69s）**、ruff 全绿、doctor 退 0（`pipeline 2.7.0`）；远端 CI run `39096948274` 五作业全绿（lint + 3× merge-gate + full-suite）。CH-486 Windows 本机 gate **344 项 = 343 passed / 1 平台 skip（47.46s）**、全量 **934 项 = 926 passed / 8 平台 skip（118.28s）**、ruff 全绿、doctor 退 0（`pipeline 2.9.1`）；Windows 平台 skip 均为 POSIX 专有语义（chmod/tzset/waitpid/sendmsg/symlink/ps sampler），由 `is_private`/平台分支测试补位。远端 CI run `39106866387` **六作业全绿**（lint + 3× merge-gate + full-suite + windows-suite；首轮 `39106420181` 仅 Windows checkout 因长路径失败，`7b99d00` 启用 `core.longpaths` 后复跑全绿）。CH-488 本机收口 gate **380（379 passed / 1 platform skip）**、全量 **976（968 passed / 8 platform skip）**；CH-489 本机 gate **395 项 = 394 passed / 1 platform skip（48.60s）**、全量 **991 项 = 983 passed / 8 platform skip（124.03s）**；CH-490 本机 gate **402 项 = 401 passed / 1 platform skip（48.35s）**、全量 **998 项 = 990 passed / 8 platform skip（125.11s）**、ruff 全绿、doctor 退 0（`pipeline 2.12.0`）。
+`push`/`pull_request` 触发。周期腿首证 = run `39032817663`（手动 `workflow_dispatch`，三档各 `811 passed`，含黄金逐字节复现与 `doctor` 自检），push 面 = run `39032796293`（三档各 `260 passed, 551 deselected` + `811 passed` 全量）；上一轮（CH-481）push 面 = run `39041920410`（三档各 `275 passed, 563 deselected`，全量 `838 passed` 干净退出）；上一轮（CH-482）push 面 = run `39043948338`（三档各 `285 passed, 567 deselected`，全量 `852 passed` 干净退出，`doctor` 打 `2.5.0`）；最新一轮（CH-483）push 面 = run `39050319814`（三档各 `308 passed, 575 deselected`，全量 `883 passed` 干净退出，`doctor` 打 `2.6.0`）；CH-484 push 面 = run `39092382196`（三档各 `311 passed, 575 deselected`，全量 `886 passed` 干净退出，回填 run `39092772664`）；CH-485 本机 gate **339 passed / 0 skipped（34.63s）**、全量 **920 passed / 0 skipped（71.69s）**、ruff 全绿、doctor 退 0（`pipeline 2.7.0`）；远端 CI run `39096948274` 五作业全绿（lint + 3× merge-gate + full-suite）。CH-486 Windows 本机 gate **344 项 = 343 passed / 1 平台 skip（47.46s）**、全量 **934 项 = 926 passed / 8 平台 skip（118.28s）**、ruff 全绿、doctor 退 0（`pipeline 2.9.1`）；Windows 平台 skip 均为 POSIX 专有语义（chmod/tzset/waitpid/sendmsg/symlink/ps sampler），由 `is_private`/平台分支测试补位。远端 CI run `39106866387` **六作业全绿**（lint + 3× merge-gate + full-suite + windows-suite；首轮 `39106420181` 仅 Windows checkout 因长路径失败，`7b99d00` 启用 `core.longpaths` 后复跑全绿）。CH-488 本机收口 gate **380（379 passed / 1 platform skip）**、全量 **976（968 passed / 8 platform skip）**；CH-489 本机 gate **395 项 = 394 passed / 1 platform skip（48.60s）**、全量 **991 项 = 983 passed / 8 platform skip（124.03s）**；CH-490 本机 gate **402 项 = 401 passed / 1 platform skip（48.35s）**、全量 **998 项 = 990 passed / 8 platform skip（125.11s）**、ruff 全绿、doctor 退 0（`pipeline 2.12.0`）。CH-493（远端源码轮）出口数字登记在方案第十一章对应行（gate 404 全绿、全量 1015 项 0 失败 0 错误）；其推送 run `39336292727` 的 `windows-suite` 腿两度 KeyboardInterrupt——`os.kill(pid, 0)` 在 Windows 上实为向进程组广播 Ctrl+C（bpo-14484），登记为 X-18。CH-494 根治后本沙箱 Linux / Python 3.11.1 实测：gate **419 项 = 419 passed / 0 skipped（收口复跑 126.31s；首次复跑 127.75s 曾因 `PLAN_VERSION` 升位与文档锚点改写之间的竞态残留 1 条 `test_plan_version_three_way_reconciliation` 失败，非代码缺陷，详见方案 §8.1）**、全量 **1030 项 = 1027 passed / 3 skipped / 0 failed（245.39s）**、`ruff check doc2md/ tests/` 全绿（3 个 skip 均为平台 / 环境预期：2 条 Windows junction 语义 + 1 条 LibreOffice 未安装）；CH-494 修复后的远端验证 run 待回填。
 > 现状（CH-468 起）：仓库已公开，`main` 分支保护已配置——`merge-gate (3.11/3.12/3.13)` 为**必需检查**，
 > 三个 gate 任一失败即禁止合并（`full-suite` 因 `needs` 同样被阻断）。验收：故意失败的 PR #1 被
 > `mergeStateStatus=BLOCKED` 拦下。另有本地 pre-push 钩子双保险（见「本地红线兜底」）。
@@ -275,8 +275,8 @@ push 面 `full-suite` 必须保持无矩阵且钉死 `3.12`、每个作业必须
 > 也成立，需为 `main` 打开「Require a pull request before merging」，那是改变日常工作流的决策项。
 
 ```bash
-pytest -m gate            # 红线层：六条 merge-gate + 低配机专项 + CH-469 两批安全/契约专项 + CH-473 第五轮 12 项 + CH-475 第六轮 7 项 + CH-476 第七轮 91 项 + CH-477 版本对账 4 项 + CH-478 批次① 有序列表端到端 4 项 + 批次② 等价门缩进敏感度 4 项 + CH-479 CI 版本矩阵口径 4 项 + CH-480 常驻资产同构 7 项 + CH-481 捕获档截断 8 项 + CH-482 代码块缩进重建 10 项 + CH-488 复杂语料 36 项 + CH-489 第十一轮 15 项 + CH-490 本机收口 7 项 + CH-491 静态对账 2 项（全绿方可合并）
-                          # 当前 404 项（CH-491；构成与完整耗时历史见 docs/dev-plan.md 附录 F / 12.1。项数是硬口径，耗时只作历史）
+pytest -m gate            # 红线层：六条 merge-gate + 低配机专项 + CH-469 两批安全/契约专项 + CH-473 第五轮 12 项 + CH-475 第六轮 7 项 + CH-476 第七轮 91 项 + CH-477 版本对账 4 项 + CH-478 批次① 有序列表端到端 4 项 + 批次② 等价门缩进敏感度 4 项 + CH-479 CI 版本矩阵口径 4 项 + CH-480 常驻资产同构 7 项 + CH-481 捕获档截断 8 项 + CH-482 代码块缩进重建 10 项 + CH-488 复杂语料 36 项 + CH-489 第十一轮 15 项 + CH-490 本机收口 7 项 + CH-491 静态对账 2 项 + CH-494 X-18 回归 15 项（全绿方可合并）
+                          # 当前 419 项（CH-494；构成与完整耗时历史见 docs/dev-plan.md 附录 F / 12.1。项数是硬口径，耗时只作历史）
                           # 耗时历史记录：Linux 沙箱轮次 72–110s、T8 优化后 53.0s、CH-469 本机（macOS arm64 / Py 3.15）28.7s、CH-473 62.7s、CH-475 30.0s、CH-476 33.9s、CH-477 33.25s / 31.98s、CH-478 批次① 31.54s、批次② 31.16s、CH-479 38.55s / 收口复跑 33.74s、CH-480 36.13s / 收口复跑 35.43s（新七条红线只做 plistlib 解析与 XML 读 DOM，差值属同机负载抖动）、CH-481 36.14s / 34.92s / 35.91s、CH-482 35.71s（`--junitxml` 35.36s）——项数是硬口径，耗时只作历史
 pytest tests/             # 全量（marker 实际取值：M0+M2 / M3 / M5 / M6c / M8 / M9a / DoD / PERF，见 pytest.ini）
 python3 tests/make_golden.py            # 重建黄金样本（输出目录随脚本位置，--golden 可覆盖）
