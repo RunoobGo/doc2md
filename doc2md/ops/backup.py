@@ -89,6 +89,61 @@ def _replace_retry(src: Path, dst: Path, *, attempts: int = 5,
             time.sleep(delay)
 
 
+def _pid_alive_windows(pid: int) -> bool | None:
+    """Windows 原生活性探测（OpenProcess + GetExitCodeProcess）。
+
+    与 `_pid_alive` 的 POSIX 分支同口径：True=存活、False=确证已不在、
+    None=无法确证（`ERROR_ACCESS_DENIED`：进程存在但无权查询；或任何
+    意外异常——一律保守，绝不把「查不了」当成「已死」）。
+    """
+    try:
+        import ctypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        STILL_ACTIVE = 259
+        k32.OpenProcess.restype = ctypes.c_void_p     # 句柄：默认 c_int 会截断
+        k32.OpenProcess.argtypes = (ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong)
+        k32.GetExitCodeProcess.argtypes = (ctypes.c_void_p,
+                                           ctypes.POINTER(ctypes.c_ulong))
+        h = k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not h:
+            # 5 = ERROR_ACCESS_DENIED：进程在、但查询权限不足 → 无法确证
+            return None if ctypes.get_last_error() == 5 else False
+        try:
+            code = ctypes.c_ulong(0)
+            if not k32.GetExitCodeProcess(h, ctypes.byref(code)):
+                return None
+            return code.value == STILL_ACTIVE
+        finally:
+            k32.CloseHandle(h)
+    except Exception:                                # noqa: BLE001 — 探测失败一律保守
+        return None
+
+
+def _pid_alive(pid: int) -> bool | None:
+    """PID 活性探测。True=存活 / False=确证已不在 / None=无法确证。
+
+    Windows 分支**不能**用 `os.kill(pid, 0)`：CPython 的 Windows 实现里
+    `signal.CTRL_C_EVENT` 的整数值就是 0，与 POSIX 的「signal 0」在 C 层
+    混同（bpo-14484，2012 年至今未修）——`posixmodule.c` 的
+    `os_kill_impl` 命中 `sig == CTRL_C_EVENT` 分支，走
+    `GenerateConsoleCtrlEvent(0, pid)`：**向 pid 所在进程组广播 Ctrl+C**，
+    与「探测存在性、不发信号」的语义相反，可能误杀同组无关进程
+    （CH-493 的备份锁回收即因此在 CI Windows 腿两度引发
+    KeyboardInterrupt，见 CH-494 / X-18）。故 Windows 走
+    `_pid_alive_windows` 的原生句柄探测。
+    """
+    if os.name == "nt":
+        return _pid_alive_windows(pid)
+    try:
+        os.kill(pid, 0)                    # POSIX：signal 0 = 存在性探测，不发信号
+    except ProcessLookupError:
+        return False                       # 确证：进程已不在
+    except (OSError, ValueError):
+        return None                        # 权限不足等：无法确证
+    return True
+
+
 def _lock_holder_dead(p: Path) -> bool:
     """锁文件里记的持有者 PID 是否**确证**已不在（CH-493 / R-A1）。
 
@@ -97,10 +152,10 @@ def _lock_holder_dead(p: Path) -> bool:
     PID 44418 的遗留锁在 37 分钟后仍挡住两条 CH-483 用例）。O_EXCL 锁没有
     「持有者存活」信息，只能靠 mtime 猜，所以猜得很保守。
 
-    这里补一个**确证**口径：锁文件首字段就是持有者 PID，读出来做一次存活探测。
-    只有在「读得到 PID 且该 PID 确证不存在」时才回收锁；任何无法确证的情形
-    （空文件 / 格式不符 / 平台不支持探测 / 权限不足）一律返回 False，退回原
-    mtime 口径——宁可多等，不可误抢活锁。
+    这里补一个**确证**口径：锁文件首字段就是持有者 PID，读出来做一次存活探测
+    （`_pid_alive`）。只有在「读得到 PID 且该 PID 确证不存在」时才回收锁；任何
+    无法确证的情形（空文件 / 格式不符 / 平台不支持探测 / 权限不足）一律返回
+    False，退回原 mtime 口径——宁可多等，不可误抢活锁。
     """
     try:
         raw = p.read_text(encoding="ascii", errors="replace")
@@ -112,13 +167,10 @@ def _lock_holder_dead(p: Path) -> bool:
     pid = int(token)
     if pid <= 0:
         return False
-    try:
-        os.kill(pid, 0)                    # 探测存在性，不发信号
-    except ProcessLookupError:
-        return True                        # 确证：进程已不在
-    except (OSError, ValueError):
-        return False                       # 权限不足 / 平台不支持：无法确证
-    return False                           # 进程还在 → 锁有效
+    alive = _pid_alive(pid)
+    if alive is None:
+        return False                       # 无法确证（权限不足 / 探测失败）：退回 mtime
+    return not alive                       # 确证已不在 → 可回收
 
 
 @contextlib.contextmanager

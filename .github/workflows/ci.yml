@@ -101,10 +101,16 @@ jobs:
           pip install -e ".[dev]"
 
       - name: Merge-gates (Windows)
-        run: python -m pytest -m gate -q --durations=10
+        # 与 Linux merge-gate / 头注释口径一致（-vv：addopts 的 -q 需 +2 级才逐条打印）。
+        # CH-494（X-18）：此前此步与 full-suite 均为 -q，挂死时只剩进度点无法定位用例。
+        run: python -m pytest -m gate -vv --durations=10
 
       - name: Full suite (Windows)
-        run: python -m pytest -q --durations=15
+        # CH-494（X-18）：-q 在挂死/信号中断时只剩进度点，无法定位是哪个用例
+        # （X-16/X-17 两轮挂死均因此多花数轮 CI 才锁定退出阶段）。-vv 逐条
+        # 打印测试名，--full-trace 让 KeyboardInterrupt 打出完整栈而非一行
+        # threading.py:355。日志体积换可定位性，全量腿值得。
+        run: python -m pytest -vv --durations=15 --full-trace
 
       - name: doctor self-check (Windows)
         run: |
