@@ -20,6 +20,14 @@ X-18。CH-494 把探测收进 `_pid_alive` / `_pid_alive_windows`
   口径，逐场景钉死（死 PID / 活 PID / 权限不足 / 非数字 / 空文件 /
   非正 PID），以及 `backup_lock` 在持有者确证已死时可抢锁、无法确证时
   保持 `BackupBusy`。
+
+平台教训（CH-494 第一轮远端实证）：行为矩阵一律在 `_pid_alive` 分派
+边界打桩（平台无关）。早期版本曾直接 monkeypatch `os.kill`——在
+Windows 上被 `_pid_alive` 的 `nt` 分支整体绕过，对 PID 1 的真实
+OpenProcess 探测返回「确证已不在」而断言翻车（远端 run `39404094953`
+的 windows-suite 腿 1 failed / 418 passed，非 X-18 复发）。
+`os.kill` 级语义由固定 `os.name` 的 `test_pid_alive_posix_semantics`
+覆盖，不在此重复。
 """
 from __future__ import annotations
 
@@ -101,34 +109,28 @@ def _write_lock(p: Path, pid: int) -> None:
 
 
 def test_lock_holder_dead_confirms_dead_pid(tmp_path, monkeypatch):
-    """确证已不在（ProcessLookupError）→ 可回收。"""
+    """确证已不在（探测 False）→ 可回收。"""
     lock = tmp_path / "backup.lock"
     _write_lock(lock, 999999)
 
-    def fake_kill(pid, sig):
-        raise ProcessLookupError(pid)
-
-    monkeypatch.setattr(os, "kill", fake_kill)
+    monkeypatch.setattr(backup, "_pid_alive", lambda pid: False)
     assert backup._lock_holder_dead(lock) is True
 
 
 def test_lock_holder_dead_keeps_lock_when_holder_alive(tmp_path, monkeypatch):
-    """持有者存活 → 锁有效，不得回收。"""
+    """持有者存活（探测 True）→ 锁有效，不得回收。"""
     lock = tmp_path / "backup.lock"
     _write_lock(lock, os.getpid())
-    monkeypatch.setattr(os, "kill", lambda pid, sig: None)
+    monkeypatch.setattr(backup, "_pid_alive", lambda pid: True)
     assert backup._lock_holder_dead(lock) is False
 
 
 def test_lock_holder_dead_is_conservative_on_permission_error(tmp_path, monkeypatch):
-    """权限不足（EPERM）在 POSIX 上恰恰说明进程**存在**——必须保守。"""
+    """无法确证（探测 None：POSIX EPERM / Windows ACCESS_DENIED 或异常）→ 保守。"""
     lock = tmp_path / "backup.lock"
     _write_lock(lock, 1)
 
-    def fake_kill(pid, sig):
-        raise PermissionError(pid)
-
-    monkeypatch.setattr(os, "kill", fake_kill)
+    monkeypatch.setattr(backup, "_pid_alive", lambda pid: None)
     assert backup._lock_holder_dead(lock) is False
 
 
