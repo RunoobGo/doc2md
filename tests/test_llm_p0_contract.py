@@ -8,6 +8,8 @@
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from doc2md.ir import IR, Block
@@ -164,7 +166,9 @@ def test_llm_stats_separates_accepted_effective_noop():
 
 def test_payload_carries_v25_schema_and_contract():
     blocks = [Block(id="p1", type="paragraph", text="前一段没有句号"),
-              Block(id="p2", type="paragraph", text="后一段也没有句号")]
+              Block(id="p2", type="paragraph", text="后一段也没有句号"),
+              Block(id="h1", type="heading", level=5,
+                    text="5.1 这是一个超过六十个字符的长编号标题，用来验证标题候选也会进入同一批次并带上层级参数契约")]
     client = LlmClient(bind="127.0.0.1", port=1, retries=0)
     payloads = client.payload_batches(blocks, DEFAULT_OP_WHITELIST)
     assert payloads
@@ -173,4 +177,20 @@ def test_payload_carries_v25_schema_and_contract():
     assert "参数契约" in system and "fix_heading_level" in system
     assert '"op_schema"' in user
     assert '"required"' in user
-    assert '"level"' in user and '"marker"' in user and '"at"' in user
+    assert '"level"' in user and '"at"' in user
+    # 本批没有 list_item 候选，不再下发 marker 的参数契约。
+    assert '"marker"' not in user
+
+
+def test_payload_op_schema_is_narrowed_to_batch_candidates():
+    """2B 实测：全量 schema 会让只该修标题的批次输出空 op。"""
+    blocks = [Block(id="p1", type="paragraph", text="前一段没有句号"),
+              Block(id="p2", type="paragraph", text="后一段也没有句号")]
+    client = LlmClient(bind="127.0.0.1", port=1, retries=0)
+    user = client.payload_batches(blocks, DEFAULT_OP_WHITELIST)[0]["messages"][1]["content"]
+    obj, _ = json.JSONDecoder().raw_decode(user, user.index("{"))
+    assert set(obj["op_schema"]) == {"merge_block", "split_block"}
+    assert "白名单 op：[\"merge_block\", \"split_block\"]" in user
+    assert "fix_heading_level" not in obj["op_schema"]
+    assert "fix_list_marker" not in obj["op_schema"]
+    assert "mark_table_boundary" not in obj["op_schema"]

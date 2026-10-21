@@ -247,7 +247,7 @@ def test_valid_marker(v, expected):
 
 def test_opvalidator_rejects_bad_level_and_marker():
     """畸形参数（level 越界 / marker 非法）的算子整条拒绝并归因，绝不进 apply_ops。"""
-    blocks = [Block(id="h1", type="heading", text="标题", level=2, page=1),
+    blocks = [Block(id="h1", type="heading", text="标题", level=4, page=1),
               Block(id="li1", type="list_item", text="* 原项", page=1)]
     v = OpValidator(blocks)
     ops = [
@@ -261,6 +261,33 @@ def test_opvalidator_rejects_bad_level_and_marker():
     assert any(r.startswith("bad_level:") for r in rejected[0]["reasons"])
     assert any(r.startswith("bad_marker:") for r in rejected[1]["reasons"])
     assert len(accepted) == 2
+
+
+def test_opvalidator_protects_cover_heading_from_demotion():
+    """P0（2026-10-21）：首个标题 H1/H2 不得被降级——0.8B 在报告 PDF 上把
+    H2 封面标题降成 H3，目录/导航整体错位。深层标题与抬升仍按原规则处理。
+    """
+    blocks = [Block(id="cover", type="heading", text="本地大模型接入与验证报告",
+                    level=2, page=1),
+              Block(id="h4", type="heading", text="1.2.3.4 深层标题", level=4,
+                    page=2),
+              Block(id="h3", type="heading", text="1. 正文标题", level=3, page=3),
+              Block(id="h2", type="heading", text="2. 另一个正文标题", level=2,
+                    page=4)]
+    v = OpValidator(blocks)
+    accepted, rejected = v.apply([
+        {"op": "fix_heading_level", "target": "cover", "level": 3},    # 封面降级
+        {"op": "fix_heading_level", "target": "cover", "level": 1},    # 抬升仍拒
+        {"op": "fix_heading_level", "target": "h4", "level": 3},       # 深层修复
+        {"op": "fix_heading_level", "target": "h3", "level": 2},       # 非封面抬升
+        {"op": "fix_heading_level", "target": "h2", "level": 3},       # 非封面降级
+    ])
+    assert [r["op"]["target"] for r in rejected] == ["cover", "cover", "h3"]
+    assert rejected[0]["reasons"] == ["cover_heading"]
+    assert rejected[1]["reasons"] == ["heading_too_shallow"]
+    assert rejected[2]["reasons"] == ["heading_too_shallow"]
+    assert [(a["target"], a["level"]) for a in accepted] == [
+        ("h4", 3), ("h2", 3)]
 
 
 @pytest.mark.gate

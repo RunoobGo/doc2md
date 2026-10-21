@@ -267,6 +267,11 @@ class OpValidator:
         self.blocks = {b.id: b for b in blocks}
         self._order = list(blocks)
         self._index = {b.id: i for i, b in enumerate(self._order)}
+        # P0（2026-10-21）：首个标题是文档封面标题的概率最高。0.8B 在报告 PDF
+        # 上把 H2 封面标题降成 H3，内容虽只差一个 #，但目录/导航整体错位。
+        self._first_heading = next(
+            (i for i, b in enumerate(self._order)
+             if b.type == "heading" and (b.text or "").strip()), None)
         # CH-483（R8-LLM-1）：显式空列表表示“全部拒绝”，不得回退默认白名单。
         self.whitelist = set(DEFAULT_OP_WHITELIST if whitelist is None else whitelist)
 
@@ -322,12 +327,18 @@ class OpValidator:
                 reasons.append(f"occupied:{tid}")
             elif expected and b.type not in expected:
                 reasons.append(f"bad_type:{b.type}")
-            elif name == "fix_heading_level" and b.level and b.level <= 3:
-                # P0：只允许修深层标题（>H3）。实测模型把 H2「域代码」改成 H1，
-                # 这是正文无关的层级抬升；H1-H3 已足够浅，不再接受向下改号。
+            elif name == "fix_heading_level" and b.level:
                 lv = valid_level(op.get("level"))
-                if lv is not None and lv < b.level:
+                # P0：只允许修深层标题（>H3）。实测 0.8B 把 H2「域代码」改成 H1，
+                # 这是正文无关的层级抬升；H1-H3 已足够浅，不再接受向下改号。
+                if lv is not None and b.level <= 3 and lv < b.level:
                     reasons.append("heading_too_shallow")
+                # P0（2026-10-21）：封面的第一个标题只保护不被降级（H1/H2 →
+                # 更深）。0.8B 在报告 PDF 上把 H2 封面标题降成 H3，正文内容没
+                # 变，但目录与导航整体错位；同层改号或降为更浅仍按上面的规则判。
+                elif (lv is not None and lv > b.level and b.level <= 2
+                      and self._index.get(tid) == self._first_heading):
+                    reasons.append("cover_heading")
             elif name == "split_block" and "at" in op:
                 at = valid_at(op.get("at"))
                 if at is None:
@@ -721,12 +732,19 @@ class LlmClient:
             near = sorted({j for i in batch for j in (i - 1, i, i + 1)
                            if 0 <= j < len(blocks)})
             meta = [self._digest(blocks[j]) for j in near]
+        # P0（2026-10-21）：schema 只发本批候选 allowed_ops 的并集。原实现把
+        # 白名单内 5 个 op 的 schema 全部下发，2B 在只该修标题的批次里看到
+        # split/merge/table 的完整参数，实测直接输出 {"ops": []}；收窄后
+        # docx_13 的 H5→H4 恢复。schema 与“白名单 op”行必须同口径，否则
+        # 模型仍会看到未开放的算子。
+        batch_ops = sorted({op for i in batch
+                            for op in _allowed_ops_for(blocks, i, wanted_set)})
         user = ("待修补候选（candidates 含正文片段与前后文；ir 为定位元数据）：\n"
                 + json.dumps({"ir": meta, "candidates": items,
                               "op_schema": {k: v for k, v in _OP_SCHEMA.items()
-                                            if k in wanted_set}},
+                                            if k in batch_ops}},
                              ensure_ascii=False)
-                + f"\n白名单 op：{json.dumps(sorted(wanted_set), ensure_ascii=False)}"
+                + f"\n白名单 op：{json.dumps(batch_ops, ensure_ascii=False)}"
                 "\n只输出 {\"ops\": [...]} JSON；target 只写 id 字符串（如 \"b12\"），"
                 "不得复制候选对象或正文。")
         return {"model": self.model or DEFAULT_MODEL_NAME,

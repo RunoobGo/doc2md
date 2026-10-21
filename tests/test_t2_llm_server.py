@@ -126,7 +126,9 @@ class _FakeLlm:
 
 def _ir():
     return IR(doc_id="doc-t2", source_key="sk-t2", source_name="t2.pdf", pages=2,
-              blocks=[Block(id="b1", type="heading", text="1.2.3.4 深层标题", level=4, page=1),
+              blocks=[Block(id="b1", type="heading",
+                            text="1.2.3.4 这是一个超过六十个字符的深层标题，用于让标题候选进入请求并携带层级参数契约，同时验证候选窗口不会漏掉长标题",
+                            level=4, page=1),
                       Block(id="b2", type="paragraph", text=MARKER, page=1),
                       Block(id="b3", type="paragraph", text="普通段落。", immutable=True,
                             page=2)])
