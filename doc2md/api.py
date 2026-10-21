@@ -17,7 +17,7 @@ import threading
 from pathlib import Path
 
 from . import PIPELINE_VERSION, auth, config
-from .artifacts import drop_orphan_artifact, read_ir, rebuild_artifact
+from .artifacts import artifact_entry, drop_orphan_artifact, read_ir, rebuild_artifact
 from .cron import sweep_tmp
 from .edits import patch_block, rollback
 from .errors import (
@@ -684,15 +684,15 @@ def create_app(cfg: dict | None = None, root: Path | None = None,
         # （E5031 / E4041）；流式阶段才失败（读取中被替换）只能截断，属可接受窗口。
         try:
             with zipfile.ZipFile(zp) as z:
-                names = [n for n in z.namelist() if n.endswith("content.md")]
+                md_entry = artifact_entry(z.namelist(), "content.md", doc_id)
         except zipfile.BadZipFile as exc:
             raise E5031_StorageError("artifact unreadable",
                                      detail={"reason": type(exc).__name__}) from exc
-        if not names:
+        if not md_entry:
             raise E4041_NotFound("artifact content.md missing")
 
         def chunks():
-            with zipfile.ZipFile(zp) as z, z.open(names[0]) as f:
+            with zipfile.ZipFile(zp) as z, z.open(md_entry) as f:
                 while True:
                     buf = f.read(_MD_CHUNK)
                     if not buf:

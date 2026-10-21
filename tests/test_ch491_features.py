@@ -114,6 +114,26 @@ def test_format_md_is_byte_identical_to_zip_content(tmp_path, capsys):
     assert md_path.read_bytes() == inner, "md 必须与 zip 内 content.md 逐字节相同"
 
 
+def test_emit_md_failure_leaves_no_partial_target(tmp_path, monkeypatch):
+    """直出写盘失败时不得留下截断的 .md（tmp + fsync + replace，失败即清理）。"""
+    from doc2md import cli
+
+    zip_path = tmp_path / "d1.zip"
+    with zipfile.ZipFile(zip_path, "w") as z:
+        z.writestr("d1/content.md", b"# hello\n")
+    out = tmp_path / "out"
+    out.mkdir()
+
+    def boom(_fd):
+        raise OSError("simulated fsync failure")
+
+    monkeypatch.setattr(cli.os, "fsync", boom)
+    with pytest.raises(OSError):
+        cli._emit_md(zip_path, out, "a.md")
+    assert not (out / "a.md").exists()
+    assert list(out.iterdir()) == [], "失败路径必须清掉临时文件"
+
+
 def test_format_md_removes_zip(tmp_path, capsys):
     """--format md 只留 Markdown（zip 被移除），语义与 both 区分开。"""
     src = tmp_path / "b.pdf"

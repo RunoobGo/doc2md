@@ -1208,6 +1208,23 @@ def test_test5_v22_legacy_rebuilds_fts_and_backfills_columns(tmp_path):
     store.close()
 
 
+@pytest.mark.gate
+def test_add_column_tolerates_concurrent_duplicate(tmp_path):
+    """并发首开旧库：另一进程已补列时，重复 ALTER 必须视为成功而非启动失败。"""
+    from doc2md.storage.db import Store
+
+    store = Store(tmp_path / "state.sqlite")
+    try:
+        # 模拟「探测时缺列、执行时已被对方补上」：同一列连续补两次。
+        store._add_column("blocks", "revision", "INTEGER NOT NULL DEFAULT 1")
+        store._add_column("blocks", "probe_dup", "TEXT")
+        store._add_column("blocks", "probe_dup", "TEXT")
+        cols = {r["name"] for r in store.q("PRAGMA table_info(blocks)")}
+        assert {"revision", "probe_dup"} <= cols
+    finally:
+        store.close()
+
+
 # ------------------------------------------------------------------ X-17
 
 @pytest.mark.gate

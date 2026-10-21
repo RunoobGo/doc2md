@@ -708,10 +708,13 @@ def apply_ops(ir, accepted: list[dict]) -> int:
             if name == "fix_heading_level":
                 # R6-LLM-1（CH-475）：纵深防御——即使绕过 OpValidator 直接调用 apply_ops，
                 # 非法 level 也规约回原值（绝不把 str/越界写进 b.level 致渲染期 TypeError）。
+                # 目标层级与现状相同则不计数、不写 provenance：applied_ops 必须对应
+                # 真实变更（与 fix_list_marker 同口径），不能「计数成功、产物没变」。
                 lv = valid_level(op.get("level"))
-                b.level = lv if lv is not None else b.level
-                b.provenance.setdefault("modified_by", []).append("llm:fix_heading_level")
-                n += 1
+                if lv is not None and lv != b.level:
+                    b.level = lv
+                    b.provenance.setdefault("modified_by", []).append("llm:fix_heading_level")
+                    n += 1
             elif name == "fix_list_marker":
                 # R6-LLM-1（CH-475）：marker 经白名单规约；替换用**函数式** repl，返回值
                 # 不被 re 解释为组引用——即便 marker 含 `\1` 也只做字面拼接，杜绝 re.error。

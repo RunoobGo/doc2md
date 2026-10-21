@@ -634,6 +634,17 @@ def test_sec4_assert_rejects_dotdot_segments(bad):
         assert_name_safe(bad)
 
 
+@pytest.mark.parametrize("bad", ["con .txt", "aux..log", "NUL .md", "lpt1. .txt"])
+def test_sec4_win_reserved_with_edge_space_or_dot_rejected(bad):
+    """Windows 判设备名会忽略基名尾部空格/点：`con .txt` 形态同样必须拦。"""
+    from doc2md.errors import E4003_FileNameUnsafe
+    from doc2md.security.names import assert_entry_safe, assert_name_safe
+    with pytest.raises(E4003_FileNameUnsafe):
+        assert_name_safe(bad)
+    with pytest.raises(E4003_FileNameUnsafe):
+        assert_entry_safe(f"d1/{bad}")
+
+
 # --- SEC-1（netguard）：sendmsg 也是出站原语，须与 sendto/connect 同受守护 ------
 def test_sec1_sendmsg_blocked_under_guard():
     import socket as _sock
@@ -699,6 +710,26 @@ def test_sec9_migrates_existing_plaintokens_on_reopen(tmp_path):
         assert auth.check(st2, "d2m_legacy_plain", "submit_job") == "editor"
     finally:
         st2.close()
+
+
+def test_sec9_unknown_role_is_403_not_500(tmp_path):
+    """旧库/手工改库留下的非法角色：鉴权必须按 403 拒绝，不能让 KeyError 变 500。"""
+    from doc2md import auth
+    from doc2md.errors import E4031_Forbidden
+    from doc2md.storage.db import now_iso, token_hash
+
+    st = Store(tmp_path / "state.sqlite")
+    tok = "d2m_bogus_role_token"
+    try:
+        with st.tx() as tx:
+            tx.execute("INSERT INTO tokens(token, role, label, created_at) VALUES (?,?,?,?)",
+                       (token_hash(tok), "superuser", "bad-role", now_iso()))
+        with pytest.raises(E4031_Forbidden) as ei:
+            auth.check(st, tok, "read")
+        assert ei.value.code == "E4031"
+        assert ei.value.detail.get("role") == "superuser"
+    finally:
+        st.close()
 
 
 # --- OPS-3（gguf 尺寸帽）：恶意声明长度先帽后读，截断报错而非裸 struct.error ------

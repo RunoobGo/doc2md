@@ -94,7 +94,13 @@ def check(store: Store, token: str | None, action: str,
     need = MATRIX.get(action)
     if need is None:
         raise E4031_Forbidden(f"unknown action: {action}")
-    if RANK[row["role"]] < RANK[need]:
+    rank = RANK.get(row["role"])
+    if rank is None:
+        # 旧库/手工改库可能留下 RANK 之外的角色值；按「无权限」拒绝，
+        # 不让 KeyError 逃逸成 500（鉴权失败必须是 401/403）。
+        raise E4031_Forbidden("token has unknown role",
+                              detail={"role": str(row["role"])})
+    if rank < RANK[need]:
         raise E4031_Forbidden(f"action {action} requires {need}",
                               detail={"role": row["role"], "required": need})
     return row["role"]

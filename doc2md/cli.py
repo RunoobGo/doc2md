@@ -428,17 +428,30 @@ def _emit_md(zip_path: Path, out_dir: Path, md_name: str) -> Path:
 
     从 zip 原样读出再落盘，保证与 zip 内 content.md **逐字节相同**（含 front-matter），
     不重新序列化——重新拼装会因 json 缩进/键序漂移破坏等价性。
+    写盘走「唯一临时文件 + fsync + os.replace」：中途失败只留 `.part`（随即清理），
+    不会把目标 Markdown 覆盖成截断内容。
     """
+    import os
+    import uuid
     import zipfile
 
+    from .artifacts import artifact_entry
     from .errors import E4041_NotFound
     with zipfile.ZipFile(zip_path) as z:
-        names = [n for n in z.namelist() if n.endswith("content.md")]
-        if not names:
+        entry = artifact_entry(z.namelist(), "content.md", zip_path.stem)
+        if not entry:
             raise E4041_NotFound("artifact content.md missing")
-        body = z.read(names[0])
+        body = z.read(entry)
     md_path = out_dir / md_name
-    md_path.write_bytes(body)
+    tmp = out_dir / f".{md_name}.{uuid.uuid4().hex}.part"
+    try:
+        with open(tmp, "xb") as f:
+            f.write(body)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, md_path)
+    finally:
+        tmp.unlink(missing_ok=True)
     return md_path
 
 

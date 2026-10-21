@@ -394,6 +394,14 @@ def test_fix_heading_level_lands():
     assert "llm:fix_heading_level" in ir.blocks[0].provenance["modified_by"]
 
 
+def test_fix_heading_level_same_level_is_noop():
+    """目标层级与现状相同：不计数、不写 provenance（applied_ops 只记真实变更）。"""
+    ir = _ir(Block(id="b1", type="heading", text="标题", level=2))
+    n = apply_ops(ir, [{"op": "fix_heading_level", "target": "b1", "level": 2}])
+    assert n == 0 and ir.blocks[0].level == 2
+    assert "modified_by" not in ir.blocks[0].provenance
+
+
 def test_fix_list_marker_normalizes():
     ir = _ir(Block(id="b1", type="list_item", text="• 事项"))
     n = apply_ops(ir, [{"op": "fix_list_marker", "target": "b1", "marker": "-"}])

@@ -62,7 +62,9 @@ def sanitize_name(raw: str, maxlen: int = DEFAULT_MAX_BYTES) -> str:
     stem, dot, ext = name.rpartition(".")
     if not stem:                                  # 无扩展名：rpartition 返回 ("", "", name)
         stem, dot, ext = name, "", ""             # 回退全名为 stem，保留名检查不旁路
-    if stem.lower() in WIN_RESERVED:
+    # Windows 判定设备名时会忽略基名尾部的空格/点（`CON .txt`、`aux..log`），
+    # 这里先剥再比，避免只拦标准形态而在 Windows 落盘时撞保留名。
+    if stem.strip(" .").lower() in WIN_RESERVED:
         stem = f"_{stem}"
     out = _fit(stem, dot, ext, maxlen).strip(" .")
     if not out:
@@ -98,7 +100,7 @@ def assert_name_safe(name: str, maxlen: int = DEFAULT_MAX_BYTES) -> None:
     if _blen(name) > maxlen:
         problems.append("too-long")
     stem = name.rsplit(".", 1)[0] if "." in name else name
-    if stem.lower() in WIN_RESERVED:
+    if stem.strip(" .").lower() in WIN_RESERVED:
         problems.append("win-reserved")
     if problems:
         raise UnsafeNameError(f"unsafe name {name!r}: {','.join(problems)}")
@@ -126,5 +128,5 @@ def assert_entry_safe(entry: str) -> None:
         if not p:
             raise UnsafeNameError(f"empty segment in zip entry {entry!r}")
         stem = p.rsplit(".", 1)[0] if "." in p and not p.startswith(".") else p
-        if stem.lower() in WIN_RESERVED:
+        if stem.strip(" .").lower() in WIN_RESERVED:
             raise UnsafeNameError(f"reserved-name zip entry {entry!r}")

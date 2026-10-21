@@ -159,3 +159,35 @@ def test_artifact_lock_stale_without_heartbeat_is_reclaimed(tmp_path):
                         stale_seconds=1, heartbeat_seconds=0.05):
         assert dead.exists()
     assert not dead.exists()
+
+
+@pytest.mark.gate
+def test_stale_lock_recheck_skips_refreshed_lock(tmp_path):
+    """判定陈旧后、unlink 前持有者心跳续期 → 必须放弃回收（不得删活锁）。"""
+    from doc2md.artifacts import _reclaim_stale_lock
+
+    lock = tmp_path / "doc.lock"
+    lock.write_text("123 0 live-token", encoding="ascii")
+    old = time.time() - 10
+    os.utime(lock, (old, old))
+    seen = lock.stat()                    # 调用方据此判定「陈旧」
+    os.utime(lock, None)                  # 心跳在两次检查之间续期
+    assert _reclaim_stale_lock(lock, seen, 1) is False
+    assert lock.exists(), "刚续期的活锁不得被回收"
+
+
+@pytest.mark.gate
+def test_stale_lock_recheck_spares_replaced_owner(tmp_path):
+    """回收者看到的是旧 inode；锁已被换主时只重试建锁，不删新持有者的文件。"""
+    from doc2md.artifacts import _reclaim_stale_lock
+
+    lock = tmp_path / "doc2.lock"
+    lock.write_text("123 0 old-token", encoding="ascii")
+    old = time.time() - 10
+    os.utime(lock, (old, old))
+    seen = lock.stat()
+    replacement = tmp_path / "new.lock"
+    replacement.write_text("456 0 new-token", encoding="ascii")
+    os.replace(replacement, lock)         # 换主：新 inode 接管同一路径
+    assert _reclaim_stale_lock(lock, seen, 1) is True      # True = 可重试建锁
+    assert lock.exists() and "new-token" in lock.read_text(encoding="ascii")

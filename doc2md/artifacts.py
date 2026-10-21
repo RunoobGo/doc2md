@@ -42,6 +42,32 @@ def _doc_lock(doc_id: str) -> threading.Lock:
     return _REBUILD_LOCKS[hash(doc_id) % len(_REBUILD_LOCKS)]
 
 
+def _reclaim_stale_lock(path: Path, seen: os.stat_result,
+                        stale_seconds: float) -> bool:
+    """回收陈旧锁前复核身份与 mtime，返回是否已清掉（可重试建锁）。
+
+    `seen` 是调用方判定「陈旧」时的 stat。判定与 unlink 之间有两个合法并发：
+    - 原持有者心跳刚续期 → mtime 变化，放弃回收（否则误删活锁）；
+    - 锁已被别的进程回收并重建 → inode 变化，放弃本轮（否则删掉新持有者的锁）。
+    复核后仍陈旧才 unlink；unlink 自身的 TOCTOU 窗口缩到两次 syscall 之间。
+    """
+    try:
+        cur = path.stat()
+    except OSError:
+        return True                       # 已消失：视为回收成功，重试建锁
+    if (cur.st_dev, cur.st_ino) != (seen.st_dev, seen.st_ino):
+        return True                       # 已换主：新持有者的锁不受影响
+    if cur.st_mtime_ns != seen.st_mtime_ns:
+        return False                      # 刚续期：不再陈旧
+    if time.time() - cur.st_mtime <= stale_seconds:
+        return False
+    try:
+        path.unlink()
+        return True
+    except OSError:
+        return False
+
+
 @contextlib.contextmanager
 def _artifact_lock(out_dir: Path, doc_id: str, *, timeout: float = 30.0,
                    stale_seconds: float = 60.0,
@@ -73,11 +99,12 @@ def _artifact_lock(out_dir: Path, doc_id: str, *, timeout: float = 30.0,
             break
         except FileExistsError:
             try:
-                age = time.time() - path.stat().st_mtime
+                seen = path.stat()
             except OSError:
-                age = 0.0
-            if age > stale_seconds:
-                path.unlink(missing_ok=True)
+                seen = None
+            if (seen is not None
+                    and time.time() - seen.st_mtime > stale_seconds
+                    and _reclaim_stale_lock(path, seen, stale_seconds)):
                 continue
             if time.monotonic() >= deadline:
                 raise E5031_StorageError(
@@ -189,6 +216,20 @@ def drop_orphan_artifact(store: Store, root, cfg: dict, doc_id: str) -> None:
                 tmp_dir=config.path_setting(cfg, "paths.tmp", root, str(Path(root) / "tmp")))
 
 
+def artifact_entry(names: list[str], base: str, doc_id: str = "") -> str | None:
+    """按约定名精确取产物条目；不再用 `endswith` 兜底。
+
+    当前布局是 `<doc_id>/content.md`，旧版/测试夹具是扁平 `content.md`——两种
+    合法形态都精确匹配。`evil_content.md`、`x/y/content.md` 之类后缀相同的
+    条目不会被误当正文/IR（FR-127 双闸的读取侧口径）。
+    """
+    if doc_id:
+        expected = f"{doc_id}/{base}"
+        if expected in names:
+            return expected
+    return base if base in names else None
+
+
 def read_ir(zip_path: str):
     """从产物 zip 回读 IR（子进程不回传对象；父进程以产物为准重建入库内容）。
 
@@ -201,7 +242,7 @@ def read_ir(zip_path: str):
     from .ir import IR
     try:
         with zipfile.ZipFile(zip_path) as z:
-            name = next((n for n in z.namelist() if n.endswith("ir.json")), None)
+            name = artifact_entry(z.namelist(), "ir.json", Path(zip_path).stem)
             if not name:
                 return None
             return IR.from_dict(json.loads(z.read(name).decode("utf-8")))

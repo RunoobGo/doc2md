@@ -158,3 +158,25 @@ def test_rebuild_artifact_from_db_after_loss(store, tmp_path):
     assert zp.exists()
     with zipfile.ZipFile(zp) as z:
         assert json.loads(z.read(f"{ir.doc_id}/ir.json"))["meta"]["doc_id"] == ir.doc_id
+
+
+@pytest.mark.gate
+def test_artifact_entry_matches_contract_names_only(tmp_path):
+    """产物条目按 `<doc_id>/<name>` / 扁平 `<name>` 精确取；后缀相同的伪造名不命中。"""
+    from doc2md.artifacts import artifact_entry, read_ir
+
+    assert artifact_entry(["evil_content.md"], "content.md", "d1") is None
+    assert artifact_entry(["x/y/content.md"], "content.md", "d1") is None
+    assert artifact_entry(["d1/content.md"], "content.md", "d1") == "d1/content.md"
+    assert artifact_entry(["content.md"], "content.md", "d1") == "content.md"
+
+    ir = _ir()
+    good = tmp_path / f"{ir.doc_id}.zip"
+    with zipfile.ZipFile(good, "w") as z:
+        z.writestr(f"{ir.doc_id}/ir.json", json.dumps(ir.to_dict()))
+    assert read_ir(str(good)).doc_id == ir.doc_id
+
+    fake = tmp_path / "fake.zip"
+    with zipfile.ZipFile(fake, "w") as z:
+        z.writestr("evil_ir.json", json.dumps(ir.to_dict()))
+    assert read_ir(str(fake)) is None, "后缀伪造条目不得当 IR 回读"

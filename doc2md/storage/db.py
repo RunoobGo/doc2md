@@ -263,6 +263,19 @@ class Store:
             self._local.conn = conn
         return conn
 
+    def _add_column(self, table: str, col: str, ddl: str) -> None:
+        """幂等补列：并发首开旧库时，另一进程可能已补上同一列。
+
+        `_migrate` 的「读 PRAGMA → 缺列才 ALTER」不是原子的；两个进程同时
+        首开旧库时，后者会撞上 `duplicate column name`。列已存在即视为成功，
+        其余 OperationalError 照常上抛（绝不吞掉真正的迁移失败）。
+        """
+        try:
+            self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" not in str(exc).lower():
+                raise
+
     def _migrate(self) -> None:
         cur_ver = int(self._conn.execute("PRAGMA user_version").fetchone()[0])
         # CH-476（R7-STOR-2，决策 D1）：DDL 改为**无条件**执行。原 `if cur_ver <
@@ -287,33 +300,36 @@ class Store:
         # 幂等补列（schema 迁移，v2.2 遗留能力）
         cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(blocks)")}
         if "revision" not in cols:
-            self._conn.execute("ALTER TABLE blocks ADD COLUMN revision INTEGER NOT NULL DEFAULT 1")
+            self._add_column("blocks", "revision", "INTEGER NOT NULL DEFAULT 1")
         # CH-485（DB8）：产物事实源字段。旧库补列，默认空 JSON 不改变既有行语义。
         for col, ddl in (("links_json", "TEXT DEFAULT '[]'"),
                          ("font_json", "TEXT DEFAULT '{}'"),
                          ("provenance_json", "TEXT DEFAULT '{}'")):
             if col not in cols:
-                self._conn.execute(f"ALTER TABLE blocks ADD COLUMN {col} {ddl}")
+                self._add_column("blocks", col, ddl)
         dcols = {r["name"] for r in self._conn.execute("PRAGMA table_info(docs)")}
         if "gate_json" not in dcols:
-            self._conn.execute("ALTER TABLE docs ADD COLUMN gate_json TEXT DEFAULT '{}'")
+            self._add_column("docs", "gate_json", "TEXT DEFAULT '{}'")
         tcols = {r["name"] for r in self._conn.execute("PRAGMA table_info(tasks)")}
         if tcols and "source_path" not in tcols:
             # CH-448：存量库补列（异步队列的消费路径）；NULL = 非队列行，消费方直接判失败
-            self._conn.execute("ALTER TABLE tasks ADD COLUMN source_path TEXT")
-            self._conn.execute("ALTER TABLE tasks ADD COLUMN mode TEXT")
+            self._add_column("tasks", "source_path", "TEXT")
+        if tcols and "mode" not in tcols:
+            # 与 source_path 分开判定：半迁移库（只补了一列）也要补齐。
+            self._add_column("tasks", "mode", "TEXT")
+        if tcols:
             self._conn.execute("CREATE INDEX IF NOT EXISTS ix_tasks_queued"
                                " ON tasks(status, created_at)")
         # CH-485（DB8）：异步删除守护基准与 force 透传。旧任务 del_seq=0 为保守值
         # （会看到全部历史墓碑）；升级后仍在队列里的旧任务建议重投，不静默放行。
         if "del_seq" not in tcols:
-            self._conn.execute("ALTER TABLE tasks ADD COLUMN del_seq INTEGER NOT NULL DEFAULT 0")
+            self._add_column("tasks", "del_seq", "INTEGER NOT NULL DEFAULT 0")
         if "force" not in tcols:
-            self._conn.execute("ALTER TABLE tasks ADD COLUMN force INTEGER NOT NULL DEFAULT 0")
+            self._add_column("tasks", "force", "INTEGER NOT NULL DEFAULT 0")
         tcols = {r["name"] for r in self._conn.execute("PRAGMA table_info(tokens)")}
         if tcols and "role" not in tcols:
             # 方案 8.5 兼容期：存量 token 默认 admin
-            self._conn.execute("ALTER TABLE tokens ADD COLUMN role TEXT NOT NULL DEFAULT 'admin'")
+            self._add_column("tokens", "role", "TEXT NOT NULL DEFAULT 'admin'")
         self._migrate_token_hash()
         self._migrate_fts()
 
