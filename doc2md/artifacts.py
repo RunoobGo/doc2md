@@ -31,7 +31,7 @@ _ARTIFACT_META_KEYS = {
     "doc_id", "source_key", "source_name", "source_name_raw", "format",
     "pages", "sharded", "shard_count", "schema_version", "warnings",
 }
-_ARTIFACT_META_EXTRA = {"shard_stats", "llm_prompt", "notes"}
+_ARTIFACT_META_EXTRA = {"shard_stats", "llm_prompt", "llm_stats", "notes"}
 
 
 # 固定数量的分片锁：按 doc 串行、不同 doc 可并发，且不随文档数无限增长。

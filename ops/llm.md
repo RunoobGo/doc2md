@@ -12,7 +12,7 @@
 LLM 在管线里只做**块级修补 op**（`split_block` / `merge_block` / `fix_heading_level` /
 `fix_list_marker` / `mark_table_boundary`，白名单外一律拒绝）。输入不是全文，而是
 **候选块的正文片段 + 扁平前后文 + 定位元数据**；每批 ≤8 个候选、总计 ≤16 个，
-单批 JSON ≤12k 字符（CH-487）。选型建议：
+单批 JSON ≤6k 字符（P0：原 12k 会超过 8k 上下文）。选型建议：
 
 | 维度 | 建议 | 理由 |
 | --- | --- | --- |
@@ -20,6 +20,42 @@ LLM 在管线里只做**块级修补 op**（`split_block` / `merge_block` / `fix
 | 量化 | Q4_K_M | 低配机友好（3B ≈ 2GB），质量损失对结构化输出可忽略 |
 | 语言 | 中文语料选中文强的 instruct（如 Qwen 系列） | 黄金样本以中文为主 |
 | 格式 | **必须是 GGUF** | llama.cpp 唯一消费格式；`tokenizer verify` 可校验完整性 |
+
+### P0 参数契约与校验（v2.5，2026-10-21）
+
+v2.4 的系统提示词只给了一个 `merge_block` 示例，0.8B 会把它当成模板，输出缺
+`level` / `marker` / `at` 的 op；旧校验器又只校验“出现了的参数”，于是出现
+`accepted=20` 但 `effective=8`、正文变更 0 的假成功。v2.5 起：
+
+| op | 必填 | 校验 |
+| --- | --- | --- |
+| `fix_heading_level` | `level` | int 1–6；提示词要求每次只下调一级 |
+| `fix_list_marker` | `marker` | `^[-*+·•‣]{1,3}$` |
+| `split_block` | `at` | `0 < at < len(text)`；不得切在英文单词/数字串/URL 中间；须在句末/分句标点后或空白边界，两侧去空白后 ≥4 字符 |
+| `merge_block` | `target` | 现有目标/类型/题注/结构/句末校验 |
+| `mark_table_boundary` | `target` | 必须是 table，或紧邻 table 的题注/表头段落 |
+
+缺参一律 `missing_param:<name>` 拒绝；切点不安全分别报 `bad_at` /
+`split_inside_token` / `split_inside_url`；普通段落误标表边界报
+`not_table_boundary`。请求侧同时下发 `op_schema`（机器可读）与系统提示词
+（自然语言）两份契约。
+
+管线审计口径改为三分账：
+
+- `accepted_ops`：通过校验；
+- `applied_ops`：真正改变 IR（`Result.applied_ops` 只含这一层）；
+- `noop_ops`：过校验但没落笔（缺参已被拒，这里主要是同值/重复旗标）。
+
+`report.html` 的 LLM 面板与 `Result.llm` 都会给出 `response / accepted /
+effective / noop / rejected` 计数；`content.md` 不写这些易变值。
+
+### 单 slot 与超时
+
+- 单进程/单文档转换：`llama-server ... -np 1`。默认 4 slot 下实测同一 payload
+  会出现 2 个 / 15 个 op 交替；`-np 1` 连续两轮稳定。
+- 并发转换：每个 worker 独立 `llama-server`，不要共享多 slot 实例。
+- `timeout_ms` 默认 **60000**；CPU 0.8B 的 768-token 输出用 15s 会误判超时。
+- 上下文建议 `-c 16384`；客户端 payload 已压到 6k 字符。
 
 ### 本机实测推荐（2026-10-18，RTX 3070 8GB + i5-13600K / 34GB）
 
@@ -111,7 +147,7 @@ mkdir -p work/vendor/models/llm && mv qwen2.5-3b-instruct-q4_k_m.gguf work/vendo
 
 # ③ 安装 llama.cpp 并启动 llama-server
 llama-server -m work/vendor/models/llm/qwen2.5-3b-instruct-q4_k_m.gguf \
-  --host 127.0.0.1 --port 8080
+  --host 127.0.0.1 --port 8080 -c 16384 -np 1
 
 # ④ 验证模型资产完整性（M0 工具链，非运行必需但建议做一次）
 #   `export` 不指定 --manifest 时写到 [chunks].manifest（默认
@@ -140,7 +176,7 @@ doc2md convert 文件.pdf --llm-mode server
 | --- | --- | --- |
 | `mode` | `"offline"` | `"server"` = 走本地 llama-server |
 | `fallback` | `true` | server 不可用回退 offline（主链路不断）；`false` = 明确 E5041 / HTTP 503，不落「看起来成功」的产物 |
-| `timeout_ms` | `15000` | 单次请求超时（连接 + 读取合计） |
+| `timeout_ms` | `60000` | 单次请求超时（连接 + 读取合计）；CPU 0.8B 实测 15s 偏紧 |
 | `model` | `""` | 空 = 自动发现（见上） |
 | `bind` / `port` | `127.0.0.1:8080` | llama-server 地址；出站守护（netguard）只放行回环 |
 | `auth` | `false` | `true` 时 Bearer 口令走 `DOC2MD_LLM_TOKEN` 环境变量（不落配置不入日志；无鉴权回环监听是 P-55 / CH-408 已知接受项） |
@@ -153,7 +189,7 @@ doc2md convert 文件.pdf --llm-mode server
 | doctor `llm_server: unreachable (connect:…)` | llama-server 未启动 / 端口不符 | 起 llama-server；核对 `bind`/`port` |
 | `llm_server: unreachable (http:…)` | 端口被别的服务占用（返回非 llama-server 响应） | 换端口 |
 | E5041 / 退出码 4 | `fallback=false` 且 server 不可用（设计行为：明确失败不蒙混） | 起 server 或改回 `fallback=true` / `mode=offline` |
-| `applied_ops` 全为 0 但无报错 | offline 占位本来就只产出保守 op；server 模式下 0 op 表示候选不足或模型保守（不是故障） | 这是预期；要扩大模型参与面可调候选规则，但先补真实误判样本 |
+| `applied_ops` 全为 0 但无报错 | offline 占位本来就只产出保守 op；server 模式下看 `llm_stats`：`accepted>0, effective=0` 说明模型只提了同值/已设置的 op，或全部被拒 | 这是预期；先看 `noop_ops` 与 `rejected` 原因，再决定是否扩候选规则 |
 | server 模式耗时明显高于 offline | 候选批次串行请求本地模型 | 默认保持 offline；需要模型兜底时再开 server，或减少候选上限 |
 | 模型名发现失败 | 目录内 gguf 数 ≠ 1 且 `llm.model` 为空 | 只留一个 gguf，或显式配 `llm.model` |
 

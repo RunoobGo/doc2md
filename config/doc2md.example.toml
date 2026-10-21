@@ -94,7 +94,7 @@ work_dir_mode = "700"                  # CH-437：work/ 权限由备份路径实
 mode = "offline"                       # CH-456 / T2：offline = 确定性占位（默认，主链路零网络）
                                        # server = 本地 llama-server（仅 127.0.0.1）
 fallback = true                        # server 不可用时回退 offline，保持主链路；false = 明确 E5041/503
-timeout_ms = 15000                     # 单次请求超时（连接 + 读取合计）
+timeout_ms = 60000                     # 单次请求超时（连接 + 读取合计）；覆盖 CPU 小模型冷启动首包
 retries = 2                            # CH-469：仅连接类瞬断（URLError/超时/OSError）重试次数，
                                        # 0 = 不重试；HTTP 状态类错误不重试，用完即降级/报错
 model = ""                             # 模型名；空 = 取 [paths].vendor_models 下发现的 gguf 文件名

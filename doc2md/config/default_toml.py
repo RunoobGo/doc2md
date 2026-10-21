@@ -106,7 +106,7 @@ mode = "offline"                       # CH-456 / T2：offline = 确定性占位
                                        # server = 本地 llama-server（仅 127.0.0.1，NFR-1）
 fallback = true                        # server 不可用时回退 offline 占位实现，保持主链路不中断；
                                        # false = 明确失败（E5041 / HTTP 503）
-timeout_ms = 15000                     # 单次请求超时（连接 + 读取合计）
+timeout_ms = 60000                     # 单次请求超时（连接 + 读取合计）；覆盖 CPU 小模型冷启动首包
 retries = 2                            # CH-469：仅连接类瞬断（URLError/超时/OSError）重试次数，
                                        # 0 = 不重试；HTTP 状态类错误不重试，用完即降级/报错
 model = ""                             # 请求里的模型名；空 = 取 paths.vendor_models 下发现的 gguf 文件名

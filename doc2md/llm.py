@@ -16,6 +16,7 @@ import re
 import time
 import urllib.error
 import urllib.request
+from dataclasses import dataclass, field
 from pathlib import Path
 
 DEFAULT_OP_WHITELIST = ["split_block", "merge_block", "fix_heading_level",
@@ -39,6 +40,28 @@ SYSTEM_PROMPT_V24 = """你是文档修补助手。严格遵守以下纪律：
 10) 页码、页眉、页脚已由确定性规则移除；不要为这些内容输出 op。
 11) 不确定时输出 {"ops": []}，宁可少改，不得猜测。
 12) 候选的 allowed_ops 是该块类型的可落地算子集合；不得对候选使用集合外的 op。
+"""
+
+# P0（2026-10-21）：v2.4 只说“严格 JSON”，没有逐 op 参数 schema，0.8B 实测会把
+# `merge_block` 的“op+target”示例当成所有 op 的模板，输出缺 level/marker/at 的
+# op；校验器当时只校验“出现了的参数”，于是 accepted 但空转。v2.5 把参数契约
+# 写进系统提示词，并在 _payload() 的 user 消息里再发一份机器可读 op_schema。
+SYSTEM_PROMPT_V25 = SYSTEM_PROMPT_V24 + """13) 参数契约：缺必填参数的 op 会被校验器整条拒绝，不会替你补默认值。
+    - fix_heading_level：必须给 level（1-6 的整数）；每次只下调一级（level = 当前 level - 1），
+      除非 IR 大纲明确证明应跳级；不得把 H5 直接改成 H1。
+    - fix_list_marker：必须给 marker，只能取 - * + · • ‣ 之一（1-3 个字符）。
+    - split_block：必须给 at（0 < at < 正文长度的整数）；不得切在英文单词、数字串
+      或 URL 中间；只在句末标点后或空白边界切，且两侧至少保留 4 个字符；否则不要
+      输出该 op。
+    - merge_block：target 必须是可并入前一段的正文块；题注、结构块、已收句段落不得合并。
+    - mark_table_boundary：target 必须是 table 块，或紧邻 table 的题注/表头段落；
+      普通正文段落不要使用。
+14) 输出示例（只输出 JSON，不要解释）：
+    {"ops":[
+      {"op":"fix_heading_level","target":"b1","level":4},
+      {"op":"split_block","target":"b7","at":42}
+    ]}
+    参数不全时不要输出该 op；不确定时输出 {"ops": []}。
 """
 
 SYSTEM_PROMPT_V23 = SYSTEM_PROMPT_V24.split("7) 文档正文")[0] + \
@@ -117,6 +140,76 @@ _OP_TARGET_TYPES = {
     "fix_list_marker": ("list_item",),
     "merge_block": ("paragraph", "list_item"),
 }
+
+# P0（2026-10-21）：必填参数契约。applied_ops 之前把 accepted 当 effective，
+# 根因之一是校验器默认“参数缺省 = 合法”，apply_ops 再给安全默认值。缺参 op
+# 必须在校验期整条拒绝，不能让它在产物里冒领一次修改。
+_REQUIRED_PARAMS = {
+    "fix_heading_level": ("level",),
+    "fix_list_marker": ("marker",),
+    "split_block": ("at",),
+}
+
+
+def valid_at(v) -> int | None:
+    """把 at 规约为 int（拒绝 bool/浮点/负号串）；越界与切点安全另由文本长度判定。"""
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, int):
+        return v
+    if isinstance(v, str) and v.strip().isdigit():
+        return int(v.strip())
+    return None
+
+
+def split_reason(text: str, at: int, *, require_boundary: bool = False) -> str | None:
+    """切点安全：返回拒绝原因；None 表示可切。
+
+    - 0 < at < len(text)，空侧由 _split_block 再判；
+    - 两侧同为 ASCII 字母/数字 → 切在英文单词或数字串中间；
+    - 切点落在 http(s):// / ftp:// / www. 开头的 token 内 → 切在 URL 中间。
+    - require_boundary=True（模型 op 的校验口径）：切点必须在句末/分句标点后，
+      或紧邻空白/换行，且两侧去空白后至少 4 个字符；中文无标点长串的任意字符间
+      切分一律拒绝。实测 0.8B 会把“第 1 页第 1 栏…”切成“第”/“1 页…”，只靠
+      词/URL 检查拦不住。
+    CJK 没有词边界，按字符切在 `_split_block` 的直接调用面仍允许；生产路径由
+    validator 的 require_boundary 把关（宁可拒绝，不得静默改坏）。
+    """
+    if at <= 0 or at >= len(text):
+        return "bad_at"
+    if require_boundary and (len(text[:at].rstrip()) < 4
+                             or len(text[at:].lstrip()) < 4):
+        return "split_too_short"
+    lo = at
+    while lo > 0 and not text[lo - 1].isspace():
+        lo -= 1
+    hi = at
+    while hi < len(text) and not text[hi].isspace():
+        hi += 1
+    token = text[lo:hi]
+    if re.search(r"(?:https?://|ftp://|www\.)", token, re.I):
+        return "split_inside_url"
+    left, right = text[at - 1], text[at]
+    if left.isascii() and right.isascii() and left.isalnum() and right.isalnum():
+        return "split_inside_token"
+    if require_boundary:
+        # 左：句末/分句标点或空白；右：空白。中文句号、英文句点、分号、逗号、
+        # 收尾引号/括号都算自然边界；切在“第|1”这类字符间不算。
+        soft_left = set("。！？!?；;：:，,、）)】]》”’\"' \t\r\n")
+        if left not in soft_left and right not in " \t\r\n":
+            return "split_no_boundary"
+    return None
+
+
+def _is_table_boundary(blocks, i: int | None) -> bool:
+    """table 本身，或紧邻 table 的题注/表头段落。"""
+    if i is None or not (0 <= i < len(blocks)):
+        return False
+    if blocks[i].type == "table":
+        return True
+    return any(0 <= j < len(blocks) and blocks[j].type == "table"
+               for j in (i - 1, i + 1))
+
 
 
 def valid_level(v) -> int | None:
@@ -202,6 +295,11 @@ class OpValidator:
         if name not in self.whitelist:
             reasons.append("not_whitelisted")
             return reasons
+        # P0（2026-10-21）：先判必填参数。缺参不是“可回退默认值”的合法输入，
+        # 否则 accepted 会把空转包装成一次成功修改。
+        for key in _REQUIRED_PARAMS.get(name, ()):
+            if key not in op:
+                reasons.append(f"missing_param:{key}")
         # R6-LLM-1（CH-475，决策 D2）：参数值校验——白名单/目标校验之外，畸形参数
         # （level 非 1..6 的 int、marker 非安全短串）整条拒绝，绝不让其进 apply_ops
         # 致渲染期崩溃。仅当算子确实带了该参数才校验（缺省走 apply_ops 的安全默认）。
@@ -224,6 +322,23 @@ class OpValidator:
                 reasons.append(f"occupied:{tid}")
             elif expected and b.type not in expected:
                 reasons.append(f"bad_type:{b.type}")
+            elif name == "fix_heading_level" and b.level and b.level <= 3:
+                # P0：只允许修深层标题（>H3）。实测模型把 H2「域代码」改成 H1，
+                # 这是正文无关的层级抬升；H1-H3 已足够浅，不再接受向下改号。
+                lv = valid_level(op.get("level"))
+                if lv is not None and lv < b.level:
+                    reasons.append("heading_too_shallow")
+            elif name == "split_block" and "at" in op:
+                at = valid_at(op.get("at"))
+                if at is None:
+                    reasons.append(f"bad_at:{op.get('at')!r}")
+                else:
+                    why = split_reason(b.text or "", at, require_boundary=True)
+                    if why:
+                        reasons.append(why)
+            elif name == "mark_table_boundary" and not _is_table_boundary(
+                    self._order, self._index.get(tid)):
+                reasons.append("not_table_boundary")
             elif name == "merge_block" and tid in declared and _CAPTION.match(b.text or ""):
                 # 图表题注是独立结构；模型常把它当正文续行并回上一段。
                 reasons.append("caption_target")
@@ -307,19 +422,31 @@ def offline_llm(ir, whitelist: list[str] | None = None, *, injected_probe: list[
     injected_probe 仅测试用：模拟「模型被注入后产出的越权 op」，验证防线与归因。
     """
     blocks = ir.blocks
-    ops: list[dict] = []
+    model_ops: list[dict] = []
     for b in blocks:
         if b.type == "heading" and b.level and b.level > 3 and _leading_num(b.text):
-            ops.append({"op": "fix_heading_level", "target": b.id,
-                        "level": max(1, b.level - 1)})
-    if injected_probe:
-        ops = list(injected_probe) + ops
+            model_ops.append({"op": "fix_heading_level", "target": b.id,
+                              "level": max(1, b.level - 1)})
+    probes = list(injected_probe or [])
+    ops = probes + model_ops
     v = OpValidator(blocks, whitelist)
     accepted, rejected = v.apply(ops)
+    probe_ids = {id(p) for p in probes}
+    model_accepted = [o for o in accepted if id(o) not in probe_ids]
+    model_rejected = [r for r in rejected if id(r.get("op")) not in probe_ids]
     return {"accepted": accepted, "rejected": rejected,
+            "accepted_ops": [o["op"] for o in model_accepted],
             "applied_ops": [o["op"] for o in accepted],
             "rejected_ops": [o["op"] for o in rejected],
-            "source": "offline"}
+            "source": "offline",
+            "response_ops": len(model_ops),
+            "batches": 0,
+            "probe_ops": len(probes),
+            "probe_rejected_ops": len(rejected) - len(model_rejected),
+            "rejected_model_count": len(model_rejected),
+            "latency_ms": 0.0,
+            "model": "offline",
+            "prompt_version": "v2.5"}
 
 
 def _leading_num(t: str) -> bool:
@@ -327,7 +454,7 @@ def _leading_num(t: str) -> bool:
 
 
 # --- 本地模型服务客户端（CH-456 / T2） ----------------------------------------
-DEFAULT_LLM_TIMEOUT_MS = 15000
+DEFAULT_LLM_TIMEOUT_MS = 60000          # P0：原 15s 对 CPU 0.8B/768 tokens 偏紧；提到 60s 覆盖冷启动首包
 DEFAULT_LLM_RETRIES = 2                # CH-469：连接类瞬断重试次数（llm.retries = 0 关闭）
 MAX_OPS_PER_RESPONSE = 64              # 防御性上限：模型失控输出不得放大成批量写
 DEFAULT_MODEL_NAME = "doc2md-repair"
@@ -337,7 +464,10 @@ MAX_CANDIDATES_PER_REQUEST = 8
 MAX_CANDIDATES_TOTAL = 16
 MAX_CANDIDATE_TEXT = 240
 MAX_NEIGHBOR_TEXT = 120
-MAX_PAYLOAD_CHARS = 12000
+# P0：原 12000 字符按中文≈1 token/字估算会超过 llama-server 的 8192 上下文
+# （系统提示词 + op_schema + 8 个候选后尤甚）。压到 6000 留出生成预算；
+# 仍按 JSON 字符数保守控制，单批最多 8 个候选，超预算对半收缩。
+MAX_PAYLOAD_CHARS = 6000
 SMALL_IR_BLOCKS = 80                   # 小文档附带全部块元数据；大文档只带候选邻域
 
 _HARD_END = ("。", "！", "？", ".", "!", "?")
@@ -360,6 +490,44 @@ _ALLOWED_BY_TYPE = {
     "list_item": ["fix_list_marker", "merge_block", "split_block"],
     "heading": ["fix_heading_level"],
 }
+
+# P0（2026-10-21）：随请求下发的机器可读参数契约（与 OpValidator._REQUIRED_PARAMS
+# 同源；改一处必须同步另一处与 SYSTEM_PROMPT_V25）。
+_OP_SCHEMA = {
+    "fix_heading_level": {
+        "required": ["target", "level"],
+        "level": "int 1-6；每次只下调一级",
+    },
+    "fix_list_marker": {
+        "required": ["target", "marker"],
+        "marker": "one of - * + · • ‣",
+    },
+    "split_block": {
+        "required": ["target", "at"],
+        "at": "int; 0 < at < len(text); not inside a word/URL",
+    },
+    "merge_block": {
+        "required": ["target"],
+        "target": "paragraph/list_item; not caption/structural/sentence-end",
+    },
+    "mark_table_boundary": {
+        "required": ["target"],
+        "target": "table, or caption/header paragraph adjacent to table",
+    },
+}
+
+
+def _allowed_ops_for(blocks, i: int, wanted: set[str]) -> list[str]:
+    """候选块可落地的 op；table_boundary 只对 table 或紧邻 table 的块开放。
+
+    原实现把 mark_table_boundary 放进所有 paragraph 的 allowed_ops，等于邀请
+    小模型把普通段落标成表边界（pdf_10 / docx_14 实测 14 个误标）。
+    """
+    ops = [op for op in _ALLOWED_BY_TYPE.get(blocks[i].type, []) if op in wanted]
+    if "mark_table_boundary" in ops and not _is_table_boundary(blocks, i):
+        ops = [op for op in ops if op != "mark_table_boundary"]
+    return ops
+
 
 
 def _truncate(text: str, limit: int) -> str:
@@ -482,6 +650,7 @@ class LlmClient:
         以及整篇摘要超上下文。批间失败按整体失败处理：fallback 语义由上层统一。
         """
         payloads = self.payload_batches(ir.blocks, whitelist)
+        t0 = time.monotonic()
         ops: list[dict] = []
         response_ops = 0
         injection = False
@@ -492,14 +661,27 @@ class LlmClient:
             response_ops += len(got)
             injection = injection or scan_injection(_content_of(body))
         v = OpValidator(ir.blocks, whitelist)
+        probes = list(injected_probe or [])
         # 探针（测试/演练用）拼在模型输出之后，与 offline 口径同一趟校验
-        accepted, rejected = v.apply(list(ops) + list(injected_probe or []))
+        accepted, rejected = v.apply(list(ops) + probes)
+        probe_ids = {id(p) for p in probes}
+        model_accepted = [o for o in accepted if id(o) not in probe_ids]
+        model_rejected = [r for r in rejected if id(r.get("op")) not in probe_ids]
         return {"accepted": accepted, "rejected": rejected,
+                # P0：accepted 只表示“过校验”；真正生效由 pipeline 的 apply_ops
+                # 报告决定。applied_ops 保留为 accepted 别名，仅为旧调用方兼容。
+                "accepted_ops": [o["op"] for o in model_accepted],
                 "applied_ops": [o["op"] for o in accepted],
                 "rejected_ops": [o["op"] for o in rejected],
                 "source": "server",
                 "response_ops": response_ops,
                 "batches": len(payloads),
+                "probe_ops": len(probes),
+                "probe_rejected_ops": len(rejected) - len(model_rejected),
+                "rejected_model_count": len(model_rejected),
+                "latency_ms": round((time.monotonic() - t0) * 1000, 1),
+                "model": self.model or DEFAULT_MODEL_NAME,
+                "prompt_version": "v2.5",
                 "injection_hint": injection}
 
     def probe(self) -> tuple[bool, str]:
@@ -524,9 +706,7 @@ class LlmClient:
         items = []
         for i in batch:
             item = self._digest(blocks[i], MAX_CANDIDATE_TEXT)
-            item["allowed_ops"] = [
-                op for op in _ALLOWED_BY_TYPE.get(blocks[i].type, [])
-                if op in wanted_set]
+            item["allowed_ops"] = _allowed_ops_for(blocks, i, wanted_set)
             # 扁平前后文：原嵌套 prev/next 对象会被小模型整体回显成 target。
             if i > 0:
                 item["prev_id"] = blocks[i - 1].id
@@ -542,12 +722,15 @@ class LlmClient:
                            if 0 <= j < len(blocks)})
             meta = [self._digest(blocks[j]) for j in near]
         user = ("待修补候选（candidates 含正文片段与前后文；ir 为定位元数据）：\n"
-                + json.dumps({"ir": meta, "candidates": items}, ensure_ascii=False)
+                + json.dumps({"ir": meta, "candidates": items,
+                              "op_schema": {k: v for k, v in _OP_SCHEMA.items()
+                                            if k in wanted_set}},
+                             ensure_ascii=False)
                 + f"\n白名单 op：{json.dumps(sorted(wanted_set), ensure_ascii=False)}"
                 "\n只输出 {\"ops\": [...]} JSON；target 只写 id 字符串（如 \"b12\"），"
                 "不得复制候选对象或正文。")
         return {"model": self.model or DEFAULT_MODEL_NAME,
-                "messages": [{"role": "system", "content": SYSTEM_PROMPT_V24},
+                "messages": [{"role": "system", "content": SYSTEM_PROMPT_V25},
                              {"role": "user", "content": user}],
                 "temperature": 0, "max_tokens": 768, "stream": False,
                 "response_format": {"type": "json_object"}}
@@ -675,7 +858,18 @@ def _discover_model(vendor_models: str) -> str:
     return ggufs[0].stem if len(ggufs) == 1 else ""
 
 
-def apply_ops(ir, accepted: list[dict]) -> int:
+@dataclass
+class OpEffect:
+    """逐目标块的落地结果：changed=False 即 accepted-but-noop。"""
+    op: str
+    target: str
+    changed: bool
+    reason: str = ""
+    before: dict = field(default_factory=dict)
+    after: dict = field(default_factory=dict)
+
+
+def apply_ops(ir, accepted: list[dict], *, return_report: bool = False):
     """白名单 op 的落地实现（CH-459：原仅 fix_heading_level 有实现，其余四个
     过校验、计入 applied_ops 却静默无效——「计数成功、产物没变」比拒绝更坏）。
 
@@ -692,8 +886,12 @@ def apply_ops(ir, accepted: list[dict]) -> int:
     `next(x for x in ir.blocks …)` 全表扫描——64 ops × 6000 块 ≈ 40 万次
     比较/文档，叠加在 LLM 路径的解析延迟上大文档可感知。split 产生的新块
     同步进字典（validator 本就不放行未知 id，此处保直接调用方的健壮性）。
+
+    P0（2026-10-21）：`return_report=True` 返回逐目标块 `OpEffect`，让管线区分
+    accepted / effective / noop；默认仍返回 int，兼容既有调用方。
     """
     index = {x.id: x for x in ir.blocks}
+    effects: list[OpEffect] = []
     n = 0
     for op in accepted:
         # R7-LLM-1（CH-476）：目标经 `_op_targets` 归一（与 validator 写集同口径）——
@@ -701,54 +899,100 @@ def apply_ops(ir, accepted: list[dict]) -> int:
         # 只落其一就是「计数成功、产物没变」）；任何情况下非 str 不进 dict 取键
         # （unhashable → 整篇 E5000）。
         name = op.get("op")
-        for tid in _op_targets(op):
+        targets = _op_targets(op)
+        if not targets:
+            effects.append(OpEffect(str(name), "", False, "no_target"))
+            continue
+        for tid in targets:
             b = index.get(tid)
             if b is None:
+                effects.append(OpEffect(str(name), tid, False, "target_missing"))
                 continue
+            changed = False
+            reason = ""
+            before: dict = {}
+            after: dict = {}
             if name == "fix_heading_level":
                 # R6-LLM-1（CH-475）：纵深防御——即使绕过 OpValidator 直接调用 apply_ops，
                 # 非法 level 也规约回原值（绝不把 str/越界写进 b.level 致渲染期 TypeError）。
                 # 目标层级与现状相同则不计数、不写 provenance：applied_ops 必须对应
                 # 真实变更（与 fix_list_marker 同口径），不能「计数成功、产物没变」。
+                before = {"level": b.level}
                 lv = valid_level(op.get("level"))
-                if lv is not None and lv != b.level:
+                if lv is None:
+                    reason = "invalid_level"
+                elif lv == b.level:
+                    reason = "same_level"
+                elif b.level is not None and b.level <= 3 and lv < b.level:
+                    # 纵深防御：validator 已拒；直接调用方也不得把 H1-H3 继续下沉。
+                    reason = "already_shallow"
+                else:
                     b.level = lv
                     b.provenance.setdefault("modified_by", []).append("llm:fix_heading_level")
-                    n += 1
+                    changed = True
+                after = {"level": b.level}
             elif name == "fix_list_marker":
                 # R6-LLM-1（CH-475）：marker 经白名单规约；替换用**函数式** repl，返回值
                 # 不被 re 解释为组引用——即便 marker 含 `\1` 也只做字面拼接，杜绝 re.error。
+                # 直接调用方仍保留 `-` 默认；生产路径缺 marker 已在 validator 被拒。
+                before = {"text": b.text or ""}
                 marker = valid_marker(op.get("marker")) or "-"
                 new = re.sub(r"^\s*[·•‣∙○●■□\-\*]\s+", lambda _: marker + " ", b.text or "")
                 if new != b.text:
                     b.text = new
                     b.provenance.setdefault("modified_by", []).append("llm:fix_list_marker")
-                    n += 1
+                    changed = True
+                else:
+                    reason = "no_text_change"
+                after = {"text": b.text or ""}
             elif name == "mark_table_boundary":
-                b.flags["table_boundary"] = True
-                b.provenance.setdefault("modified_by", []).append("llm:mark_table_boundary")
-                n += 1
+                before = {"table_boundary": bool(b.flags.get("table_boundary"))}
+                if before["table_boundary"]:
+                    reason = "already_set"
+                else:
+                    b.flags["table_boundary"] = True
+                    b.provenance.setdefault("modified_by", []).append("llm:mark_table_boundary")
+                    changed = True
+                after = {"table_boundary": bool(b.flags.get("table_boundary"))}
             elif name == "split_block":
+                before = {"text": b.text or ""}
                 if _split_block(ir, b, op, index):
-                    n += 1
+                    changed = True
+                else:
+                    reason = "split_rejected"
+                after = {"text": b.text or "", "blocks": len(ir.blocks)}
             elif name == "merge_block":
+                idx = next((k for k, x in enumerate(ir.blocks) if x is b), None)
+                before = {"text": b.text or "",
+                          "prev_text": (ir.blocks[idx - 1].text
+                                        if idx is not None and idx > 0 else "")}
                 if _merge_block(ir, b):
-                    n += 1
-    return n
+                    changed = True
+                else:
+                    reason = "merge_rejected"
+                after = {"absorbed": changed, "blocks": len(ir.blocks)}
+            else:
+                reason = "unsupported_op"
+            if changed:
+                n += 1
+            effects.append(OpEffect(str(name), tid, changed, reason, before, after))
+    return effects if return_report else n
 
 
 def _split_block(ir, b, op: dict, index: dict | None = None) -> bool:
-    """按 at（字符偏移，缺省取文本中点）切块；空侧不切。
+    """按 at（必填字符偏移）切块；空侧/缺参/不安全切点不切。
+
+    P0（2026-10-21）：原实现缺 at 时取文本中点，实测把 `docx_12` 的英文词切成
+    `block a` / `nd rewrite`，属于静默破坏正文。现在缺参与不安全切点一律拒绝；
+    不再有“中点兜底”。
 
     CH-473（R5-LLM-2）：`index` 为调用方（apply_ops）预建的 id→block 字典，
     用于 O(1) 查 id 冲突（原全表 any 扫描）并登记新块；缺省时自建。
     """
     text = b.text or ""
-    at = op.get("at")
-    try:
-        at = int(at)
-    except (TypeError, ValueError):
-        at = len(text) // 2
+    at = valid_at(op.get("at"))
+    if at is None or split_reason(text, at):
+        return False
     if at <= 0 or at >= len(text):
         return False
     head, tail = text[:at].rstrip(), text[at:].lstrip()

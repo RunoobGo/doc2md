@@ -44,7 +44,11 @@ class Result:
     ir: IR
     meta: dict = field(default_factory=dict)
     metrics: dict = field(default_factory=dict)
+    # P0：applied_ops 只放“真正改变 IR 的 op”；accepted 是过校验，noop 是
+    # 过校验但没落笔（缺参/同值/重复旗标等），三者分账。
     applied_ops: list = field(default_factory=list)
+    accepted_ops: list = field(default_factory=list)
+    noop_ops: list = field(default_factory=list)
     rejected_ops: list = field(default_factory=list)
     gate: dict = field(default_factory=dict)
     zip_path: Path | None = None
@@ -52,7 +56,8 @@ class Result:
     def to_dict(self) -> dict:
         return {"doc_id": self.doc_id, "source_key": self.source_key,
                 "source_name": self.source_name, "meta": self.meta,
-                "metrics": self.metrics, "gate": self.gate}
+                "metrics": self.metrics, "gate": self.gate,
+                "llm": dict(self.meta.get("llm_stats") or {})}
 
 
 def convert(path: str | Path, *, cfg: dict | None = None, mode: str | None = None,
@@ -213,7 +218,12 @@ def _convert(path: str | Path, *, cfg: dict, mode: str | None,
     wl = list(config.get(cfg, "llm.op_whitelist", DEFAULT_OP_WHITELIST))
     probe = _injected_ops(ir)
     llm = repair_ops(ir, cfg, whitelist=wl, injected_probe=probe)
-    apply_ops(ir, llm["accepted"])
+    effects = apply_ops(ir, llm["accepted"], return_report=True)
+    effective = [e for e in effects if e.changed]
+    noop = [e for e in effects if not e.changed]
+    accepted_names = list(llm.get("accepted_ops")
+                          or [o.get("op") for o in llm.get("accepted", [])])
+    llm_stats = _llm_stats(llm, effects)
 
     md = s4_render.render(
         ir,
@@ -225,7 +235,10 @@ def _convert(path: str | Path, *, cfg: dict, mode: str | None,
     metrics["elapsed_ms"] = round((time.monotonic() - t0) * 1000, 1)
     meta = ir.meta()
     meta["shard_stats"] = stats
-    meta["llm_prompt"] = "v2.4"
+    meta["llm_prompt"] = "v2.5"
+    # P0：llm_stats 只进 report.html / DB meta，不进 content.md front-matter
+    # （latency 等易变值不得破坏正文哈希可复现性；package 会显式剔除）。
+    meta["llm_stats"] = llm_stats
     if ir.sharded:
         meta.setdefault("notes", []).append("本文为分片转换，跨片表格未合并")
     zip_path = None
@@ -239,7 +252,10 @@ def _convert(path: str | Path, *, cfg: dict, mode: str | None,
         _tick("package", zip=str(zip_path))
     return Result(doc_id=doc_id, source_key=source_key, source_name=safe, markdown=md,
                   ir=ir, meta=meta, metrics=metrics, gate=gate_detail,
-                  applied_ops=llm["applied_ops"], rejected_ops=llm["rejected"],
+                  applied_ops=[e.op for e in effective],
+                  accepted_ops=accepted_names,
+                  noop_ops=[e.op for e in noop],
+                  rejected_ops=llm["rejected"],
                   zip_path=zip_path)
 
 
@@ -298,6 +314,36 @@ def repair_ops(ir, cfg: dict, *, whitelist: list[str],
                     "hint": "启动 llama-server 或把 llm.mode 改回 offline"}) from exc
 
 
+def _llm_stats(llm: dict, effects: list) -> dict:
+    """P0：把 accepted / effective / noop / rejected 拆成可审计计数。
+
+    只回计数与模型标识，不含正文（NFR-20）。effective/noop 以 apply_ops 的
+    逐目标报告为准，不再拿 accepted 名单冒领。
+    """
+    accepted = llm.get("accepted_ops")
+    if accepted is None:
+        accepted = [o.get("op") for o in llm.get("accepted", [])]
+    rejected = llm.get("rejected_model_count")
+    if rejected is None:
+        rejected = len(llm.get("rejected", []))
+    return {
+        "source": llm.get("source", ""),
+        "fallback": bool(llm.get("fallback", False)),
+        "model": llm.get("model", ""),
+        "prompt_version": llm.get("prompt_version", "v2.5"),
+        "batches": int(llm.get("batches", 0) or 0),
+        "response_ops": int(llm.get("response_ops", 0) or 0),
+        "accepted_ops": len(accepted),
+        "effective_ops": sum(1 for e in effects if e.changed),
+        "noop_ops": sum(1 for e in effects if not e.changed),
+        "rejected_ops": int(rejected or 0),
+        "probe_ops": int(llm.get("probe_ops", 0) or 0),
+        "probe_rejected_ops": int(llm.get("probe_rejected_ops", 0) or 0),
+        "latency_ms": float(llm.get("latency_ms", 0.0) or 0.0),
+        "injection_hint": bool(llm.get("injection_hint", False)),
+    }
+
+
 def _metrics(md: str, ir) -> dict:
     import re as _re
     heads = _re.findall(r"^#{1,6} ", md, _re.M)
@@ -320,7 +366,8 @@ def package(ir: IR, md: str, meta: dict, out_dir: Path, cfg: dict,
     assert_name_safe(ir.source_name)
     out_dir.mkdir(parents=True, exist_ok=True)
     zp = out_dir / f"{ir.doc_id}.zip"
-    fm = {k: v for k, v in meta.items() if k != "source_name_raw"}
+    fm = {k: v for k, v in meta.items()
+          if k not in ("source_name_raw", "llm_stats")}
     body = "---\n" + json.dumps(fm, ensure_ascii=False, indent=2) + "\n---\n\n" + md
     entries = [("content.md", body),
                ("ir.json", json.dumps(ir.to_dict(for_export=True), ensure_ascii=False)),
@@ -376,12 +423,35 @@ def render_report(ir: IR, meta: dict, gate: dict | None = None) -> str:
             "<table border=1><tr><th>page</th><th>chars</th><th>lines</th><th>cjk</th>"
             "<th>noise</th><th>ok</th><th>reasons</th></tr>"
             + "".join(grows) + "</table>")
+    llm_html = ""
+    llm_stats = meta.get("llm_stats") or {}
+    if llm_stats:
+        fields = [
+            ("source", llm_stats.get("source")),
+            ("model", llm_stats.get("model")),
+            ("prompt", llm_stats.get("prompt_version")),
+            ("fallback", llm_stats.get("fallback")),
+            ("batches", llm_stats.get("batches")),
+            ("response", llm_stats.get("response_ops")),
+            ("accepted", llm_stats.get("accepted_ops")),
+            ("effective", llm_stats.get("effective_ops")),
+            ("noop", llm_stats.get("noop_ops")),
+            ("rejected", llm_stats.get("rejected_ops")),
+            ("probe", llm_stats.get("probe_ops")),
+            ("probe_rejected", llm_stats.get("probe_rejected_ops")),
+            ("latency_ms", llm_stats.get("latency_ms")),
+        ]
+        cells = "".join(
+            f"<tr><td>{H.escape(k)}</td><td>{H.escape(str(v))}</td></tr>"
+            for k, v in fields)
+        llm_html = ("<h2>LLM</h2><table border=1 cellpadding=4>"
+                    "<tr><th>metric</th><th>value</th></tr>" + cells + "</table>")
     return ("<!doctype html><meta charset=utf-8><title>Doc2md report</title>"
             f"<h1>{H.escape(meta.get('source_name', ''))}</h1>"
             f"<p>raw: {H.escape(meta.get('source_name_raw', ''))}</p>"
             f"<p>sharded={meta.get('sharded')} count={meta.get('shard_count')} "
             f"warnings={H.escape(','.join(meta.get('warnings', [])))}</p>"
-            + gate_html +
+            + gate_html + llm_html +
             "<p><label><input type=checkbox onclick="
             "document.querySelectorAll('tr.edge-1').forEach(r=>r.style.display="
             "this.checked?'':'none')>只看分片边界块</label></p>"

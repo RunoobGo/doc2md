@@ -244,7 +244,7 @@ Windows 任务计划不捕获标准输出，日志目录里没有 `launchd-*` �
 
 > **归档口径（CH-491 决策）**：上表标「已吸收存档」的 5 份（合计 4,451 行）**本轮只做地位标注，不做物理移动**——保留历史优先。是否 `git mv` 到 `docs/archive/` 登记为 **CH-492** 再议。标「孤儿」的 2 份同理，先补引用还是先归档，一并归入 CH-492。
 
-运维侧另有两份细则，不在 `docs/` 下：**`ops/backup.md`**（备份介质与恢复演练细则，94 行）、**`ops/llm.md`**（本地 LLM 模型接入实操：选型 / 下载 GGUF / llama-server / 故障排查，170 行）；Windows 任务计划的安装 / 校验 / 卸载见 `ops/windows/install-doc2md-tasks.ps1`（280 行）。
+运维侧另有两份细则，不在 `docs/` 下：**`ops/backup.md`**（备份介质与恢复演练细则，94 行）、**`ops/llm.md`**（本地 LLM 模型接入实操：选型 / 下载 GGUF / llama-server / 故障排查，206 行）；Windows 任务计划的安装 / 校验 / 卸载见 `ops/windows/install-doc2md-tasks.ps1`（280 行）。
 
 跟踪约定：契约变更、缺陷、更优做法一律按登记流写入方案 第十一章（当前编号至 `CH-494`，下一条自 `CH-495`），实测数字进第十二章并标注语料与测量方法；规格发生变化时同步主题篇章节与本文相应小节，并递增 `doc2md.PLAN_VERSION`（管线契约变化另递增 `PIPELINE_VERSION`；状态库结构变化另递增 `DB_VERSION`，CH-476 起为 `6`、CH-483 起为 `7`、CH-485 起为 `8`、CH-486 起为 `9`）。
 
