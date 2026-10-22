@@ -1,0 +1,42 @@
+{
+  "source": "pdf_09_complex_long_8p.pdf",
+  "kind": "headings",
+  "provenance": "程序化生成自源 PDF 字号分布（pdfplumber 逐行字号 + make_corpus.py 生成器的标题字号约定：18/20/16=章级，14=节级或带顿号中文序号的章级）；生成脚本 tests/corpus/make_ideal_pdf.py，人工可复核。与 expected/ 基线（管线产物）无关。",
+  "headings": [
+    {
+      "seq": 1,
+      "text": "一、复杂长文档综合测试",
+      "level": 1
+    },
+    {
+      "seq": 2,
+      "text": "二、列表与结构",
+      "level": 1
+    },
+    {
+      "seq": 3,
+      "text": "（一）子标题与长段落",
+      "level": 2
+    },
+    {
+      "seq": 4,
+      "text": "三、表格与题注",
+      "level": 1
+    },
+    {
+      "seq": 5,
+      "text": "四、跨栏与混排",
+      "level": 1
+    },
+    {
+      "seq": 6,
+      "text": "五、复杂表格与长单元格",
+      "level": 1
+    },
+    {
+      "seq": 7,
+      "text": "六、结论",
+      "level": 1
+    }
+  ]
+}

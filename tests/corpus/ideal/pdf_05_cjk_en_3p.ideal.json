@@ -1,0 +1,22 @@
+{
+  "source": "pdf_05_cjk_en_3p.pdf",
+  "kind": "headings",
+  "provenance": "程序化生成自源 PDF 字号分布（pdfplumber 逐行字号 + make_corpus.py 生成器的标题字号约定：18/20/16=章级，14=节级或带顿号中文序号的章级）；生成脚本 tests/corpus/make_ideal_pdf.py，人工可复核。与 expected/ 基线（管线产物）无关。",
+  "headings": [
+    {
+      "seq": 1,
+      "text": "第 1 章 中英文混排",
+      "level": 1
+    },
+    {
+      "seq": 2,
+      "text": "第 2 章 中英文混排",
+      "level": 1
+    },
+    {
+      "seq": 3,
+      "text": "第 3 章 中英文混排",
+      "level": 1
+    }
+  ]
+}

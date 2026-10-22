@@ -1,19 +1,20 @@
-"""tests/test_qa_n03_ideal.py — N-3（QA-OPT-2）：ideal 标注真值链路。
+"""tests/test_qa_n03_ideal.py — N-3（QA-OPT-2/3）：ideal 标注真值链路。
 
-首轮 QA 遗留（N-3，P1）：`heading_pr` 仅 DOCX 有真值。本文件落地首批
-DOCX 标题真值标注（`tests/corpus/ideal/*.ideal.json`，由
-`make_ideal_docx.py` 从**源文件 XML 样式**程序化生成，不经管线），并钉住：
+首轮 QA 遗留（N-3，P1）：`heading_pr` 仅 DOCX 有真值。本文件落地标题
+真值标注（`tests/corpus/ideal/*.ideal.json`）并钉住：
 
-① 标注与源样式一致（--check 同款校验，防标注漂移）——这是「标注是真值」
-   的前提：标注文件被人手改坏或源样本重生成后样式变化，这里先红；
-② S3 分析对显式标题零丢失零改级：pred（S3 heading 块）对 ref（源样式
-   真值）F1 == 1.0。这是**真断言**——pred 走 S3 启发式分析，ref 来自
-   源 XML，两层独立；F1 掉下来即 S3 丢了标题或改了层级；
-③ 覆盖完整性：sources/ 里每份 docx 样本都有 ideal 标注（防漏标）；
-④ `pred_headings` 助手边界（空 IR / 无标题 IR）。
+DOCX 批次（make_ideal_docx.py，源 XML 样式 `Heading N`/`Title`）：
+① 标注与源样式一致（--check 同款校验，防标注漂移）；
+② S3 对显式标题零丢失零改级：F1 == 1.0（pred 走 S3 启发式，ref 来自
+   源 XML，两层独立）；
+③ 覆盖完整性；④ `pred_headings` 助手边界；⑤ JSON 形状契约。
 
-PDF 样本真值仍缺位（人工标注推进中）——qa_eval 的「ref 空返回 None、
-不得当 1.0 聚合」纪律由 test_qa_o06_metrics.py 钉住，此处不重复。
+PDF 批次（N-3 二批，make_ideal_pdf.py，源 PDF 字号分布 + 生成器字号
+约定）：同构四层校验，但 S3 的 F1 **冻结在实测基线**而非 1.0——
+pdf_04「代码说明」/ pdf_07「结语」（第 2 页顶部无编号 14pt 短行）被
+S3 跨页续段合并吞进正文段，暴露 `unnumbered` 分支 `base+6.0` 阈值
+对 +4.0pt 形态漏判；修复需与 golden small_3p 页标题（+5.5pt，刻意
+排除）区分，属专项变更 → 登记 N-8，基线冻结防进一步漂移。
 """
 from __future__ import annotations
 
@@ -82,7 +83,7 @@ def test_pred_headings_empty_and_nonheading_ir():
 
 def test_ideal_json_shape_contract():
     """标注文件契约：kind/headings 键集稳定（评测脚本与人工审阅依赖）。"""
-    files = sorted(IDEAL.glob("docx_*.ideal.json"))
+    files = sorted(IDEAL.glob("*_*.ideal.json"))
     assert files, "ideal 目录不得为空"
     for f in files:
         ann = json.loads(f.read_text(encoding="utf-8"))
@@ -91,3 +92,62 @@ def test_ideal_json_shape_contract():
         for h in ann["headings"]:
             assert set(h) == {"seq", "text", "level"}
             assert isinstance(h["level"], int) and 1 <= h["level"] <= 6
+
+
+# ======================================================= PDF 批次（N-3 二批）
+PDF_BASELINE_F1 = {
+    # N-8 冻结基线：pdf_04 / pdf_07 的第 2 页顶部无编号 14pt 短标题被 S3
+    # 跨页续段合并吞进正文段（unnumbered 分支 base+6.0 阈值对 +4.0pt 漏判；
+    # golden small_3p 页标题 +5.5pt 刻意排除在阈值外，修复需独立判别信号，
+    # 见 optimization-report §6 N-8）。N-8 修复后此处应升到 1.0。
+    "pdf_01": 1.0,
+    "pdf_02": 1.0,
+    "pdf_03": 1.0,
+    "pdf_04": 0.8,           # ref=3 pred=2 matched=2
+    "pdf_05": 1.0,
+    "pdf_07": 0.6667,        # ref=2 pred=1 matched=1（qa_eval 舍入到 4 位）
+    "pdf_08": 1.0,
+    "pdf_09": 1.0,
+    "pdf_10": None,          # 真值=空集（栏头是家具）：断 pred 也是空集
+    "pdf_11": 1.0,
+}
+
+
+@pytest.mark.parametrize("stem", sorted(PDF_BASELINE_F1), ids=lambda s: s)
+def test_ideal_pdf_annotation_matches_source(stem):
+    import sys
+    sys.path.insert(0, str(HERE / "corpus"))
+    import make_ideal_pdf as gen
+    src = next(SOURCES.glob(f"{stem}*.pdf"))
+    target = IDEAL / f"{src.stem}.ideal.json"
+    assert target.is_file(), f"缺标注：{target.name}"
+    ann = json.loads(target.read_text(encoding="utf-8"))
+    assert ann == gen.build_annotation(src), \
+        "标注与源字号分布不一致——先跑 make_ideal_pdf.py 重生成，勿手改数字"
+
+
+@pytest.mark.parametrize("stem", sorted(PDF_BASELINE_F1), ids=lambda s: s)
+def test_s3_pdf_heading_frozen_baseline(stem):
+    from doc2md.pipeline.s1_parse import read_pdf
+    src = next((HERE / "corpus" / "sources").glob(f"{stem}*.pdf"))
+    ann = json.loads((IDEAL / f"{src.stem}.ideal.json").read_text(
+        encoding="utf-8"))
+    pages = read_pdf(src)
+    ir = analyze(pages, base_size=modal_size(pages))
+    pred = qa_eval.pred_headings(ir.blocks)
+    if ann["headings"]:
+        res = qa_eval.heading_pr(pred, ann["headings"])
+        assert res["f1"] == pytest.approx(PDF_BASELINE_F1[stem], abs=5e-4), \
+            f"{src.name}: S3 标题 F1 偏离冻结基线 {res}（升高=修复应同步更新基线；" \
+            "降低=回归，先查）"
+    else:
+        assert pred == [], \
+            f"{src.name}: 真值为空集（全家具）但 S3 判出标题 {pred}"
+
+
+def test_every_convertible_pdf_sample_has_ideal_annotation():
+    skipped = {"pdf_06_scanned_1p.pdf"}     # 无文本层，门禁拒收，无真值
+    missing = [p.name for p in (HERE / "corpus" / "sources").glob("pdf_*.pdf")
+               if p.name not in skipped
+               and not (IDEAL / f"{p.stem}.ideal.json").is_file()]
+    assert not missing, f"缺标注：{missing}"
