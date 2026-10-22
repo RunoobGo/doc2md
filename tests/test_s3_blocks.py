@@ -356,13 +356,48 @@ def test_pdf_unnumbered_large_short_line_is_heading():
     assert heads and heads[0].text == "年度报告" and heads[0].level == 1
 
 
-def test_pdf_unnumbered_borderline_size_stays_paragraph():
-    """+6pt 阈值以下不升级，避免把页标题/大号正文误判为标题。"""
-    pages = [_page(_line("页标题", size=15.5),
+def test_pdf_unnumbered_short_large_line_becomes_heading():
+    """N-8：无编号短大字行升级为标题（阈值 base+3.5，与 numbered 分支对齐）。
+
+    旧口径 +6pt 阈值下本用例的 15.5pt「页标题」保持段落；O-09 之后页标题
+    形态在 furniture 层已剔除，pdf_04「代码说明」（+4.0）/ pdf_07「结语」
+    （+3.5）被续段合并吞掉的缺陷暴露，阈值下调。误判防线改为：长行、
+    句末标点（本文件其余用例）+ 页标题豁免集（test_pdf_page_title_repeat
+    _not_heading）。
+    """
+    pages = [_page(_line("代码说明", size=14.0),
                    _line("这是正文第一段，用于建立正文基准。", size=10.0),
                    _line("这是正文第二段，用于建立正文基准。", size=10.0))]
     ir = analyze(pages, base_size=10.0)
+    heads = [b for b in ir.blocks if b.type == "heading"]
+    assert heads and heads[0].text == "代码说明" and heads[0].level == 2
+
+
+def test_pdf_unnumbered_long_or_sentence_line_stays_paragraph():
+    """N-8 误判防线：长行（>60 字）与句末标点行不因字号升级。"""
+    long_text = "这是一段没有编号但很长的大字号文字，" * 6
+    pages = [_page(_line(long_text, size=14.0),
+                   _line("摘要完毕。", size=14.0),
+                   _line("这是正文第一段，用于建立正文基准。", size=10.0))]
+    ir = analyze(pages, base_size=10.0)
     assert not [b for b in ir.blocks if b.type == "heading"]
+
+
+def test_pdf_page_title_repeat_not_heading():
+    """N-8 豁免集：数字折叠后跨页重复的无编号行是页标题，字号再大不抬。
+
+    badtail 形态——“正常页面 1/2/…”逐页变体，furniture 键不可折漏到 S3；
+    几何页（height>0）边距带内聚出跨页重复后豁免。单页大字行不受影响
+    （见 test_pdf_unnumbered_short_large_line_becomes_heading）。
+    """
+    pages = [RawPage(index=i, height=842.0, lines=[
+        _line(f"正常页面 {i}", size=14.0, top=40.0, bottom=58.0),
+        _line(f"这是第 {i} 页的正文内容，字号回落后保持段落形态。", size=10.0,
+              top=90.0, bottom=104.0),
+    ]) for i in range(1, 4)]
+    ir = analyze(pages, base_size=10.0)
+    assert not [b for b in ir.blocks if b.type == "heading"]
+    assert sum("正常页面" in b.text for b in ir.blocks if b.type == "paragraph") == 3
 
 
 def test_links_pdf_markdown_carries_both_links(golden_dir):

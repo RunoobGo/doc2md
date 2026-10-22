@@ -86,7 +86,7 @@
 | N-5 | O-10 阈值（RTL 50%、Rotation）未经真实语料校准 | 日文竖排/阿语文档真实样本到手后校准，误报面未知前保持探测-only | P2 |
 | N-6 | `Result.metrics`（含 table_col / heading_pr）不落任何持久面，批量审计要看 stdout | 可选：quality 摘要进 report.html 尾节（报告层，不动 content.md 字节） | P3 ✅ 已实施 |
 | N-7 | O-11 触发条件 T2（搭车 bump SCHEMA_VERSION）未出现前 span 模型不动 | 维持 ADR 状态；若下轮出现 IR 契约变更，按 ADR §3 骨架同批实施阶段 1（DOCX run 级） | P2（条件触发） |
-| N-8 | **S3 无编号短标题漏判**（N-3 二批 PDF 标注暴露）：pdf_04「代码说明」/ pdf_07「结语」（第 2 页顶部无编号 14pt 短行，+4.0pt 对比正文）被跨页续段合并吞进正文段 | `_heading_level` unnumbered 分支阈值 `base+6.0` 对 +4.0pt 形态漏判；**修复约束**：golden small_3p 页标题（+5.5pt）被该阈值刻意排除，全局下调必误伤——需独立判别信号（如页级字号对比 + 页首位置 + 编号形态组合），待真实语料佐证后专项实施。当前 PDF F1 冻结基线（pdf_04=0.8、pdf_07=0.6667）防进一步漂移 | P2 |
+| N-8 | ~~S3 无编号短标题漏判~~ **已修复（同日，见 §10）**：根因比登记时更精确——是**同页**续段合并（「代码说明」无句末标点 → `_continues_paragraph` 把下一行正文并进来），且 golden small_3p 页标题 +5.5pt 在 O-09 后已被 furniture 剔除、`+6.0` 阈值的历史顾虑消失 | 修复：unnumbered 阈值 `base+6.0` → `base+3.5`（与 numbered 分支对齐）+ **页标题豁免集**（无编号行数字折叠键跨 ≥2 页边距带重复 → 不抬标题，兜住 badtail「正常页面 N」逐页变体）；版本 2.14.0 → 2.15.0 | PDF F1 基线 0.8/0.6667 → **1.0**；语料重烤 2 份（pdf_04/pdf_07，diff 人工审阅通过）；全量 pytest 绿 |
 
 ## 7. 遗留与登记
 
@@ -176,3 +176,33 @@
 bulk-delete 护栏（≥50 项拦截），全量跑需 `--basetemp=$TMPDIR/d2md-pytest`
 （护栏对系统 tmp 放行）；pytest.ini 已带 `-q`，命令行再加 `-q` 会压掉
 统计摘要行（`-qq` 语义）。
+
+## 10. N-8 修复实施（2026-10-23）
+
+**根因修正**（相对 §6/§9 登记时的判断）：
+
+1. 合并点是**同页**而非跨页——「代码说明」无句末标点，
+   `_continues_paragraph` 的 `not _ends_sentence` 分支把下一行正文
+   并进同一段；
+2. `base+6.0` 阈值豁免 golden small_3p 页标题的历史顾虑**已消失**——
+   O-09 的 `_FURNITURE_PAGE_COL` 把「第 N 页」折 `#` 后，页标题
+   （「小文档 #」三页聚合、短键）在 furniture 层已被剔除，到不了
+   `_heading_level`。
+
+**修复**（`doc2md/pipeline/s3_structure.py`）：
+
+| 改动 | 内容 |
+| --- | --- |
+| 阈值下调 | `_heading_level` unnumbered 分支 `base+6.0` → `base+3.5`（与 numbered 分支的字号信号对齐）；+10pt 以上 H1、其余 H2 不变 |
+| 页标题豁免集 | analyze 预扫描：无编号行**数字折叠键**（`正常页面 1`→`正常页面 #`）在 ≥2 页边距带内重复 → 主循环不抬标题。兜住 badtail「正常页面 N」逐页变体（裸计数 furniture 键不可折、漏到 S3 的残余风险） |
+
+**影响面**（全语料 + golden 扫描 +3.0~+7.0 区间无编号行）：
+sources 仅 pdf_04/pdf_07 两个目标行；golden 侧 badtail_front/scan（豁免
+集兜住，基线不变）、links_pdf「目录页」（+5.0 单页 → 新判 H2，非字节
+门禁样本，`test_links_pdf_markdown_carries_both_links` 绿）。
+
+**验证**：PDF F1 冻结基线解除（0.8/0.6667 → 1.0，10 样本全绿）；
+语料重烤 2 份（diff 人工审阅：标题解救、正文独立成段）；新增 3 项
+S3 测试（短大字行升级 / 长行与句末标点负例 / 页标题豁免集）；全量
+pytest 绿、golden 全绿、ruff 全绿。版本 `PIPELINE_VERSION` 2.14.0 →
+**2.15.0**（判据变更沿 N-4 先例升 minor，三处同步）。

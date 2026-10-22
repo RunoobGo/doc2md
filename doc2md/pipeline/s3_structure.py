@@ -565,6 +565,28 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
     # 页眉页脚/页码先于分段剔除：否则页脚会把跨页段落切断，页码也会被
     # 当作普通短行进入正文。字号基准取原始页（正文仍占字符多数）。
     pages = _strip_page_furniture(pages, base_size)
+    # N-8（QA-OPT-3）：页标题形态豁免集。无编号行的**数字折叠键**（“正常页面 1”
+    # →“正常页面 #”）在 ≥2 页的边距带内重复 → 逐页变体的页标题/页眉残留
+    # （furniture 剔除只认「页/栏」量词等显式页码片段，“正常页面 1” 这类
+    # 裸计数不可折，会漏到这里）。宁漏勿误：这类行即使字号显著大于正文也
+    # 不抬成标题；全文档唯一（“代码说明”“结语”）的无编号大字行才判标题。
+    _PAGE_TITLE_REPEAT = 2
+    page_titles: set[str] = set()
+    _pt_counts: dict[str, int] = {}
+    for _pg in pages:
+        _seen_pt: set[str] = set()
+        for _ln in _pg.lines:
+            _t = (_ln.text or "").strip()
+            if not _t or len(_t) > 60 or not _in_margin(_ln, _pg.height):
+                continue
+            if _NUM.match(_t) or _CJK_HEAD.match(_t) or _CJK_ORD.match(_t) \
+                    or _PAREN_HEAD.match(_t):
+                continue                          # 编号行不收集：页眉变体已由 N-4 折平剔除
+            _k = re.sub(r"\d+", "#", _furniture_key(_t))
+            if _k not in _seen_pt:
+                _seen_pt.add(_k)
+                _pt_counts[_k] = _pt_counts.get(_k, 0) + 1
+    page_titles = {k for k, n in _pt_counts.items() if n >= _PAGE_TITLE_REPEAT}
     # CH-459：跨页存续的聚集状态
     code_buf: list[str] | None = None          # None = 不在代码块内
     code_mode = ""                             # fence（显式围栏）| indent | mono
@@ -743,6 +765,8 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
             elif ln.level_hint is not None:
                 lvl = _heading_level(text, ln.size, base_size, ln.bold,
                                      hint=ln.level_hint)
+            elif re.sub(r"\d+", "#", _furniture_key(text)) in page_titles:
+                lvl = None        # N-8：逐页变体页标题，字号再大也不抬（宁漏勿误）
             else:
                 lvl = None if ln.list_marker else _heading_level(
                     text, ln.size, base_size, ln.bold)
@@ -1011,9 +1035,13 @@ def _heading_level(text: str, size: float, base: float, bold: bool,
         if (size or base) > base + 0.5 or bold or multi_level or cjk_head or paren_head:
             return _level_from_number(t, size or base, base)
     # 真实 Word 报告常有无编号的大字号章节标题（PDF 无 Heading 样式可依赖）。
-    # 只认「短行 + 字号显著大于正文」：+6pt 阈值高于现有 golden 的 +5.5pt，
-    # 避免把 small_3p 这类页标题误升为标题；+10pt 以上视为一级。
-    if (not numbered and size and base and size >= base + 6.0
+    # 只认「短行 + 字号显著大于正文」：+10pt 以上视为一级，其余二级。
+    # N-8（QA-OPT-3）：+5.5pt 阈值原为豁免 golden small_3p 的页标题而定——
+    # O-09 之后页标题在 furniture 层已剔除（小文档 # 三页聚合），历史顾虑
+    # 消失；N-4 同批暴露的 pdf_04「代码说明」（+4.0）/ pdf_07「结语」（+3.5）
+    # 被续段合并吞掉，阈值降到 base+3.5（与 numbered 分支的字号信号对齐）。
+    # 逐页变体页标题的残余风险由调用方的 page_titles 豁免集兜底。
+    if (not numbered and size and base and size >= base + 3.5
             and len(t) <= 60
             and not t.endswith(("。", "！", "？", ".", "!", "?"))):
         return 1 if size >= base + 10.0 else 2

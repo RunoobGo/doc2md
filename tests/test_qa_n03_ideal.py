@@ -96,16 +96,16 @@ def test_ideal_json_shape_contract():
 
 # ======================================================= PDF 批次（N-3 二批）
 PDF_BASELINE_F1 = {
-    # N-8 冻结基线：pdf_04 / pdf_07 的第 2 页顶部无编号 14pt 短标题被 S3
-    # 跨页续段合并吞进正文段（unnumbered 分支 base+6.0 阈值对 +4.0pt 漏判；
-    # golden small_3p 页标题 +5.5pt 刻意排除在阈值外，修复需独立判别信号，
-    # 见 optimization-report §6 N-8）。N-8 修复后此处应升到 1.0。
+    # N-8（QA-OPT-3）修复后全 1.0：原 pdf_04 / pdf_07 的第 2 页顶部无编号
+    # 14pt 短标题被同页续段合并吞进正文段（unnumbered 分支 base+6.0 阈值对
+    # +3.5~+4.0pt 漏判）——修复为阈值降到 base+3.5 + 页标题豁免集（数字折叠
+    # 后跨页重复的无编号行不抬），冻结基线解除。
     "pdf_01": 1.0,
     "pdf_02": 1.0,
     "pdf_03": 1.0,
-    "pdf_04": 0.8,           # ref=3 pred=2 matched=2
+    "pdf_04": 1.0,
     "pdf_05": 1.0,
-    "pdf_07": 0.6667,        # ref=2 pred=1 matched=1（qa_eval 舍入到 4 位）
+    "pdf_07": 1.0,
     "pdf_08": 1.0,
     "pdf_09": 1.0,
     "pdf_10": None,          # 真值=空集（栏头是家具）：断 pred 也是空集

@@ -10,7 +10,7 @@
 - PLAN_VERSION：开发方案文档版本（主题篇规格变化时递增）。
 """
 
-PIPELINE_VERSION = "2.14.0"   # N-4（QA-OPT-3）：页眉判据扩展（罗马页码 + 混合页眉，契约级 → minor）
+PIPELINE_VERSION = "2.15.0"   # N-8（QA-OPT-3）：S3 标题判据变更（无编号阈值 +6→+3.5 + 页标题豁免，产物结构可变 → minor）
 SCHEMA_VERSION = 14          # IR 约定 14（文件名与内容的边界）落地
 PLAN_VERSION = "3.28"         # 开发方案文档版本（docs/dev-plan.md，文件名不带版本号）
 
