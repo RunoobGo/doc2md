@@ -1,0 +1,132 @@
+{
+  "source": "docx_10_complex_long.docx",
+  "kind": "headings",
+  "provenance": "程序化生成自源文件 XML 样式（python-docx 直读 Heading N / Title，不经管线）；生成脚本 tests/corpus/make_ideal_docx.py，人工可复核。与 expected/ 基线（管线产物）无关。",
+  "headings": [
+    {
+      "seq": 1,
+      "text": "复杂长文 DOCX 综合测试",
+      "level": 1
+    },
+    {
+      "seq": 2,
+      "text": "第 1 章 长段落与结构",
+      "level": 1
+    },
+    {
+      "seq": 3,
+      "text": "1.1 背景",
+      "level": 2
+    },
+    {
+      "seq": 4,
+      "text": "1.2 要点",
+      "level": 3
+    },
+    {
+      "seq": 5,
+      "text": "第 2 章 长段落与结构",
+      "level": 1
+    },
+    {
+      "seq": 6,
+      "text": "2.1 背景",
+      "level": 2
+    },
+    {
+      "seq": 7,
+      "text": "2.2 要点",
+      "level": 3
+    },
+    {
+      "seq": 8,
+      "text": "第 3 章 长段落与结构",
+      "level": 1
+    },
+    {
+      "seq": 9,
+      "text": "3.1 背景",
+      "level": 2
+    },
+    {
+      "seq": 10,
+      "text": "3.2 要点",
+      "level": 3
+    },
+    {
+      "seq": 11,
+      "text": "第 4 章 长段落与结构",
+      "level": 1
+    },
+    {
+      "seq": 12,
+      "text": "4.1 背景",
+      "level": 2
+    },
+    {
+      "seq": 13,
+      "text": "4.2 要点",
+      "level": 3
+    },
+    {
+      "seq": 14,
+      "text": "第 5 章 长段落与结构",
+      "level": 1
+    },
+    {
+      "seq": 15,
+      "text": "5.1 背景",
+      "level": 2
+    },
+    {
+      "seq": 16,
+      "text": "5.2 要点",
+      "level": 3
+    },
+    {
+      "seq": 17,
+      "text": "第 6 章 长段落与结构",
+      "level": 1
+    },
+    {
+      "seq": 18,
+      "text": "6.1 背景",
+      "level": 2
+    },
+    {
+      "seq": 19,
+      "text": "6.2 要点",
+      "level": 3
+    },
+    {
+      "seq": 20,
+      "text": "第 7 章 长段落与结构",
+      "level": 1
+    },
+    {
+      "seq": 21,
+      "text": "7.1 背景",
+      "level": 2
+    },
+    {
+      "seq": 22,
+      "text": "7.2 要点",
+      "level": 3
+    },
+    {
+      "seq": 23,
+      "text": "第 8 章 长段落与结构",
+      "level": 1
+    },
+    {
+      "seq": 24,
+      "text": "8.1 背景",
+      "level": 2
+    },
+    {
+      "seq": 25,
+      "text": "8.2 要点",
+      "level": 3
+    }
+  ]
+}

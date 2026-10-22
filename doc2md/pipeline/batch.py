@@ -38,6 +38,125 @@ def default_workers(cfg: dict | None = None) -> int:
     return max(1, n)
 
 
+def result_row(file: str | Path, res) -> dict:
+    """O-03（QA-D2M-2026-10-21 / C-21）：成功结果行组装的**唯一**单点。
+
+    串行 CLI 与批量工人进程此前各自组装行字典，共有字段的键集与取值口径
+    漂移：串行行缺 `source_key`，批量行缺顶层 `sharded` / `shard_stats`
+    （人读行因此恒显 `sharded=None shards=1`，下游脚本要写两套解析）。
+    收敛后两条出口的共有字段逐字节同构：
+    - `file` 按调用方传入路径原样记录（`_report` 展示层统一取 basename）；
+    - `sharded` 恒为布尔（meta 缺键时 False，不再泄出 None）；
+    - `shard_stats` 恒为 dict（缺键时 {}）。
+    批量独有字段（退出码聚合 / edited_blocks 等）不进本函数——「同构」指
+    共有字段，与 O-03 方案的风险取舍一致。
+    """
+    meta = res.meta or {}
+    return {"file": str(file), "status": "ok", "doc_id": res.doc_id,
+            "source_key": res.source_key, "blocks": len(res.ir.blocks),
+            "chars": res.metrics.get("chars", 0),
+            "zip": str(res.zip_path) if res.zip_path else "",
+            "sharded": bool(meta.get("sharded", False)),
+            "shard_stats": meta.get("shard_stats") or {},
+            "meta": meta}
+
+
+def skipped_row(file: str | Path, doc_id: str, source_key: str,
+                zip_path: str | Path | None = "") -> dict:
+    """O-08（QA-D2M-2026-10-21 / C-27 / F-07）：`--skip-existing` 的跳过行。
+
+    与 `result_row` **同键集**（O-03 同构纪律延伸到第三种终态：ok / skipped /
+    各失败态），下游脚本一套解析即可：`blocks`/`chars` 为 0（本次未解析，
+    不虚报篇内统计）、`zip` 指向库内既有产物（存在时才给路径——DB 有行但
+    产物丢失时不冒充）、`sharded=False`、`shard_stats={}`、`meta={}`。
+    """
+    return {"file": str(file), "status": "skipped", "doc_id": doc_id,
+            "source_key": source_key, "blocks": 0, "chars": 0,
+            "zip": str(zip_path) if zip_path else "",
+            "sharded": False, "shard_stats": {}, "meta": {}}
+
+
+def _zip_front_version(zp: Path, doc_id: str) -> bool:
+    """N-1（QA-OPT-2）：产物面回退判据——zip 内 content.md 的 front-matter
+    `pipeline_version` 与当前管线一致才可跳。
+
+    fail-closed：条目缺失 / 非法 zip / front-matter 解析失败 / 字段缺失
+    （旧管线产物）一律 False——宁可重转（E4091 兜底）也不供养陈旧产物。
+    """
+    import json as _json
+    import zipfile as _zf
+
+    from .. import PIPELINE_VERSION
+    from ..artifacts import artifact_entry
+    try:
+        with _zf.ZipFile(zp) as z:
+            entry = artifact_entry(z.namelist(), "content.md", doc_id)
+            if not entry:
+                return False
+            body = z.read(entry).decode("utf-8", "replace")
+    except Exception:                        # noqa: BLE001 — 产物读不了：不跳
+        return False
+    if not body.startswith("---\n"):
+        return False
+    try:
+        end = body.index("\n---", 4)
+        fm = _json.loads(body[4:end])
+    except (ValueError, IndexError):
+        return False
+    return fm.get("pipeline_version") == PIPELINE_VERSION
+
+
+def skip_existing_hit(cfg: dict | None, path: str | Path) -> tuple[str, str, str] | None:
+    """O-08（C-27）：`--skip-existing` 判据——内容寻址 doc_id 已命中库内 docs 行。
+
+    返回 `(doc_id, source_key, zip_path)`（命中；zip 存在时给路径，否则空串）
+    或 None（未命中 / 库不存在 / 读取或查询失败）。
+
+    三条边界：
+    ① doc_id = 文件内容哈希前缀（约定 14）——命中即「库里正是这份内容」；
+       源文件被改写 → 哈希变 → 不命中，**不会**误跳过新内容（与 O-08 风险
+       取舍里「源文件已变但 doc_id 未变不可能」的论证同一依据）；
+    ② 库不存在 / 查询异常 → None（fail-open：宁可重转也不静默漏转——
+       重转有 E4091 兜底，漏转没有）；
+    ③ 文件读不了 → None：不跳过，让 convert 走它自己的 E4151 口径
+       （错误码归属不能在这里被吞掉）；
+    ④ N-1（QA-OPT-2）：库未命中 ≠ 无产物——CLI 纯产物流（不落库）的历史
+       zip 仍在。回退判据：`out/<doc_id>.zip` 存在且 front-matter
+       `pipeline_version` == 当前管线（`_zip_front_version`）才跳；陈旧
+       产物 / 字段缺失 / 读不了 → None 照常重转（fail-closed，见助手）。
+    """
+    from ..ir.model import hash_of_path
+    from ..storage.db import Store
+    root = Path(config.path_setting(cfg or {}, "paths.root", "."))
+    db = root / "state.sqlite"
+    try:
+        doc_id, source_key = hash_of_path(path)
+    except OSError:
+        return None
+    # N-1：库不存在不再早退——先算 doc_id，库未命中时还有 zip 产物回退判据。
+    db_hit: bool | None = None
+    if db.is_file():
+        try:
+            s = Store(db)
+            try:
+                db_hit = bool(s.q1(
+                    "SELECT 1 AS x FROM docs WHERE doc_id=?", (doc_id,)))
+            finally:
+                s.close()
+        except Exception:                    # noqa: BLE001 — 库损坏等：fail-open
+            return None
+    out_dir = config.path_setting(cfg or {}, "paths.out", root,
+                                  str(root / "out"))
+    zp = Path(out_dir) / f"{doc_id}.zip"
+    if not db_hit:
+        # ④ N-1：库不存在 / 干净未命中 → 产物面回退（判据见 _zip_front_version）。
+        # 注意库「查询异常」不走这里（上面已 fail-open 返回 None）。
+        if zp.exists() and _zip_front_version(zp, doc_id):
+            return (doc_id, source_key, str(zp))
+        return None
+    return (doc_id, source_key, str(zp) if zp.exists() else "")
+
+
 @dataclass
 class Summary:
     """跨进程回传的紧凑结果（不回传 IR 对象：pickle 大对象是内存与延迟的额外成本）。"""
@@ -74,9 +193,17 @@ class Summary:
 
 def _convert_one(path: str, cfg: dict | None, mode: str | None,
                  out: str | None, force: bool = False,
-                 precheck_edits: bool = False) -> dict:
+                 precheck_edits: bool = False,
+                 skip_existing: bool = False) -> dict:
     """worker 入口：必须在模块顶层、参数可 pickle（spawn 平台要求）。"""
     from .convert import convert
+    if skip_existing:
+        # O-08（C-27）：批量路径与串行共用同一判据单点——跳过行经 skipped_row
+        # 组装，与串行出口逐字节同构（O-03 纪律的第三种终态）。
+        hit = skip_existing_hit(cfg, path)
+        if hit is not None:
+            doc_id, source_key, zp = hit
+            return skipped_row(path, doc_id, source_key, zp)
     try:
         res = convert(path, cfg=cfg, mode=mode, out_dir=out, force=force,
                       precheck_edits=precheck_edits)
@@ -98,10 +225,8 @@ def _convert_one(path: str, cfg: dict | None, mode: str | None,
         # 经 GET /jobs 暴露给 reader。只留类名，与 worker died 同口径。
         return Summary(file=str(path), status="error", code="E5000",
                        message=f"{type(exc).__name__}").to_dict()
-    return Summary(file=str(path), status="ok", doc_id=res.doc_id, source_key=res.source_key,
-                   blocks=len(res.ir.blocks), chars=res.metrics.get("chars", 0),
-                   zip=str(res.zip_path) if res.zip_path else "",
-                   gate=res.gate, meta=res.meta).to_dict()
+    # O-03（C-21）：与串行 CLI 共用同一行组装单点，共有字段逐字节同构
+    return result_row(path, res)
 
 
 def _gate(detail: dict) -> dict:
@@ -113,11 +238,16 @@ def run_batch(paths: Sequence[str | Path], *, cfg: dict | None = None,
               mode: str | None = None, out_dir: str | Path | None = None,
               workers: int | None = None, start_method: str | None = None,
               on_result: Callable[[dict], None] | None = None,
-              force: bool = False, precheck_edits: bool = False) -> list[dict]:
+              force: bool = False, precheck_edits: bool = False,
+              skip_existing: bool = False) -> list[dict]:
     """有界进程池批量转换；顺序不保证，完成即回调。单文件或 workers=1 走串行同一路径。
 
     start_method="spawn" 用于在 Linux 上复现 Windows 的进程启动方式（验收用）；
     默认 None = 平台默认上下文。
+
+    `skip_existing`（O-08 / C-27）：doc_id 已入库即跳过（判据见
+    `skip_existing_hit`）。串行快路径与进程池路径共用 `_convert_one` 的同一
+    处判定，两条出口的跳过行同构。
     """
     files = [str(p) for p in paths]
     if not files:
@@ -143,7 +273,8 @@ def run_batch(paths: Sequence[str | Path], *, cfg: dict | None = None,
     if (n == 1 or len(files) == 1) and window is None:
         for f in files:
             r = _convert_one(f, cfg, mode, out, force=force,
-                             precheck_edits=precheck_edits)
+                             precheck_edits=precheck_edits,
+                             skip_existing=skip_existing)
             results.append(r)
             if on_result:
                 on_result(r)
@@ -170,7 +301,7 @@ def run_batch(paths: Sequence[str | Path], *, cfg: dict | None = None,
         # submit 也要在 try 内：BrokenProcessPool / 资源耗尽时否则会跳过
         # finally 的 shutdown+terminate，把 worker 留到解释器退出（X-17 回归面）。
         futs = {pool.submit(_convert_one, f, cfg, mode, out, force,
-                            precheck_edits): f
+                            precheck_edits, skip_existing): f
                 for f in files}
         pending = set(futs)
         while pending:

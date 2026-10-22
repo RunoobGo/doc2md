@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "doc2md"
-version = "2.12.1"
+version = "2.14.0"
 description = "文本型 PDF / DOCX → Markdown 离线转换管线（Doc2md）"
 license = "MIT"
 classifiers = [
@@ -30,7 +30,9 @@ dependencies = [
 [project.optional-dependencies]
 # 测试与黄金样本生成（tests/make_golden.py 用 reportlab 造 PDF、pypdf 数页数）
 # CH-456：ruff 为静态检查工具链（方案 T10），只进 CI 独立信息步骤，不进红线
-dev = ["pytest>=8", "reportlab>=4", "pypdf>=4", "ruff>=0.8"]
+# O-06：coverage.py 为语句覆盖报告工具（信息面，不设红线阈值——
+# 阈值红线会逼出「为覆盖而写测试」；CI full-suite 输出报告并登记数值）
+dev = ["pytest>=8", "reportlab>=4", "pypdf>=4", "ruff>=0.8", "coverage>=7"]
 
 [project.scripts]
 doc2md = "doc2md.cli:main"

@@ -491,6 +491,11 @@ def make_injection_samples():
 # 5. docx/ - Word 文档样本
 # ============================================================================
 DOCX_ZIP_TIMESTAMP = (2024, 10, 13, 0, 0, 0)      # CH-442：固定 zip 条目时间戳
+# CH-442 补（O-01 语料重烤时发现）：`ZipInfo.create_system` 未固定时取值随
+# 生成机 OS 漂移（Windows=0 / Unix=3），条目内容逐字节相同也会得到不同
+# sha256——MANIFEST 的哈希绑定在跨 OS 重生时静默失效。固定为 0（MS-DOS，
+# 与既有已提交语料的取值一致），重生结果与历史产物逐字节对齐。
+DOCX_ZIP_CREATE_SYSTEM = 0
 
 
 def freeze_docx(path: Path) -> None:
@@ -520,6 +525,7 @@ def freeze_docx(path: Path) -> None:
             info = _zf.ZipInfo(name, date_time=DOCX_ZIP_TIMESTAMP)
             info.compress_type = _zf.ZIP_DEFLATED
             info.external_attr = 0o600 << 16
+            info.create_system = DOCX_ZIP_CREATE_SYSTEM
             dst.writestr(info, data)
     _replace_retry(tmp, path)
 

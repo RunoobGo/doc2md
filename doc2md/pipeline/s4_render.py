@@ -55,19 +55,32 @@ def _link_dest(url: str) -> str:
 
 
 def render(ir: IR, *, preserve_strike: bool = False, link_internal: str = "plain") -> str:
-    parts: list[str] = []
+    out: list[str] = []
+    prev: Block | None = None
     for b in ir.blocks:
         md = _render_block(b, preserve_strike=preserve_strike, link_internal=link_internal)
-        if md:
-            # CH-473（PIPE-11）：空行压缩只作用于**非代码块**。围栏结构由块类型
-            # 唯一决定（只有 code 块包围栏，长度见 `_code_fence`），不再对整篇做正则切围栏——正文里
-            # 出现的 ``` 字面行（文档内示例、引用内容）会让非贪婪配对错位：
-            # 轻则把正文误判成代码免于压缩，重则把真实代码块暴露给 `\n{3,}`
-            # 压缩（S3 emit_code 特意保留的代码空行被压扁，代码内容失真）。
-            if b.type != "code":
-                md = re.sub(r"\n{3,}", "\n\n", md)
-            parts.append(md)
-    return "\n\n".join(parts).strip() + "\n"
+        if not md:
+            # page_break 等空产物不参与间距判定（GFM 无分页语法，见 _render_block）
+            continue
+        # CH-473（PIPE-11）：空行压缩只作用于**非代码块**。围栏结构由块类型
+        # 唯一决定（只有 code 块包围栏，长度见 `_code_fence`），不再对整篇做正则切围栏——正文里
+        # 出现的 ``` 字面行（文档内示例、引用内容）会让非贪婪配对错位：
+        # 轻则把正文误判成代码免于压缩，重则把真实代码块暴露给 `\n{3,}`
+        # 压缩（S3 emit_code 特意保留的代码空行被压扁，代码内容失真）。
+        if b.type != "code":
+            md = re.sub(r"\n{3,}", "\n\n", md)
+        if out:
+            # O-04（QA-D2M-2026-10-21 / C-05）：连续 list_item 之间用单换行
+            # （tight list）——与手写 Markdown 一致，Obsidian/VS Code 等渲染为
+            # 紧凑列表；块内多行 list_item（折行并回）不受影响（换行在块内）。
+            # 其余块界（含段落→列表、列表→段落）仍保留空行：Markdown 需要空行
+            # 打断段落，列表起止同样以空行为界。
+            sep = "\n" if (prev is not None and prev.type == "list_item"
+                           and b.type == "list_item") else "\n\n"
+            out.append(sep)
+        out.append(md)
+        prev = b
+    return "".join(out).strip() + "\n"
 
 
 def _render_block(b: Block, **opt) -> str:

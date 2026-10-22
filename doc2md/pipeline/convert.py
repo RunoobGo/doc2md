@@ -17,8 +17,10 @@ from pathlib import Path
 
 from .. import config
 from ..errors import (
+    WARN_LAYOUT_ROTATED_RTL,
     WARN_SHARD_NOT_MERGED,
     WARN_TABLE_ACROSS_SHARD,
+    WARN_TABLE_FLATTENED,
     E4091_DocOverwrite,
     E4151_UnsupportedType,
     E5031_StorageError,
@@ -212,6 +214,25 @@ def _convert(path: str | Path, *, cfg: dict, mode: str | None,
     ir.shard_count = effective_shards
     if ir.sharded:
         ir.warnings.append(WARN_SHARD_NOT_MERGED)   # W1044：分片转换说明（报告口径）
+    # O-05（C-06 / F-11 诚实暴露）：表格合并单元格被拍平成网格空位时留一条
+    # 文档级告警。GFM 无 colspan 语义、空位对齐是 CH-483/R8-PIPE-5 的既定取舍，
+    # 但「降过维度」这件事必须对用户可见（report.html 顶部提示 + /docs 响应
+    # warnings 计数），不得静默。计数证据来自 S1 的 Line.row_flat → 表级
+    # flags.flattened_cells（只对真实合并计数，行末补齐空位不算）。
+    if any((b.flags or {}).get("flattened_cells")
+           for b in ir.blocks if b.type == "table"):
+        ir.warnings.append(WARN_TABLE_FLATTENED)
+    # O-10（C-28/F-12）：版式探测——旋转页（/Rotate % 180 != 0）或 RTL 字符
+    # 占比 > 50% 的页面超出当前支持面（阅读方向/竖排语义未实现），明确提示
+    # 而非静默错乱。只探测不修复；常规语料（无旋转、无 RTL）零新增告警（G6）。
+    rotated = [pg.index + 1 for pg in pages_all
+               if getattr(pg, "rotation", 0) % 180 != 0]
+    rtl = [pg.index + 1 for pg in pages_all
+           if getattr(pg, "rtl_ratio", 0.0) > 0.5]
+    if rotated or rtl:
+        ir.warnings.append(WARN_LAYOUT_ROTATED_RTL)
+        ir.extra_meta["layout_probe"] = {"rotated_pages": rotated,
+                                         "rtl_pages": rtl}
     _tick("s3", blocks=len(ir.blocks), shards=effective_shards)
 
     # LLM 层（注入立场 + 白名单；CH-456 / T2：offline 占位或本地 llama-server）
@@ -231,7 +252,7 @@ def _convert(path: str | Path, *, cfg: dict, mode: str | None,
         link_internal=str(config.get(cfg, "s4.link_internal", "plain")))
     _tick("s4", chars=len(md))
 
-    metrics = _metrics(md, ir)
+    metrics = _metrics(md, ir, pages=pages_all)
     metrics["elapsed_ms"] = round((time.monotonic() - t0) * 1000, 1)
     meta = ir.meta()
     meta["shard_stats"] = stats
@@ -248,7 +269,8 @@ def _convert(path: str | Path, *, cfg: dict, mode: str | None,
         assert_free_space(out_dir, p.stat().st_size, cfg=cfg, what=f"{doc_id}.zip")
         zip_path = package(ir, md, meta, Path(out_dir), cfg,
                            gate=gate_detail if bool(
-                               config.get(cfg, "s1_5.page_detail_in_report", True)) else None)
+                               config.get(cfg, "s1_5.page_detail_in_report", True)) else None,
+                           metrics=metrics)
         _tick("package", zip=str(zip_path))
     return Result(doc_id=doc_id, source_key=source_key, source_name=safe, markdown=md,
                   ir=ir, meta=meta, metrics=metrics, gate=gate_detail,
@@ -344,22 +366,40 @@ def _llm_stats(llm: dict, effects: list) -> dict:
     }
 
 
-def _metrics(md: str, ir) -> dict:
+def _metrics(md: str, ir, pages=None) -> dict:
     import re as _re
+
+    from ..qa_eval import heading_pr, table_col_consistency
     heads = _re.findall(r"^#{1,6} ", md, _re.M)
     chars = len(_re.sub(r"\s", "", md))
-    return {"f1": round(min(1.0, chars / max(1, len(md)) if md else 0.0), 4),
-            "chars": chars, "headings": len(heads), "blocks": len(ir.blocks),
-            "sharded": ir.sharded, "shard_count": ir.shard_count}
+    out = {"f1": round(min(1.0, chars / max(1, len(md)) if md else 0.0), 4),
+           "chars": chars, "headings": len(heads), "blocks": len(ir.blocks),
+           "sharded": ir.sharded, "shard_count": ir.shard_count}
+    # O-06（C-31）：结构质量指标。Result.metrics 是独立字段（不进 front-matter /
+    # content.md 字节），扩键零产物影响；阈值只报告不阻断（方案风险项既定）。
+    out["table_col"] = table_col_consistency(ir.blocks)
+    # 标题 P/R 只在有真值时计算：DOCX 的 `Heading N` 样式（S1 `level_hint`）
+    # 是显式 ground truth；PDF 无真值 → 不产出（不得用启发式代理冒充）。
+    if ir.format == "docx" and pages is not None:
+        ref = [{"text": ln.text, "level": ln.level_hint}
+               for pg in pages for ln in getattr(pg, "lines", [])
+               if ln.level_hint is not None]
+        if ref:
+            pred = [{"text": b.text, "level": b.level}
+                    for b in ir.blocks if b.type == "heading"]
+            out["heading_pr"] = heading_pr(pred, ref)
+    return out
 
 
 def package(ir: IR, md: str, meta: dict, out_dir: Path, cfg: dict,
-            gate: dict | None = None) -> Path:
+            gate: dict | None = None, metrics: dict | None = None) -> Path:
     """产物打包：zip 条目名双闸（FR-127）；raw 名不进 content.md/ir.json（约定 14）。
 
     report.html 仍在展示层做 HTML 转义展示（CH-483 决策 D11），以保留审阅可追溯性。
     `gate`（T9）：S1.5 页级明细，按 `s1_5.page_detail_in_report` 只进 report.html，
     不进 front-matter——报告口径不得改变 content.md 字节（G6 等价纪律）。
+    `metrics`（N-6 / QA-OPT-2）：O-06 质量摘要只进 report.html 尾节（报告层）；
+    DB 重建路径不传（metrics 不落库）→ 该节缺省，诚实缺位而非补零。
     """
     from ..security.names import assert_entry_safe, assert_name_safe
 
@@ -371,7 +411,7 @@ def package(ir: IR, md: str, meta: dict, out_dir: Path, cfg: dict,
     body = "---\n" + json.dumps(fm, ensure_ascii=False, indent=2) + "\n---\n\n" + md
     entries = [("content.md", body),
                ("ir.json", json.dumps(ir.to_dict(for_export=True), ensure_ascii=False)),
-               ("report.html", render_report(ir, meta, gate))]
+               ("report.html", render_report(ir, meta, gate, metrics=metrics))]
     # CH-485（R9-SVC-2）：写唯一 .part + fsync + 原子 rename。读者不会看到
     # 截断 zip；同一内容并发转换由“最后完成的完整文件”胜出，不再互相截断。
     part = out_dir / f"{ir.doc_id}.{uuid.uuid4().hex}.zip.part"
@@ -390,11 +430,19 @@ def package(ir: IR, md: str, meta: dict, out_dir: Path, cfg: dict,
     return zp
 
 
-def render_report(ir: IR, meta: dict, gate: dict | None = None) -> str:
+def render_report(ir: IR, meta: dict, gate: dict | None = None,
+                  metrics: dict | None = None) -> str:
     """审阅页：shard_edge 可筛选；source_name_raw 仅在展示层且 HTML 转义（约定 14）。
 
     `gate`（T9）：`s1_5.page_detail_in_report` 开启时附 S1.5 页级明细
     （哪一页、哪个指标不达标）；关闭时整节不渲染。
+    O-05（C-06 / F-11）：`meta.warnings` 非空 = 本次转换存在信息降维
+    （W1043 跨片表格未合并 / W1044 分片转换 / W1045 合并单元格拍平），
+    报告**顶部**出显式提示行——降级可见，不再静默。提示出现 iff 有告警
+    （gate 双向断言把住，防恒真与防噪音）。
+    `metrics`（N-6 / QA-OPT-2）：O-06 质量摘要进**尾节**——报告层专属，
+    不进 front-matter（content.md 字节零影响）；传 None（DB 重建路径）整节
+    缺省，不得补零冒充（同「无真值 ≠ 满分」纪律）。
     """
     import html as H
     rows = []
@@ -405,6 +453,16 @@ def render_report(ir: IR, meta: dict, gate: dict | None = None) -> str:
             f'<td>{H.escape(b.type)}</td><td>{b.page if b.page is not None else ""}</td>'
             f'<td>{H.escape(str(b.level or ""))}</td>'
             f'<td>{H.escape((b.text or "")[:120])}</td></tr>')
+    warn_codes = list(meta.get("warnings") or [])
+    degrade_html = ""
+    if warn_codes:
+        items = "".join(f"<li>{H.escape(str(w))}</li>" for w in warn_codes)
+        degrade_html = (
+            '<div class="degraded" style="border:2px solid #b00;padding:8px;'
+            'margin:8px 0"><b>本次转换存在信息降维</b>（共 '
+            f'{len(warn_codes)} 条）：<ul>{items}</ul>'
+            '<p>GFM 无 colspan / 跨片合并语义，上述维度已按既定取舍降级；'
+            '正文与 ir.json 保留全部可保留内容，详见 warnings 与审阅表。</p></div>')
     gate_html = ""
     if gate:
         grows = []
@@ -446,14 +504,41 @@ def render_report(ir: IR, meta: dict, gate: dict | None = None) -> str:
             for k, v in fields)
         llm_html = ("<h2>LLM</h2><table border=1 cellpadding=4>"
                     "<tr><th>metric</th><th>value</th></tr>" + cells + "</table>")
+    quality_html = ""
+    if metrics:
+        def _fmt(v) -> str:
+            return "—" if v is None else H.escape(str(v))
+        tc = metrics.get("table_col") or {}
+        hp = metrics.get("heading_pr") or {}
+        qrows = [("blocks", metrics.get("blocks")),
+                 ("chars", metrics.get("chars")),
+                 ("headings (md)", metrics.get("headings")),
+                 ("table_col.rate", tc.get("rate")),
+                 ("table_col.tables", tc.get("tables")),
+                 ("heading_pr.p", hp.get("p")),
+                 ("heading_pr.r", hp.get("r")),
+                 ("heading_pr.f1", hp.get("f1"))]
+        # 注意：elapsed_ms 不进本表——report.html 参与逐条目字节等价比对
+        # （dev-plan「产物等价」章：耗时字段天生不可复现，只进 stdout/DB 面）。
+        qcells = "".join(f"<tr><td>{H.escape(k)}</td><td>{_fmt(v)}</td></tr>"
+                         for k, v in qrows)
+        quality_html = (
+            "<h2>Quality</h2>"
+            "<p>table_col.rate=源表格列一致率（越低说明合并单元格/解析噪声越多）；"
+            "heading_pr 仅 DOCX 有真值（缺真值显示 —，不是满分）。"
+            "本节是审阅信息，不参与 content.md 与 ir.json。</p>"
+            "<table border=1 cellpadding=4><tr><th>metric</th><th>value</th></tr>"
+            + qcells + "</table>")
     return ("<!doctype html><meta charset=utf-8><title>Doc2md report</title>"
             f"<h1>{H.escape(meta.get('source_name', ''))}</h1>"
             f"<p>raw: {H.escape(meta.get('source_name_raw', ''))}</p>"
+            + degrade_html +
             f"<p>sharded={meta.get('sharded')} count={meta.get('shard_count')} "
-            f"warnings={H.escape(','.join(meta.get('warnings', [])))}</p>"
+            f"warnings={H.escape(','.join(warn_codes))}</p>"
             + gate_html + llm_html +
             "<p><label><input type=checkbox onclick="
             "document.querySelectorAll('tr.edge-1').forEach(r=>r.style.display="
             "this.checked?'':'none')>只看分片边界块</label></p>"
             "<table border=1 cellpadding=4><tr><th>id</th><th>type</th><th>page</th>"
-            "<th>level</th><th>text</th></tr>" + "".join(rows) + "</table>")
+            "<th>level</th><th>text</th></tr>" + "".join(rows) + "</table>"
+            + quality_html)

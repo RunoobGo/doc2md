@@ -29,6 +29,9 @@ vendor/models/
 
 # 工具/会话本地数据
 .qoder-credits/
+.workbuddy/
+# 运行探针与临时目录（pytest basetemp / 批量压测产物 / 全量日志）
+tmp/
 
 # 编辑器 / 系统
 .DS_Store

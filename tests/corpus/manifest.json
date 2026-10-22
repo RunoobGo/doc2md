@@ -80,6 +80,14 @@
     "sha256": "6772bf858772bb9de0f39f139177c05d343bbae597e5e1839bd8c4e32c672eae"
   },
   {
+    "source": "pdf_11_wrap_space_1p.pdf",
+    "kind": "pdf",
+    "expected_behavior": "ok",
+    "expected_markdown": "expected/pdf_11_wrap_space_1p.md",
+    "bytes": 2946,
+    "sha256": "5c10dd48b9a6bef68412b915969f9596d0d5015ad83f085abeeb6a5a5dcb2d5e"
+  },
+  {
     "source": "docx_01_simple.docx",
     "kind": "docx",
     "expected_behavior": "ok",

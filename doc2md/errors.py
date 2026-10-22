@@ -106,6 +106,13 @@ class E5041_LlmUnavailable(Doc2mdError):
 # --- 告警码（非 HTTP，写入产物 meta.warnings 与报告）------------------------
 WARN_TABLE_ACROSS_SHARD = "W1043"        # 跨片表格不合并（FR-126 ④）
 WARN_SHARD_NOT_MERGED = "W1044"          # 分片转换说明（报告口径；CH-456 起真实写入）
+WARN_TABLE_FLATTENED = "W1045"           # O-05（C-06/F-11）：表格合并单元格已拍平为
+                                         # 网格空位（GFM 无 colspan 语义；CH-483/R8-PIPE-5
+                                         # 既定取舍的诚实暴露——降维可见，不自动合并）
+WARN_LAYOUT_ROTATED_RTL = "W1046"        # O-10（C-28/F-12）：检测到旋转页
+                                         # （/Rotate % 180 != 0）或 RTL 字符占比 > 50%
+                                         # 的页面——阅读方向/版式超出当前支持面，
+                                         # 明确提示而非静默错乱（只探测不修复）。
 
 CODE_INDEX = {
     cls.code: cls

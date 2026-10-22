@@ -18,7 +18,8 @@ CH-476（R7-GAP-1，决策 D4「提取而非拒收」）：`Line.has_revision` +
 CH-476（R7-GAP-2/3，决策 D7）：`read_docx` 补两处内容保真——
 - 脚注 / 尾注（`word/footnotes.xml`、`word/endnotes.xml`）正文抽为尾部段落行，
   `Line.note_kind` 标来源；原实现只遍历 document.xml 的 body，注文整块丢失；
-- 表格单元格内多段落以单空格相连（原 `"".join(tc.iter(w:t))` 直接粘连 = 吃掉段落边界）。
+- 表格单元格内多段落以 `<br>` 相连（O-05 起；CH-476 时为单空格，原
+  `"".join(tc.iter(w:t))` 直接粘连 = 吃掉段落边界）。
 
 CH-476（R7-PERF-d/g）：DOCX 解析两处热点（口径不变，产物逐字节等价）——
 - 段落样式按 `w:pStyle/@w:val` 记忆化（`_DocxCtx.styles`）：python-docx 的
@@ -64,6 +65,12 @@ class Line:
     row: list[str] | None = None            # CH-459：表格行单元格（非 None 即行候选）
     row_explicit: bool = False              # CH-459：行来自真实表格对象（DOCX w:tbl），
                                             # 而非 PDF 几何推断——S3 的防误判守卫只对后者生效
+    row_flat: int = 0                       # O-05（C-06）：本行被拍平的网格空位数
+                                            # （gridSpan 展开空位 + vMerge 连续格置空）。
+                                            # GFM 无 colspan 语义，这些空位是「有信息
+                                            # 被降维」的计数证据；S3 汇总为表级
+                                            # flags.flattened_cells，convert 据此留
+                                            # W1045 告警（诚实暴露，不自动合并）
     table_start: bool = False               # 新表格的首行：S3 据此切开相邻 w:tbl
     level_hint: int | None = None           # CH-459：DOCX Heading 样式显式层级
     has_revision: bool = False              # CH-476（R7-GAP-1）：DOCX 段落/表格行含
@@ -78,6 +85,14 @@ class Line:
     top: float = 0.0                        # PDF 行几何（pt，原点在页面左上）；DOCX 为 0
     bottom: float = 0.0                     # 供页眉页脚带判定，S3 段落分段亦用
     explicit_para: bool = False             # DOCX `w:p` 段落边界：S3 不得跨段续接
+    # O-01（QA-D2M-2026-10-21 / C-04）：行首 / 行尾空白几何证据。
+    # `extract_text_lines` 把行首尾空白从 text/chars/bbox 一并剥掉，但
+    # page.chars 里仍在——折线恰好落在空格上时，S3 的跨行拼接需要知道
+    # 「此处原有空格」，否则中西文边界会把空格吃掉（"数字 2026" → "数字2026"）。
+    # 判据见 `_edge_spaces`：只认与行缘严格相邻的空白字符，行内空格与
+    # 远距（栏间）空白均不算。
+    trailing_space: bool = False
+    leading_space: bool = False
 
 
 @dataclass
@@ -89,6 +104,11 @@ class RawPage:
     # s3_structure.modal_size 归并，免去全文档第二次逐行遍历。手工构造的页
     # （测试 / 直接调用方）缺省为空 dict → modal_size 回退逐行扫描，行为不变。
     size_hist: dict[float, int] = field(default_factory=dict)
+    # O-10（C-28/F-12）：版式探测——旋转角（/Rotate 原值）与 RTL 字符占比
+    # （0~1）。RawPage 本就不序列化（瞬态），convert 据此留 W1046 告警；
+    # 手工构造页缺省 0/0.0 = 未探测到，不影响既有调用方。
+    rotation: int = 0
+    rtl_ratio: float = 0.0
 
     @property
     def chars(self) -> int:
@@ -248,14 +268,100 @@ def read_pdf(path: str | Path, page_span: tuple[int, int] | None = None,
                 rp = RawPage(index=i, lines=lines,
                              height=float(getattr(page, "height", 0.0) or 0.0))
                 rp.size_hist = _size_hist(lines)   # CH-492（P-1）：单趟直方图
+                # O-10（C-28/F-12）：版式探测（只记录，判断与告警在 convert）
+                rp.rotation = int(getattr(page, "rotation", 0) or 0)
+                rp.rtl_ratio = _rtl_ratio(chars)
                 out.append(rp)
                 page.flush_cache()
         lo = hi                            # CH-493（P-9）：推进到下一个分块
     return out
 
 
-def _line_from_raw(raw: dict, lchars: list[dict]) -> Line:
+def _rtl_ratio(chars: list[dict]) -> float:
+    """O-10（C-28/F-12）：页内 RTL 字符占比（字母类字符为分母）。
+
+    RTL 判定范围：希伯来 + 阿拉伯（含补充与呈现形式区）。分母只取
+    「字母或 RTL」字符——标点/数字/空白不参与，避免数字型页脚把占比稀释到
+    阈值之下。无字母字符 → 0.0（非 RTL 文档恒 0，不误报）。
+    """
+    if not chars:
+        return 0.0
+    rtl = total = 0
+    for c in chars:
+        t = str(c.get("text", "") or "")
+        for ch in t:
+            o = ord(ch)
+            is_rtl = (0x0590 <= o <= 0x05FF or 0x0600 <= o <= 0x06FF
+                      or 0x0750 <= o <= 0x077F or 0x08A0 <= o <= 0x08FF
+                      or 0xFB50 <= o <= 0xFDFF or 0xFE70 <= o <= 0xFEFF)
+            is_alpha = ch.isalpha()
+            if is_rtl:
+                rtl += 1
+                total += 1
+            elif is_alpha:
+                total += 1
+    return rtl / total if total else 0.0
+
+
+def _edge_spaces(vis: list[dict], blanks: list[dict]) -> tuple[bool, bool]:
+    """O-01（C-04）：行首 / 行尾空白几何证据（页 chars 里的空白字符）。
+
+    `extract_text_lines` 的行字典（text/chars/x0/x1）把行缘空白整体剥掉，
+    但 `page.chars` 里仍在。判据（宁漏勿误）——空白字符须**整体落在**
+    首个可见字符之前 / 末个可见字符之后，且与行缘严格相邻：
+    - 行内空白（两个可见字符之间的空格）不算：其 x1 越过首字符 x0、
+      或 x0 早于末字符 x1，被相邻性排除（语料 2537 个空白的实测形态：
+      绝大多数是行内空格，零个压在可见字形上）；
+    - 距离行缘超过 `gap` 的不算：双栏页同 band 内另一栏的空白字符会被
+      误计（两栏路径的 full 行用全页 chars 补证据，靠此边界收口）。
+    `gap` 取行内最大字符宽度的 0.75 倍（下限 4pt）——同字号空格宽度量级，
+    真空格恒在界内，栏间空档（≥ 12pt）恒在界外。
+    """
+    if not vis or not blanks:
+        return False, False
+    vis.sort(key=lambda c: float(c.get("x0", 0) or 0))
+    first_x0 = float(vis[0].get("x0", 0) or 0)
+    last_x1 = max(float(c.get("x1", 0) or 0) for c in vis)
+    max_w = max((float(c.get("x1", 0) or 0) - float(c.get("x0", 0) or 0))
+                for c in vis)
+    gap = max(4.0, 0.75 * max_w)
+    tol = 0.5                        # 横向测量容差：真实空格与行缘严格相邻
+    leading = any(first_x0 - gap <= float(c.get("x0", 0) or 0)
+                  and float(c.get("x1", 0) or 0) <= first_x0 + tol
+                  for c in blanks)
+    trailing = any(last_x1 - tol <= float(c.get("x0", 0) or 0)
+                   and float(c.get("x1", 0) or 0) <= last_x1 + gap
+                   for c in blanks)
+    return leading, trailing
+
+
+def _blanks_in_band(chars: list[dict], top: float, bottom: float) -> list[dict]:
+    """行纵向带内的空白字符（与 `_slice_chars` 同 band 口径）。"""
+    if not chars:
+        return []
+    hi = max(bottom, top + 1.0)
+    return [c for c in chars
+            if not (c.get("text") or "").strip()
+            and top - 1.0 <= float(c.get("top", 0.0) or 0.0) < hi]
+
+
+def _line_from_raw(raw: dict, lchars: list[dict],
+                   edge_blanks: list[dict] | None = None) -> Line:
+    """行字典 → Line。
+
+    `edge_blanks`（O-01）：行缘空白证据的空白字符清单。**与 `lchars` 分离传入**——
+    `_line_style` / `_row_cells` / `_char_width` 的口径不得因新增证据而漂移
+    （G6：既有产物逐字节不变）。单栏路径的 `lchars` 本就是 band 全量 chars
+    （含空白），缺省 None 时自行分离；两栏路径的行字典 chars 已被
+    `extract_text_lines` 剥掉空白，须由调用方显式补（见 `_extract_two_column`）。
+    """
     st = _line_style(lchars)
+    vis = [c for c in lchars if (c.get("text") or "").strip()]
+    if edge_blanks is None:
+        blanks = [c for c in lchars if not (c.get("text") or "").strip()]
+    else:
+        blanks = edge_blanks
+    lead, trail = _edge_spaces(vis, blanks)
     return Line(text=raw.get("text", ""), size=st[0],
                 bold=st[1], italic=st[2], strike=st[3], mono=st[4],
                 uniform_bold=st[5], uniform_italic=st[6], uniform_strike=st[7],
@@ -263,7 +369,8 @@ def _line_from_raw(raw: dict, lchars: list[dict]) -> Line:
                 x0=float(raw.get("x0", 0.0) or 0.0),
                 char_w=_char_width(lchars) if st[4] else 0.0,
                 top=float(raw.get("top", 0.0) or 0.0),
-                bottom=float(raw.get("bottom", 0.0) or 0.0))
+                bottom=float(raw.get("bottom", 0.0) or 0.0),
+                trailing_space=trail, leading_space=lead)
 
 
 def _lines_single_column(raw_lines: list[dict], chars: list[dict],
@@ -332,8 +439,13 @@ def _extract_two_column(page, raw_lines: list[dict], mid: float,
                         gutter: float) -> list[Line]:
     """Extract left/right crops and concatenate in column reading order."""
     bbox = page.bbox
-    left_raw = page.crop((bbox[0], bbox[1], mid - gutter / 2, bbox[3])).extract_text_lines() or []
-    right_raw = page.crop((mid + gutter / 2, bbox[1], bbox[2], bbox[3])).extract_text_lines() or []
+    left_page = page.crop((bbox[0], bbox[1], mid - gutter / 2, bbox[3]))
+    right_page = page.crop((mid + gutter / 2, bbox[1], bbox[2], bbox[3]))
+    left_raw = left_page.extract_text_lines() or []
+    right_raw = right_page.extract_text_lines() or []
+    left_chars = left_page.chars or []
+    right_chars = right_page.chars or []
+    page_chars = page.chars or []
     height = float(page.height)
     body_raw = [ln for ln in left_raw + right_raw
                 if float(ln.get("top", 0.0)) >= height * 0.08]
@@ -348,9 +460,24 @@ def _extract_two_column(page, raw_lines: list[dict], mid: float,
     def keep(ln) -> bool:
         top = float(ln.get("top", 0.0))
         return all(abs(top - t) > 2.0 for t in full_tops)
-    left = [_line_from_raw(ln, ln.get("chars") or []) for ln in left_raw if keep(ln)]
-    right = [_line_from_raw(ln, ln.get("chars") or []) for ln in right_raw if keep(ln)]
-    full = [_line_from_raw(ln, ln.get("chars") or []) for ln in full_raw]
+
+    def edge_blanks_for(ln, chars: list[dict]) -> list[dict]:
+        # O-01：两栏路径的行字典 chars 已被 extract_text_lines 剥掉空白，
+        # 行缘空白证据改从 crop 后的 chars 里补（band 口径同 _slice_chars）。
+        # full 行用全页 chars：行缘 gap 边界（见 _edge_spaces）天然排除
+        # 栏间 / 他栏空白，只留本行自己的行首尾空格。
+        return _blanks_in_band(chars, float(ln.get("top", 0.0) or 0.0),
+                               float(ln.get("bottom", 0.0) or 0.0))
+
+    left = [_line_from_raw(ln, ln.get("chars") or [],
+                           edge_blanks_for(ln, left_chars))
+            for ln in left_raw if keep(ln)]
+    right = [_line_from_raw(ln, ln.get("chars") or [],
+                            edge_blanks_for(ln, right_chars))
+             for ln in right_raw if keep(ln)]
+    full = [_line_from_raw(ln, ln.get("chars") or [],
+                           edge_blanks_for(ln, page_chars))
+            for ln in full_raw]
     col = left + right
     if not col:
         return full
@@ -758,6 +885,13 @@ def _docx_para_line(p, d, rels=None, ctx: _DocxCtx | None = None,
     # CH-482：等宽段的行首空白（空格 / `w:tab`）是代码内容，DOCX 没有 x0 几何可重建，
     # 丢了就无从恢复——只对等宽行保留前导空白，散文行仍走 strip（原口径不变）。
     text = raw_text.rstrip() if mono else raw_text.strip()
+    # O-01（QA-D2M-2026-10-21 / C-04）：行缘空白证据。散文行的 text 已 strip，
+    # 原文本的行首 / 行尾空白只在此留证——DOCX 行是显式段落（explicit_para），
+    # 常规续段路径不会跨段拼接，唯一例外是标题折行合并（heading merge 不查
+    # explicit_para），其补空格判断需要这两个旗标。等宽行的前导空白已保留在
+    # text 内，不再设 leading（否则拼接时重复补空格）。
+    trailing_space = raw_text != raw_text.rstrip()
+    leading_space = (not mono) and raw_text != raw_text.lstrip()
     style = _docx_style_name(el, d, ctx)
     level = None
     if style.lower().startswith("heading"):
@@ -778,7 +912,8 @@ def _docx_para_line(p, d, rels=None, ctx: _DocxCtx | None = None,
                 uniform_italic=uniform_italic, uniform_strike=uniform_strike,
                 list_marker=marker, list_level=list_level,
                 link=link, link_internal=link_internal, link_dest=link_dest,
-                level_hint=level, has_revision=rev, explicit_para=True)
+                level_hint=level, has_revision=rev, explicit_para=True,
+                trailing_space=trailing_space, leading_space=leading_space)
 
 
 def _docx_has_revision(el) -> bool:
@@ -896,12 +1031,14 @@ def _docx_notes_lines(d, ctx: _DocxCtx) -> list[Line]:
 
 
 def _docx_cell_text(tc) -> str:
-    """单元格正文：段落边界以单空格相连（CH-476 / R7-GAP-3，决策 D7）。
+    """单元格正文：段落边界以 `<br>` 相连（O-05 / C-06，GFM 单元格内合法换行）。
 
-    原实现 `"".join(tc.iter(w:t))` 把单元格内多段落直接粘连（"段落1段落2"），
-    等于吃掉段落边界。逐 `w:p` 取「接受后」文本再以单空格连接后，单段落单元格
-    （现有全部语料）与原实现逐字节相同 → 产物不变（G6）。
-    嵌套 `w:tbl` 的段落仍被拍平进本格：无版面模型，本轮不表达表格嵌套。
+    CH-476（R7-GAP-3）原口径是单空格相连——比最初的 `"".join` 进，但段落
+    边界仍不可辨（审阅面看成一句）。`<br>` 在 GFM 表格单元格内是合法换行，
+    主流渲染器（GitHub / VS Code / Obsidian）均支持；单段落单元格（现有全部
+    语料）无边界可连，与本函数改动前逐字节相同 → 产物不变（G6）。
+    嵌套 `w:tbl` 的段落仍被拍平进本格：无版面模型，本轮不表达表格嵌套
+    （拍平事实由 W1045 告警诚实暴露，见 `_docx_table_rows`）。
     """
     from docx.text.run import Run
     parts = []
@@ -913,7 +1050,7 @@ def _docx_cell_text(tc) -> str:
         txt = "".join(Run(r, p).text or "" for r in p.iter(f"{_W_NS}r")).strip()
         if txt:
             parts.append(txt)
-    return " ".join(parts)
+    return "<br>".join(parts)
 
 
 def _docx_table_elems(parent, tag: str):
@@ -930,20 +1067,25 @@ def _docx_table_elems(parent, tag: str):
             yield from _docx_table_elems(content if content is not None else child, tag)
 
 
-def _docx_table_rows(tbl) -> list[tuple[list[str], bool]]:
-    """`w:tbl` → (单元格文本行, 该行是否含修订痕迹)；空单元格保留空串以对齐列数。
+def _docx_table_rows(tbl) -> list[tuple[list[str], bool, int]]:
+    """`w:tbl` → (单元格文本行, 该行是否含修订痕迹, 本行拍平空位数)。
 
     CH-476（R7-GAP-1）：单元格取「接受后」视图（`w:ins` 内的 `w:t` 覆盖、`w:delText`
     不含），表格路径天然是接受口径，只需把修订信号带出来。
-    CH-476（R7-GAP-3）：单元格内段落边界以单空格相连，见 `_docx_cell_text`。
+    CH-476（R7-GAP-3）：单元格内段落边界以 `<br>` 相连，见 `_docx_cell_text`。
     CH-483（R8-PIPE-5）：`gridSpan` 展开为网格空位，`vMerge` 连续格置空，
     保证每行列数与表格网格一致（GFM 无合并语义，宁可用空位对齐，不左移列）。
+    O-05（C-06 / F-11）：第三返回值统计本行的拍平空位数（gridSpan 展开 +
+    vMerge 连续格）——空位本身是「合并信息被降维」的计数证据，供 S3 汇总、
+    convert 留 W1045 告警。行末补齐网格宽度的空位**不计**：那是对齐而非
+    合并语义丢失。
     """
     grid_el = tbl.find(f"{_W_NS}tblGrid")
     grid_n = len(grid_el.findall(f"{_W_NS}gridCol")) if grid_el is not None else 0
-    rows: list[tuple[list[str], bool]] = []
+    rows: list[tuple[list[str], bool, int]] = []
     for tr in _docx_table_elems(tbl, f"{_W_NS}tr"):
         cells: list[str] = []
+        flat = 0
         for tc in _docx_table_elems(tr, f"{_W_NS}tc"):
             tcPr = tc.find(f"{_W_NS}tcPr")
             span = 1
@@ -959,12 +1101,14 @@ def _docx_table_rows(tbl) -> list[tuple[list[str], bool]]:
                 if vm is not None:
                     cont = vm.get(f"{_W_NS}val", "continue") != "restart"
             cells.append("" if cont else _docx_cell_text(tc))
+            flat += (span - 1) + (1 if cont else 0)
             cells.extend([""] * (span - 1))
         if cells:
-            rows.append((cells, _docx_has_revision(tr)))
+            rows.append((cells, _docx_has_revision(tr), flat))
     width = max([grid_n] + [len(r[0]) for r in rows])
     if width and any(len(r[0]) < width for r in rows):
-        rows = [(cells + [""] * (width - len(cells)), rev) for cells, rev in rows]
+        rows = [(cells + [""] * (width - len(cells)), rev, flat)
+                for cells, rev, flat in rows]
     return rows
 
 
@@ -1039,10 +1183,10 @@ def read_docx(path: str | Path, fmt: str | None = None) -> list[RawPage]:
                 lines.append(Line(text="\x0c", size=0.0))
         else:
             rows = _docx_table_rows(child)
-            for i, (cells, rev) in enumerate(rows):
+            for i, (cells, rev, flat) in enumerate(rows):
                 lines.append(Line(text=" | ".join(cells), row=cells,
                                   row_explicit=True, has_revision=rev,
-                                  table_start=(i == 0)))
+                                  row_flat=flat, table_start=(i == 0)))
     # CH-485（R9-PIPE-1）：文本框正文不是 body 的直接 w:p；单独产出为段落，
     # 避免宿主段落只得到“前后”或 AlternateContent 双分支重复。
     # 无文本框的文档不做全树遍历（常见路径省一次 O(全部 XML 元素) 扫描）。

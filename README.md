@@ -23,10 +23,13 @@ doc2md serve [--host H --port P --root DIR --config F]   # API 服务（默认 1
 doc2md serve token [--role R --label L | --revoke TOKEN | --list]
 doc2md cron --daily | --weekly [--no-backup]
 doc2md convert <file|dir> [--mode auto|single|two_phase --out DIR --workers N --json --follow-symlinks \
-              --force --format zip|md|both --llm-mode offline|server --llm-no-fallback]
+              --force --skip-existing --format zip|md|both --llm-mode offline|server --llm-no-fallback]
 doc2md work [--once --max-jobs N --workers N --idle S --enqueue PATH --status]
 doc2md watch <dir> [--once --interval S]
 doc2md search QUERY [--full] [--limit N]           # 检索已入库文档（API /search 的 CLI 等价物；CH-491）
+doc2md docs list [--limit N --offset N --status S] # 库内文档清单（分页信封 + 块计数；O-07）
+doc2md docs show <doc_id> [--limit N --offset N]   # 单篇元数据 + 块窗口（API /docs/<id> 等价物）
+doc2md docs export <doc_id...> | --all [--out DIR] # 导出 content.md（与 zip 内逐字节相同）+ manifest.json 对账
 doc2md tokenizer export F [--vocab V --manifest M]
 doc2md tokenizer verify --manifest M --gguf F
 doc2md backup drill [--keep]                     # 隔离沙箱内跑完整恢复闭环（ops/backup.md）
@@ -38,13 +41,21 @@ doc2md doctor
 
 `doc2md search`（CH-491）：不启 serve 也能检索已入库文档，与 `GET /search` 同一实现、同一默认口径（`limit` 默认 20、上限 500 截断不报错），结果集逐条相同；`--full` 走 `blocks.text` 全表 LIKE，覆盖 FTS 索引窗口外的块尾部；库不存在时明确 `E4041` / 退出码 4。
 
+
+`doc2md convert --skip-existing`（O-08 + N-1）：内容寻址增量跳过——优先查库（源文件 sha256 与库内已有文档命中即跳）；库未命中时回退查产物（`out/<doc_id>.zip` 存在**且** front-matter `pipeline_version` 与当前管线一致才跳，陈旧产物/字段缺失/产物损坏一律照常重转）。跳过报告 `status=skipped`、退出码 0，既有产物逐字节不触碰；源文件内容变过（含追加字节）则照常重转，不会误跳。watch 重启「只转新文件」与它共用同一实现。
+
+旧版 `.doc`（Word 97-2003 二进制格式）依赖系统安装 LibreOffice 或 Microsoft Word 做转换后端（`s1.legacy_doc_backend`，默认 auto）：两者都不可用时该类文件明确报错 E4151 而非静默产出残缺结果；纯 Python 内置解析器不在路线图内（C-35 评估结论，见 `docs/qa/optimization-plan.md` O-12）。
+`doc2md docs`（O-07）：不起 serve 的完整读取面——`list` 列库内文档（分页信封 + 每篇块计数，条数与 `SELECT COUNT(*) FROM docs` 一致，gate 红线把住）；`show <doc_id>` 看单篇元数据与块窗口（与 `GET /docs/<id>` 同参逐字段相同，含 `warnings` 降级告警）；`export` 把 `content.md` 原样落盘（与 zip 内逐字节相同，zip 丢失时按 DB 自动重建）并写 `manifest.json` 对账（doc_id ↔ 文件 ↔ sha256），`--all` 全量导出、同批同名冲突自动加 `-<doc_id 前 8>` 后缀。三个子命令全部只读（零 DB 写入）。
+
 转换期间 stderr 打五阶段进度（`s1` / `s1_5` / `s3` / `s4` / `package`），`--json` 时静音（CH-491）。
 
 退出码：`0` 成功 / `2` 用法错误 / `3` 门禁拒收（E4221 等） / `4` 业务错误 / `5` 系统错误。多文件转换按「取最严重」聚合（逐条算码后 `max`）。
-`2` 覆盖三类「调用方写错」：`serve --host` 非回环且未设 `api.allow_remote_bind`、`serve token` 的
-`--role` 不在 `api.token_roles`、**配置错**（`doc2md.toml` 语法错误、`--config` 指向不存在的文件、`doctor` 检出冻结键/配置语义非法）。
+`2` 覆盖四类「调用方写错」：`serve --host` 非回环且未设 `api.allow_remote_bind`、`serve token` 的
+`--role` 不在 `api.token_roles`、**配置错**（`doc2md.toml` 语法错误、`--config` 指向不存在的文件、`doctor` 检出冻结键/配置语义非法）、
+`docs` 三子命令的负 `--limit` / `--offset` 与互斥参数（SQLite `LIMIT -1` 是无界的反直觉语义，与 argparse 对 `--limit abc` 同口径退 2）。
 `4` 覆盖业务失败：`serve token --revoke` 的未知 token（E4041）、转换撞上 E4091 已有编辑且未 `--force`、
-`backup drill` 演练失败（`DrillFailure`）、`backup restore` 恢复失败（`E5031`）、`work` 入队拒收。
+`backup drill` 演练失败（`DrillFailure`）、`backup restore` 恢复失败（`E5031`）、`work` 入队拒收、
+`docs show` / `docs export` 的未知 doc_id（E4041）与导出单篇失败（逐篇报错后继续，rc 取 4）。
 `5` 覆盖系统/环境失败：`serve` 端口占用等 `OSError`、`cron` 任一步骤失败、**`doctor` 判定环境不健康**（依赖 `MISSING` /
 server 模式 LLM 不可达 / 显式指定的 `.doc` 后端不可用 / 磁盘不足 `free_mb < min_free_mb` 或探测失败 `-1`）、
 `work` 存在失败作业、未归类异常（消息只带异常类名，不含正文，NFR-20）。

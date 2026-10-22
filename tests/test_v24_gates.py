@@ -527,6 +527,258 @@ def test_logs_contain_no_document_text(tmp_path):
     assert "<sha256:" in dumped
 
 
+def test_gate_test_env_neutralization():
+    """O-02 门禁：测试环境中立化三件套在位（代理清理 / basetemp 注入 / 沙箱探测）。
+
+    把「环境中立化」本身变成红线：夹具被删或改名时本断言立即红，而不是等
+    某天 T2 又红了才人工归因。探测函数的返回值因宿主而异（干净机全 False），
+    红线钉的是**机制在位**，不是「当前宿主受限」——故不断言具体布尔值。
+    """
+    import conftest as qa_conftest
+    assert callable(qa_conftest._brokered_mkdir_denied)
+    assert callable(qa_conftest._rss_sampling_denied)
+    assert hasattr(qa_conftest, "_neutral_proxy_env")    # autouse 代理清理夹具
+    assert hasattr(qa_conftest, "pytest_configure")      # basetemp 注入钩子
+    # 夹具效应：本用例自身就在 autouse 夹具作用下，进程内不应残留代理变量
+    # （夹具缺失 + 宿主带代理时本条即红；宿主干净时由上面的在位断言兜底）
+    for k in qa_conftest._PROXY_VARS:
+        assert k not in os.environ, f"{k} leaked into test process"
+
+
+def test_gate_wrap_space_preserved():
+    """O-01 红线（C-04）：折行落在空格上时，空格必须凭 S1 几何证据补回。
+
+    两段断言：
+    ① 定向样本 `pdf_11_wrap_space_1p` 的六种形态逐一核对（行尾证据 /
+       行首证据 × 中西文、英文单词、数字汉字边界 + 无空格反例）；
+    ② `pdf_09_complex_long_8p`（C-04 原始缺陷样本）22/22 全保留，
+       且全语料 `expected/*.md` 的粘滞形态（"数字2026"）零出现。
+    语料逐字节比对由 test_corpus_expected.py 负责，这里钉的是**语义**红线。
+    """
+    corpus = Path(__file__).parent / "corpus" / "expected"
+    md = (corpus / "pdf_11_wrap_space_1p.md").read_text(encoding="utf-8")
+    assert "覆盖中文与数字 2026 和标点的边界" in md        # A：行尾证据
+    assert "还包括中文与数字 2026 同年发布的文本" in md    # B：行首证据
+    assert "中英混排时中文与 English 单词之间的空格" in md  # C：中文→英文
+    assert "以及 English 到中文的 反向边界同样保留" in md   # D：英文→中文
+    assert "还包括 2026 年之后的数字汉字边界" in md        # E：数字→中文
+    assert "反例里中西文直接相接的片段原文没有空格" in md  # F：反例不插空格
+    t = (corpus / "pdf_09_complex_long_8p.md").read_text(encoding="utf-8")
+    assert t.count("数字2026") == 0
+    assert t.count("数字 2026") == 22, "pdf_09 的 22 处折行空格必须全部保留"
+    glued = sum(f.read_text(encoding="utf-8").count("数字2026")
+                for f in corpus.glob("*.md"))
+    assert glued == 0, f"折行空格被吃掉：粘滞形态 {glued} 处"
+
+
+def test_gate_batch_serial_row_isomorphic(tmp_path, cfg):
+    """O-03 门禁（C-21）：同一输入，批量工人与串行路径的结果行
+    共有字段键集与取值类型一致（值可比对）。
+
+    两条出口此前各自组装行字典（串行缺 source_key、批量缺顶层
+    sharded/shard_stats），下游脚本要写两套解析。收敛到
+    `batch.result_row` 单点后，本红线钉住同构性不被再次打破。
+    批量独有字段（退出码聚合等）不在共有集内——同构指共有字段。
+    """
+    from doc2md.pipeline.batch import _convert_one, result_row, run_batch
+    from doc2md.pipeline.convert import convert
+
+    src = GOLDEN / "small_3p.pdf"
+    out = tmp_path / "out"
+    res = convert(src, cfg=cfg, out_dir=out)
+    serial_row = result_row(src, res)                       # 串行单点
+    batch_row = _convert_one(str(src), cfg, None, str(out))  # 批量 worker 入口
+    common = {"file", "status", "doc_id", "source_key", "blocks", "chars",
+              "zip", "sharded", "shard_stats", "meta"}
+    assert set(serial_row) == common, f"串行行键集漂移：{set(serial_row) ^ common}"
+    assert set(batch_row) == common, f"批量行键集漂移：{set(batch_row) ^ common}"
+    for k in sorted(common):
+        assert type(serial_row[k]) is type(batch_row[k]), f"{k} 类型不一致"
+        if k != "file":                     # file 记调用方传入路径，不逐字比对
+            assert serial_row[k] == batch_row[k], f"{k} 取值不一致"
+    assert isinstance(serial_row["sharded"], bool), "sharded 必须恒为布尔"
+    assert isinstance(serial_row["shard_stats"], dict)
+    # 进程池出口（真起子进程）与串行单点同构
+    pool_rows = run_batch([src], cfg=cfg, out_dir=tmp_path / "pool", workers=2)
+    assert len(pool_rows) == 1 and set(pool_rows[0]) == common
+    assert pool_rows[0]["sharded"] is False
+
+
+def test_gate_tight_list_no_blank_gap():
+    """O-04 红线（C-05）：连续列表项之间不得有空行（tight list）。
+
+    手写 Markdown 的列表项是单换行相接；渲染层若用空行连接，Obsidian/VS Code
+    等会渲染成松散列表（项与项之间带段间距）。段落→列表、列表→段落等块界
+    仍保留空行（Markdown 需要空行打断段落），不在本红线内。
+    """
+    import re
+    corpus = Path(__file__).parent / "corpus" / "expected"
+    loose = re.compile(r"(?m)^\s*(?:- |\d+\. ).*\n\n\s*(?:- |\d+\. )")
+    hits = [f.name for f in sorted(corpus.glob("*.md"))
+            if loose.search(f.read_text(encoding="utf-8"))]
+    assert not hits, f"列表项之间出现空行：{hits}"
+
+
+def test_gate_docs_list_show_match_db(saved_doc, tmp_path, capsys):
+    """O-07 红线（C-26）：CLI 只读面与库事实一致。
+
+    `docs list` 条数 == `SELECT COUNT(*) FROM docs`；`docs show` 的
+    blocks_total 与逐篇块数一致。读面谎报比没有读面更坏——脚本按条数对账
+    时会静默少算，且错在「看起来成功」的那一侧。
+    """
+    from doc2md.cli import main
+    from doc2md.storage.db import Store
+    _client, _tokens, doc_id = saved_doc
+    root = tmp_path / "work"
+    assert main(["docs", "list", "--root", str(root)]) == 0
+    body = json.loads(capsys.readouterr().out)
+    s = Store(root / "state.sqlite")
+    try:
+        n = s.q1("SELECT COUNT(*) AS c FROM docs")["c"]
+        nb = s.q1("SELECT COUNT(*) AS c FROM blocks WHERE doc_id=?",
+                  (doc_id,))["c"]
+    finally:
+        s.close()
+    assert body["total"] == n == len(body["docs"]) >= 1
+    assert main(["docs", "show", doc_id, "--root", str(root),
+                 "--limit", "500"]) == 0
+    d = json.loads(capsys.readouterr().out)
+    assert d["blocks_total"] == nb == len(d["blocks"])
+
+
+def test_gate_docs_export_bytes_equal_zip(saved_doc, tmp_path, capsys):
+    """O-07 红线（F-01）：`docs export` 与 zip 内 content.md 逐字节相同，
+    manifest 的 sha256 与实文件一致（对账面不许自己编一个哈希）。"""
+    import hashlib
+    import zipfile
+
+    from doc2md.artifacts import artifact_entry
+    from doc2md.cli import main
+    _client, _tokens, doc_id = saved_doc
+    root = tmp_path / "work"
+    exp = tmp_path / "gate-export"
+    assert main(["docs", "export", doc_id, "--root", str(root),
+                 "--out", str(exp)]) == 0
+    capsys.readouterr()
+    with zipfile.ZipFile(root / "out" / f"{doc_id}.zip") as z:
+        want = z.read(artifact_entry(z.namelist(), "content.md", doc_id))
+    man = json.loads((exp / "manifest.json").read_text(encoding="utf-8"))
+    entry = man["docs"][0]
+    got = (exp / entry["file"]).read_bytes()
+    assert got == want, "导出字节必须与 zip 内 content.md 逐字节相同"
+    assert entry["sha256"] == hashlib.sha256(got).hexdigest()
+
+
+def test_gate_docs_export_rejects_traversal_doc_id(saved_doc, tmp_path, capsys):
+    """O-07 红线（FR-127）：恶意 doc_id 走同一消毒闸。
+
+    doc_id 进 `out_dir/<doc_id>.zip` 路径拼接之前先过 `assert_name_safe`：
+    doc_id 正常形态是内容哈希（十六进制），穿越形态必然是恶意输入——拒收
+    且库外零落盘（`tmp_path/etc` 不得出现）。
+    """
+    from doc2md.cli import main
+    root = tmp_path / "work"
+    exp = tmp_path / "gate-export"
+    rc = main(["docs", "export", "../../etc/passwd", "--root", str(root),
+               "--out", str(exp)])
+    assert rc == 4
+    assert "E4003" in capsys.readouterr().err
+    assert not (tmp_path / "etc").exists(), "路径穿越不得在库外落文件"
+    assert not list(exp.glob("*.md")), "失败篇不得留下半截 md"
+
+
+def _o08_ingest(root, src):
+    """O-08 测试共用：转换 + 入库（CLI convert 不写库，入库口径同 watch）。"""
+    from doc2md.pipeline.convert import convert
+    from doc2md.storage.db import Store
+    from doc2md.storage.repo import save_ir
+    res = convert(src, out_dir=root / "out")
+    s = Store(root / "state.sqlite")
+    try:
+        save_ir(s, res.ir, meta=res.meta, gate=res.gate)
+    finally:
+        s.close()
+    return res
+
+
+def test_gate_skip_existing_artifacts_untouched(tmp_path, small_pdf, capsys):
+    """O-08 红线（C-27）：`--skip-existing` 全跳过、退出码 0、既有产物
+    （sha256）逐字节不变——「跳过」不得以任何方式变成「重写」。"""
+    import hashlib
+
+    from doc2md.cli import main
+    root = tmp_path / "work"
+    src = tmp_path / "gate.pdf"
+    src.write_bytes(small_pdf.read_bytes())
+    _o08_ingest(root, src)
+    zips = list((root / "out").glob("*.zip"))
+    assert len(zips) == 1
+    before = hashlib.sha256(zips[0].read_bytes()).hexdigest()
+    assert main(["convert", str(src), "--root", str(root),
+                 "--skip-existing", "--json"]) == 0
+    row = json.loads(capsys.readouterr().out.strip())
+    assert row["status"] == "skipped" and row["blocks"] == 0
+    assert hashlib.sha256(zips[0].read_bytes()).hexdigest() == before
+
+
+def test_gate_skip_existing_changed_source_converts(tmp_path, small_pdf,
+                                                    capsys):
+    """O-08 红线（C-27 边界）：源文件改写 → 内容哈希变 → 不得误跳过。
+    内容寻址是跳过判据的全部依据，「未变才跳」必须被红线钉住。"""
+    from doc2md.cli import main
+    root = tmp_path / "work"
+    src = tmp_path / "mutable.pdf"
+    src.write_bytes(small_pdf.read_bytes())
+    _o08_ingest(root, src)
+    src.write_bytes(src.read_bytes() + b"\n% appended page note\n")
+    assert main(["convert", str(src), "--root", str(root),
+                 "--skip-existing", "--json"]) == 0
+    row = json.loads(capsys.readouterr().out.strip())
+    assert row["status"] == "ok" and row["blocks"] > 0, "内容已变不得跳过"
+
+
+def test_gate_watch_restart_zero_reconversion(tmp_path, capsys):
+    """O-08 红线（F-07）：watch 进程重启后对未变更目录零转换。
+
+    进程内判据（CH-464 StabilityTracker）管「同进程不重复」，本红线管
+    「重启不重转」：第二遍 `watch --once`（全新 Tracker）必须全 skipped，
+    产物 sha 与 docs 行数都不变。修复前每个新进程首轮把老文件全部重转。
+    """
+    import hashlib
+    import os
+
+    from doc2md.cli import main
+    from doc2md.storage.db import Store
+    root = tmp_path / "work"
+    drop = tmp_path / "gdrop"
+    drop.mkdir()
+    src = drop / "watched.pdf"
+    src.write_bytes((Path(__file__).parent / "golden" / "small_3p.pdf").read_bytes())
+    old = src.stat().st_mtime - 60
+    os.utime(src, (old, old))
+    assert main(["watch", str(drop), "--once", "--root", str(root)]) == 0
+    capsys.readouterr()
+    zips = list((root / "out").glob("*.zip"))
+    assert len(zips) == 1
+    before = hashlib.sha256(zips[0].read_bytes()).hexdigest()
+    s = Store(root / "state.sqlite")
+    try:
+        n_docs = s.q1("SELECT COUNT(*) AS c FROM docs")["c"]
+    finally:
+        s.close()
+    assert n_docs == 1
+    # 第二遍（重启语义）：零转换
+    assert main(["watch", str(drop), "--once", "--root", str(root)]) == 0
+    out = capsys.readouterr().out
+    assert '"status": "skipped"' in out
+    assert hashlib.sha256(zips[0].read_bytes()).hexdigest() == before
+    s = Store(root / "state.sqlite")
+    try:
+        assert s.q1("SELECT COUNT(*) AS c FROM docs")["c"] == n_docs
+    finally:
+        s.close()
+
+
 # --- helpers ------------------------------------------------------------------
 def _tokens_h(tokens: dict, role: str = "admin") -> dict:
     return {"X-Doc2md-Token": tokens[role]}

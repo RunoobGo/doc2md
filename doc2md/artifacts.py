@@ -29,7 +29,8 @@ if TYPE_CHECKING:
 # 以下五段自 api.py 原样搬移（CH-492/A-1），勿改行为：
 _ARTIFACT_META_KEYS = {
     "doc_id", "source_key", "source_name", "source_name_raw", "format",
-    "pages", "sharded", "shard_count", "schema_version", "warnings",
+    "pages", "sharded", "shard_count", "schema_version", "pipeline_version",
+    "warnings",
 }
 _ARTIFACT_META_EXTRA = {"shard_stats", "llm_prompt", "llm_stats", "notes"}
 

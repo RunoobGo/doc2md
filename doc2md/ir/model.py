@@ -15,7 +15,7 @@ import hashlib
 from dataclasses import dataclass, field
 from typing import Any
 
-from .. import SCHEMA_VERSION
+from .. import PIPELINE_VERSION, SCHEMA_VERSION
 
 BLOCK_TYPES = ("heading", "paragraph", "list_item", "table", "code", "quote", "page_break")
 
@@ -56,6 +56,15 @@ class Block:
     provenance: dict[str, Any] = field(default_factory=dict)
     immutable: bool = False
     revision: int = 1
+    # O-01（QA-D2M-2026-10-21 / C-04）：**瞬态**字段——本块最后一个来源行的
+    # `Line.trailing_space`（S3 拼接时判断「块尾原本是否有空格」的几何证据）。
+    # 不进 to_dict / from_dict（SCHEMA_VERSION 不变）：它只在同一趟 analyze 内
+    # 的跨行拼接（_join_back / 列表续行 / 标题折行合并）中消费，落库即弃。
+    line_trail: bool = False
+    # O-06（C-31）：**瞬态**字段——表格块的源行形 `[每行实义列数]`（补齐前），
+    # 供 `qa_eval.table_col_consistency` 计算列一致率。渲染文本里的补齐空位
+    # 与实义空单元格无法区分，列一致率必须用补齐前的原始行形；落库即弃。
+    row_shape: list[int] | None = None
 
     def to_dict(self) -> dict:
         d = {
@@ -97,6 +106,12 @@ class IR:
     shard_count: int = 1
     warnings: list[str] = field(default_factory=list)
     schema_version: int = SCHEMA_VERSION
+    # N-1（QA-OPT-2 / C-27）：产物版本契约——front-matter 携带生成时的管线
+    # 语义化版本，供 `--skip-existing` 的 zip 产物回退判据识别陈旧产物
+    # （schema_version 只覆盖块结构，管线语义升级不体现在它上面）。
+    # 新转换盖当前版本；from_dict 读旧 ir.json 无此键时同样盖当前版本——
+    # 重建路径会用当前代码重渲 content.md，版本随渲染代码走才诚实。
+    pipeline_version: str = PIPELINE_VERSION
     extra_meta: dict[str, Any] = field(default_factory=dict)
 
     def meta(self, *, include_raw: bool = True) -> dict:
@@ -110,6 +125,7 @@ class IR:
             "sharded": self.sharded,
             "shard_count": self.shard_count,
             "schema_version": self.schema_version,
+            "pipeline_version": self.pipeline_version,
             "warnings": list(self.warnings),
             **self.extra_meta,
         }
@@ -128,7 +144,8 @@ class IR:
         m = d.get("meta", {})
         extra = {k: v for k, v in m.items() if k not in (
             "doc_id", "source_key", "source_name", "source_name_raw", "format",
-            "pages", "sharded", "shard_count", "schema_version", "warnings")}
+            "pages", "sharded", "shard_count", "schema_version",
+            "pipeline_version", "warnings")}
         return cls(
             doc_id=m.get("doc_id", ""), source_key=m.get("source_key", ""),
             source_name=m.get("source_name", "unnamed"),
@@ -139,5 +156,7 @@ class IR:
             shard_count=int(m.get("shard_count", 1) or 1),
             warnings=list(m.get("warnings", []) or []),
             schema_version=int(m.get("schema_version", SCHEMA_VERSION)),
+            # 旧 ir.json 无此键 → 盖当前版本（重建即当前代码重渲，见字段注释）。
+            pipeline_version=str(m.get("pipeline_version") or PIPELINE_VERSION),
             extra_meta=extra,
         )

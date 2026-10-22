@@ -354,6 +354,54 @@ def pdf_two_column() -> None:
     _finish(c, path, "6 页：双栏长段落 + 页眉页脚/页码")
 
 
+def pdf_wrap_space() -> None:
+    """1 页：折行点精确落在空格上的定向样本（O-01 / QA-D2M-2026-10-21 / C-04）。
+
+    `extract_text_lines` 把行缘空白从行字典（text/chars/bbox）整体剥掉，折行恰好
+    切在空格上时，S3 的跨行拼接必须凭 page.chars 的几何证据把空格补回。本样本
+    以显式画行的方式覆盖六种形态（原文空格的有无 × 边界类型），全部缝合成同一
+    段落（无硬句末、非结构起始）：
+      A 行尾证据：行以 "……数字 " 收尾，空格画在本行行尾（trailing_space）；
+      B 行首证据：行以 " 2026……" 起头，空格画在下一行行首（leading_space）；
+      C 行首证据：中文与 English 单词边界；
+      D 行首证据：English 到中文的反向边界；
+      E 行首证据：2026 到中文的数字汉字边界；
+      F 反例：原文无空格（"……相接" + "的片段……"），不得插入空格。
+    """
+    path, c = _pdf("pdf_11_wrap_space_1p.pdf")
+    c.setFont(CJK, 16)
+    c.drawString(1.4 * cm, H - 2.2 * cm, "七、折行空白保真")
+    lines = [
+        # 首行（首行缩进 2.4cm）；段内不得出现硬句末（。！？），否则 S3 切段
+        "折行空白保真测试：原文在折行处留有的空格必须原样保留，",
+        # A：行尾空格证据（行尾一个空格，中文与数字边界）
+        "覆盖中文与数字 ",
+        "2026 和标点的边界；",
+        # B：行首空格证据（行首一个空格，中文与数字边界）
+        "还包括中文与数字",
+        " 2026 同年发布的文本；",
+        # C：行首空格证据（中文与英文单词边界）
+        "中英混排时中文与",
+        " English 单词之间的空格；",
+        # D：行首空格证据（英文到中文反向边界）
+        "以及 English 到中文的",
+        " 反向边界同样保留；",
+        # E：行首空格证据（数字到中文边界）
+        "还包括 2026",
+        " 年之后的数字汉字边界；",
+        # F：反例——原文无空格，缝回时不得插入
+        "反例里中西文直接相接",
+        "的片段原文没有空格，也不得插入空格，缝合成同一段落。",
+    ]
+    y = H - 3.4 * cm
+    for i, line in enumerate(lines):
+        c.setFont(CJK, 11)
+        c.drawString(2.4 * cm if i == 0 else 1.4 * cm, y, line)
+        y -= 0.55 * cm
+    c.showPage()
+    _finish(c, path, "1 页：折行落在空格上的六形态定向样本（O-01）")
+
+
 # --- DOCX -------------------------------------------------------------------
 def _docx(name: str) -> tuple[Path, Document]:
     SOURCES.mkdir(parents=True, exist_ok=True)
@@ -721,6 +769,7 @@ CASES = [
     ("pdf_08_large_40p.pdf", "pdf", "ok"),
     ("pdf_09_complex_long_8p.pdf", "pdf", "ok"),
     ("pdf_10_two_column_6p.pdf", "pdf", "ok"),
+    ("pdf_11_wrap_space_1p.pdf", "pdf", "ok"),
     ("docx_01_simple.docx", "docx", "ok"),
     ("docx_02_lists.docx", "docx", "ok"),
     ("docx_03_tables.docx", "docx", "ok"),
@@ -752,6 +801,7 @@ def main() -> int:
     pdf_large()
     pdf_complex_long()
     pdf_two_column()
+    pdf_wrap_space()
     print("生成 DOCX 语料 ...")
     docx_simple()
     docx_lists()

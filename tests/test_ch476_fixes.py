@@ -440,7 +440,10 @@ def test_drain_round_claims_batch_beyond_pool(tmp_cfg, tmp_path, monkeypatch,
     (root / "out").mkdir(parents=True)
     store = Store(root / "state.sqlite")
     zp = root / "out"
-    zp.mkdir(exist_ok=True)
+    # O-02②：parents=True 的递归式幂等创建——parents=False 的 exist_ok 形式
+    # 在 brokered 沙箱里对已存在目录被拒（broker 的 mkdir 无 exist_ok 语义），
+    # 与产品代码（db.py / convert.py / artifacts.py 一律递归式）同口径。
+    zp.mkdir(parents=True, exist_ok=True)
     zp = zp / "ok.zip"
     with zipfile.ZipFile(zp, "w") as z:
         z.writestr("ir.json", json.dumps(_ir("db5", "b1", "批量正文").to_dict()))
@@ -1410,7 +1413,9 @@ def test_gap3_cell_paragraphs_join_with_space_single_paragraph_unchanged(tmp_pat
 
     row = next(ln.row for pg in read_docx(tmp_path / "c.docx")
                for ln in pg.lines if ln.row)
-    assert row == ["第一段 第二段", "唯一一段"]
+    # O-05（C-06）起段落边界改 `<br>`（GFM 单元格内合法换行，主流渲染器支持）；
+    # CH-476 时期的单空格口径让段落边界不可辨，是本条治的目标形态。
+    assert row == ["第一段<br>第二段", "唯一一段"]
 
 
 @pytest.mark.gate
@@ -1438,7 +1443,7 @@ def test_gap2_golden_notes_sample_end_to_end(golden_dir):
 
     r = convert(golden_dir / "docx" / "sample_notes.docx")
     for must in ("脚注一第一段，含两个自然段。 脚注一第二段。", "脚注二内容。",
-                 "尾注一内容，只有一段。", "| 单元格第一段 单元格第二段 | 单段单元格 |"):
+                 "尾注一内容，只有一段。", "| 单元格第一段<br>单元格第二段 | 单段单元格 |"):
         assert must in r.markdown, f"注 / 单元格内容丢失或形变：{must}"
     assert "这是正文段落，转换后注文应作为尾部段落块保留。" in r.markdown
     kinds = [b.flags.get("note_kind") for b in r.ir.blocks]

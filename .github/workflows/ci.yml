@@ -133,6 +133,12 @@ jobs:
           pip install -e ".[dev]"
       - name: Full test suite
         run: python -m pytest -vv --durations=15
+      # O-06：语句覆盖报告（信息面）。阈值只登记不阻断——覆盖红线会逼出
+      # 「为覆盖而写测试」；报告随 CI 日志留存，数值波动人工审阅。
+      - name: Statement coverage report (O-06, informational)
+        run: |
+          coverage run -m pytest -q tests/ -p no:randomly
+          coverage report --include="doc2md/*" | tail -5
       - name: Golden assets byte-reproducible (CH-442)
         run: python -m pytest -q tests/test_golden_repro.py
       - name: doctor self-check (CH-441 dep single source)

@@ -1,0 +1,27 @@
+{
+  "source": "docx_05_revisions_fields.docx",
+  "kind": "headings",
+  "provenance": "程序化生成自源文件 XML 样式（python-docx 直读 Heading N / Title，不经管线）；生成脚本 tests/corpus/make_ideal_docx.py，人工可复核。与 expected/ 基线（管线产物）无关。",
+  "headings": [
+    {
+      "seq": 1,
+      "text": "DOCX 修订与域代码测试",
+      "level": 1
+    },
+    {
+      "seq": 2,
+      "text": "域代码",
+      "level": 2
+    },
+    {
+      "seq": 3,
+      "text": "智能标记",
+      "level": 2
+    },
+    {
+      "seq": 4,
+      "text": "内容控件",
+      "level": 2
+    }
+  ]
+}

@@ -82,14 +82,31 @@ _MARGIN_TOP = 0.10
 _MARGIN_BOTTOM = 0.88
 # 页码形态：装饰式 “— 3 —”、中文 “第 3 页 共 5 页”、英文 “Page 3 of 5”、
 # “3 / 5”。只在页边距带内生效，避免误删正文里的数字。
+# N-4：罗马数字页码（I~XXXIX）同口径覆盖——“— IV —”“Page iv of x”
+# “第 iv 页”。裸罗马数字（“IV”单独一行）无上下文不认：装饰式/量词/比值
+# 形态才触发（宁漏勿误，与裸阿拉伯数字不入 _PAGE_NUM 同一对称口径）。
+_ROMAN = r"(?=[ivxIVX])(?:X{0,3})(?:IX|IV|V?I{0,3})"
+_PAGENUM_ATOM = rf"(?:\d{{1,4}}|{_ROMAN})"
 _PAGE_NUM = re.compile(
-    r"^(?:[—–-]\s*\d{1,4}\s*[—–-]"
-    r"|第\s*\d{1,4}\s*页(?:\s*共\s*\d{1,4}\s*页)?"
-    r"|共\s*\d{1,4}\s*页\s*第\s*\d{1,4}\s*页"
-    r"|page\s*\d{1,4}(?:\s*of\s*\d{1,4})?"
-    r"|\d{1,4}\s*/\s*\d{1,4})$", re.I)
+    rf"^(?:[—–-]\s*{_PAGENUM_ATOM}\s*[—–-]"
+    rf"|第\s*{_PAGENUM_ATOM}\s*页(?:\s*共\s*{_PAGENUM_ATOM}\s*页)?"
+    rf"|共\s*{_PAGENUM_ATOM}\s*页\s*第\s*{_PAGENUM_ATOM}\s*页"
+    rf"|page\s*{_PAGENUM_ATOM}(?:\s*of\s*{_PAGENUM_ATOM})?"
+    rf"|{_PAGENUM_ATOM}\s*/\s*{_PAGENUM_ATOM})$", re.I)
 _PAGE_NUM_INLINE = re.compile(
-    r"(第\s*\d{1,4}\s*页\s*共\s*\d{1,4}\s*页|[—–-]\s*\d{1,4}\s*[—–-])")
+    rf"(第\s*{_PAGENUM_ATOM}\s*页\s*共\s*{_PAGENUM_ATOM}\s*页|[—–-]\s*{_PAGENUM_ATOM}\s*[—–-])", re.I)
+
+# O-09（C-02）：`第 N 页` / `第 M 栏` 逐页变体归一化（见 _furniture_key；
+# 只认「页/栏」量词，「章/节/图/表」等真标题量词不动）。
+# N-4：量词数字放宽到罗马数字（“第 IV 页第 II 栏”）。
+_FURNITURE_PAGE_COL = re.compile(rf"第\s*{_PAGENUM_ATOM}\s*[页栏]", re.I)
+
+# N-4：「章节名 · 页码」混合页眉（页眉每页 = 同一章节名 + 递增页码）。
+# 尾随页码片段**只在 key 层**抹平（供跨页重复聚类），不进
+# `_PAGE_NUM_INLINE`——那会整行丢弃、连章节名一起误杀。旧键逐页不同
+# （“第一章 引言 · 12” ≠ “第一章 引言 · 13”）聚不出跨页重复。
+# 分隔符不含连字符：日期/编号（2026-10-22、表 3-1）不得被折成 #。
+_FURNITURE_TAIL_NUM = re.compile(rf"[·•・|｜—–]\s*(?:{_PAGENUM_ATOM})\s*$", re.I)
 
 # CH-482：代码块行首缩进重建（S1 几何 → Markdown 的 4 空格一级）
 _CODE_INDENT_UNIT = 4       # Markdown 代码块一级缩进
@@ -210,8 +227,22 @@ def _in_margin(ln, height: float) -> bool:
 
 
 def _furniture_key(text: str) -> str:
-    """页眉页脚归一化键：页码数字抹成 `#`，空白折叠，供跨页重复检测。"""
-    return re.sub(r"\s+", " ", _PAGE_NUM_INLINE.sub("#", text or "")).strip()
+    """页眉页脚归一化键：页码数字抹成 `#`，空白折叠，供跨页重复检测。
+
+    O-09（C-02）：`第 N 页` / `第 M 栏` 式**逐页变体**也要抹成 `#`——pdf_10
+    类页眉每页数字都变（"第 1 页第 1 栏" → "第 2 页第 3 栏"），旧键逐页不同
+    无法聚出跨页重复。只抹「页/栏」量词的数字：`第 N 章` / `第 1 节` 等真
+    标题量词不动（宁漏勿误——真标题折进 `#` 会被跨页重复误杀）。防线仍是
+    剔除处的三重约束：边距带内 + 字号不高于正文或短键 + ≥2 页重复。
+
+    N-4：两类新增——① 量词/页码片段放宽到罗马数字（“第 IV 页”“— IV —”）；
+    ② 「章节名 · 页码」混合页眉的**尾随**页码片段抹平（“第一章 引言 · 12”
+    与 “… · 13” 聚成同键）。分隔符不含连字符，日期/编号不受影响。
+    """
+    t = _PAGE_NUM_INLINE.sub("#", text or "")
+    t = _FURNITURE_PAGE_COL.sub("#", t)
+    t = _FURNITURE_TAIL_NUM.sub("#", t)
+    return re.sub(r"\s+", " ", t).strip()
 
 
 def _strip_page_furniture(pages: list[RawPage], base_size: float) -> list[RawPage]:
@@ -352,7 +383,9 @@ def _join_list_continuation(blocks: list[Block], text: str, ln,
                     and not prev.rstrip().endswith(("：", ":", "；", ";", "，", ","))):
                 return False
             if _can_continue(prev):
-                b.text = _append_line(prev, text.strip())
+                b.text = _append_line(prev, text.strip(),
+                                      space=_wrap_space(b, ln))
+                b.line_trail = bool(getattr(ln, "trailing_space", False))
                 b.flags.setdefault("joined_across_break", True)
                 return True
             return False
@@ -385,7 +418,9 @@ def _join_heading_continuation(blocks: list[Block], text: str, ln,
     for b in reversed(blocks):
         if b.type == "heading":
             if _can_continue(b.text or ""):
-                b.text = _append_line(b.text or "", text.strip())
+                b.text = _append_line(b.text or "", text.strip(),
+                                      space=_wrap_space(b, ln))
+                b.line_trail = bool(getattr(ln, "trailing_space", False))
                 return True
             return False
         if b.type in ("paragraph", "list_item"):
@@ -394,16 +429,29 @@ def _join_heading_continuation(blocks: list[Block], text: str, ln,
     return False
 
 
-def _join_back(blocks: list[Block], text: str, font: dict) -> Block | None:
+def _wrap_space(b: Block, ln) -> bool:
+    """O-01（C-04）：折行点处的空白证据——块尾来源行或续行自身任一带
+    `trailing_space` / `leading_space` 即认为原文此处有空格。"""
+    return bool(getattr(ln, "leading_space", False)
+                or getattr(b, "line_trail", False))
+
+
+def _join_back(blocks: list[Block], text: str, font: dict, ln=None) -> Block | None:
     """把续句行并回最近的内容块；成功返回被并入的块，失败返回 None。
 
     CH-459：遇到 quote / code / table / page_break 即止步——这些是结构块，
     续句穿过它们并回更前的段落会制造错位（原实现它们不存在，该分支不可达）。
     标题块照旧可穿过（CH-430：页眉/编号标题插在折行中间是常态）。
+
+    `ln`（O-01 / C-04）：续行本身。行缘空白证据（`leading_space`）与块尾
+    `line_trail` 共同决定折行点是否补空格；缺省 None 时按无证据处理
+    （直接构造块序列的调用方没有行对象）。
     """
     for b in reversed(blocks):
         if b.type in ("paragraph", "list_item"):
-            b.text = _append_line(b.text or "", text.strip())
+            b.text = _append_line(b.text or "", text.strip(),
+                                  space=_wrap_space(b, ln))
+            b.line_trail = bool(getattr(ln, "trailing_space", False))
             b.flags.setdefault("joined_across_break", True)
             if font and not b.font:
                 b.font = dict(font)
@@ -431,10 +479,16 @@ def _quote_text(text: str) -> str:
 
 
 def _gfm_table(rows: list[list[str]]) -> str:
-    """行单元格 → GFM 表格文本（列数不齐补齐到最多列；单元格内 | 转义）。"""
+    """行单元格 → GFM 表格文本（列数不齐补齐到最多列；单元格内 | 转义）。
+
+    O-05（C-06）：单元格内容规范统一收口在本函数——调用方只交单元格文本、
+    不预拼：`|` 必须转义（否则提前结束单元格），换行统一为 `<br>`（S1 的
+    段落边界标记与 run 内 `w:br` 映射的 `\\n` 同一口径，不再一个可辨一个
+    掉空格）。`<br>` 本身不再转义——GFM 单元格内的合法换行。
+    """
     ncols = max(len(r) for r in rows)
     padded = [(r + [""] * ncols)[:ncols] for r in rows]
-    esc = [[c.replace("|", "\\|").replace("\n", " ").strip() for c in row]
+    esc = [[c.strip().replace("\n", "<br>").replace("|", "\\|") for c in row]
            for row in padded]
     head, body = esc[0], esc[1:]
     sep = "| " + " | ".join(["---"] * ncols) + " |"
@@ -555,7 +609,7 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
     def flush_para() -> None:
         nonlocal para_buf, para_font, para_page, para_lines
         before = len(blocks)
-        _flush(para_buf, blocks, para_font, para_page)
+        _flush(para_buf, blocks, para_font, para_page, para_lines)
         if len(blocks) > before:              # 段缓冲非空且缝合后非空才落块
             for ln in para_lines:             # CH-459：取段内首条带链接行
                 if ln.link or ln.link_internal:
@@ -582,14 +636,21 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
         # PDF 的单行候选仍退回段落（无显式对象时宁可漏判，不制造假表）。
         one_explicit_row = bool(row_lines[0].row_explicit) and len(row_buf) == 1
         if as_table and (len(row_buf) >= _ROW_MIN or one_explicit_row):
+            # O-05（C-06）：拍平空位计数汇总为表级 flags.flattened_cells。
+            # 只在非零时写 flag——零值不落字节（G6：无合并的表格 ir.json 不变），
+            # 非零即「本表有合并信息被降维」，convert 据此留 W1045 告警。
+            flat = sum(int(getattr(ln, "row_flat", 0) or 0) for ln in row_lines)
             blocks.append(Block(id="", type="table",
-                                text=_gfm_table(row_buf), page=row_page))
+                                text=_gfm_table(row_buf), page=row_page,
+                                flags={"flattened_cells": flat} if flat else {},
+                                row_shape=[len(r) for r in row_buf]))
             _mark_provenance(blocks[-1], row_lines)     # CH-476（R7-GAP-1）
         else:                                   # 组不成表：逐行退回段落（漏判不误判）
             for i, ln in enumerate(row_lines):
                 blocks.append(Block(id="", type="paragraph",
                                     text=ln.text.strip(), font=_font(ln),
-                                    page=row_page))
+                                    page=row_page,
+                                    line_trail=bool(ln.trailing_space)))
                 if i == 0 and (ln.link or ln.link_internal):
                     _attach_link(blocks[-1], ln)
                 _mark_provenance(blocks[-1], (ln,))
@@ -703,11 +764,14 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
                         and not _NUM.match(text) and not _CJK_HEAD.match(text)
                         and not _CJK_ORD.match(text) and not _PAREN_HEAD.match(text)):
                     # 大字号标题在 PDF 折行后被判成两个 heading，拼回一个。
-                    prev.text = _append_line(prev.text or "", head_text)
+                    prev.text = _append_line(prev.text or "", head_text,
+                                             space=_wrap_space(prev, ln))
+                    prev.line_trail = bool(getattr(ln, "trailing_space", False))
                     _mark_provenance(prev, (ln,), merge=True)
                     continue
                 blocks.append(Block(id="", type="heading", text=head_text,
-                                    level=lvl, font=_font(ln), page=page.index))
+                                    level=lvl, font=_font(ln), page=page.index,
+                                    line_trail=bool(ln.trailing_space)))
                 if ln.level_hint:
                     # CH-476（R7-PIPE-4）：显式样式层级留痕，`_fix_levels` 依此不改写
                     blocks[-1].flags["level_from_hint"] = True
@@ -723,7 +787,8 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
                 indent = "  " * max(0, ln.list_level)
                 blocks.append(Block(id="", type="list_item",
                                     text=f"{indent}{marker} {text.strip()}",
-                                    font=_font(ln), page=page.index))
+                                    font=_font(ln), page=page.index,
+                                    line_trail=bool(ln.trailing_space)))
                 blocks[-1].flags["docx_numbering"] = {
                     "marker": ln.list_marker, "level": ln.list_level}
                 _attach_link(blocks[-1], ln)
@@ -735,7 +800,8 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
                 flush_quote()
                 flush_rows(True)             # 行组被结构行终止：按事实判定
                 blocks.append(Block(id="", type="list_item", text=text.strip(),
-                                    font=_font(ln), page=page.index))
+                                    font=_font(ln), page=page.index,
+                                    line_trail=bool(ln.trailing_space)))
                 _attach_link(blocks[-1], ln)
                 _mark_provenance(blocks[-1], (ln,))
                 continue
@@ -747,7 +813,8 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
                 flush_quote()
                 flush_rows(True)             # 行组被结构行终止：按事实判定
                 blocks.append(Block(id="", type="list_item", text=text.strip(),
-                                    font=_font(ln), page=page.index))
+                                    font=_font(ln), page=page.index,
+                                    line_trail=bool(ln.trailing_space)))
                 _attach_link(blocks[-1], ln)
                 _mark_provenance(blocks[-1], (ln,))
                 continue
@@ -757,7 +824,8 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
                 flush_quote()
                 flush_rows(True)
                 blocks.append(Block(id="", type="list_item", text=text.strip(),
-                                    font=_font(ln), page=page.index))
+                                    font=_font(ln), page=page.index,
+                                    line_trail=bool(ln.trailing_space)))
                 _attach_link(blocks[-1], ln)
                 _mark_provenance(blocks[-1], (ln,))
                 continue
@@ -806,7 +874,8 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
             if ln.note_kind:
                 flush_para()
                 blocks.append(Block(id="", type="paragraph", text=text.strip(),
-                                    font=_font(ln), page=page.index))
+                                    font=_font(ln), page=page.index,
+                                    line_trail=bool(ln.trailing_space)))
                 _attach_link(blocks[-1], ln)
                 _mark_provenance(blocks[-1], (ln,))
                 continue
@@ -817,13 +886,14 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
                 flush_quote()
                 flush_rows(True)
                 blocks.append(Block(id="", type="paragraph", text=text.strip(),
-                                    font=_font(ln), page=page.index))
+                                    font=_font(ln), page=page.index,
+                                    line_trail=bool(ln.trailing_space)))
                 _attach_link(blocks[-1], ln)
                 _mark_provenance(blocks[-1], (ln,))
                 continue
             # CH-430：续句标点起头 → 无条件并回上一个内容块（可跨标题/空行打断）
             if _continuation_led(text) and not para_buf and not ln.explicit_para:
-                back = _join_back(blocks, text, _font(ln))
+                back = _join_back(blocks, text, _font(ln), ln)
                 if back is not None:
                     if (ln.link or ln.link_internal) and not back.links:
                         _attach_link(back, ln)
@@ -976,41 +1046,59 @@ def _can_continue(prev: str) -> bool:
     return not _ends_sentence(p)
 
 
-def _flush(buf: list[str], blocks: list[Block], font: dict, page: int) -> None:
+def _flush(buf: list[str], blocks: list[Block], font: dict, page: int,
+           lines: list | None = None) -> None:
     """行缓冲 → 段落块：逐行按中西文规则缝合。
 
     CH-473（PIPE-9）：不再收 `seq` 预写 id——唯一赋值点是 `analyze` 收尾重排。
+    `lines`（O-01）：与 `buf` 逐行对齐的来源行（可含 None 占位）。跨行拼接时
+    把行缘空白几何证据（`trailing_space` / `leading_space`）传给 `_append_line`，
+    折行恰好切在空格上时补回该空格（"数字 2026" → "数字" + "2026"）。
     """
     if not buf:
         return
     text = buf[0]
-    for nxt in buf[1:]:
-        text = _append_line(text, nxt)
+    for i, nxt in enumerate(buf[1:], start=1):
+        prev_ln = lines[i - 1] if lines and i - 1 < len(lines) else None
+        next_ln = lines[i] if lines and i < len(lines) else None
+        space = bool(getattr(prev_ln, "trailing_space", False)
+                     or getattr(next_ln, "leading_space", False))
+        text = _append_line(text, nxt, space=space)
     text = text.strip()
     if text:
+        last = lines[-1] if lines else None
         blocks.append(Block(id="", type="paragraph", text=text,
-                            font=font or {}, page=page))
+                            font=font or {}, page=page,
+                            line_trail=bool(getattr(last, "trailing_space", False))))
 
 
-def _append_line(a: str, b: str) -> str:
+def _append_line(a: str, b: str, *, space: bool = False) -> str:
     """按跨行口径把 b 接到 a 后面（唯一的拼接入口，CH-469）。
 
     连字符断词（"under-" + "score" → "underscore"）需要剥掉 a 尾部连字符，
     这层语义集中在本函数处理；调用方不再自行 `a + _join_line(a, b)`，
     避免追加/替换两种口径混用产出重复文本。
+
+    `space`（O-01 / C-04）：行缘空白几何证据——折行点处原本有空格（上一行
+    `trailing_space` 或下一行 `leading_space`）。中西文边界默认不插空格，
+    但有此证据时必须补回，否则 "数字 2026" 折行后被拼成 "数字2026"。
     """
-    frag = _join_line(a, b)
+    frag = _join_line(a, b, space=space)
     if a.endswith("-") and b[:1].islower():
         return a[:-1] + frag
     return a + frag
 
 
-def _join_line(a: str, b: str) -> str:
+def _join_line(a: str, b: str, *, space: bool = False) -> str:
     """跨行拼接的**待追加片段**（只经 _append_line 消费，CH-469）。
 
     连字符断词分支只返回 b：整串 `a[:-1] + b` 是替换语义的写法，
     而两个调用方都是追加语义，直接返回整串会产出 "under-underscore"
     这类重复文本（与方案 §merged[-1]=prev[:-1]+ln 的意图不符，且原实现无测试覆盖）。
+
+    `space`（O-01 / C-04）：原文折行处有空格时的补空格证据。只作用于中西文
+    边界（本分支默认无空格）；数字被折行切开（"2" + "026"）与连字符断词两条
+    早退分支不受影响——那两种形态下原文不会有空格。
     """
     if a.endswith("-") and b[:1].islower():
         return b
@@ -1020,7 +1108,10 @@ def _join_line(a: str, b: str) -> str:
         # 折行把同一个数字切开（"2" + "026"）时不得插空格。
         return b
     if _CJK_HEAD.match(b) or ord(last) > 0x2E80 or ord(first) > 0x2E80:
-        return b
+        # 中西文边界：默认不加空格（中文排版惯例），但行缘空白证据表明
+        # 原文该处确有空格时补回（宁漏勿误的反面是「有据必恢」——证据来自
+        # page.chars 里与行缘相邻的空白字符，见 s1_parse._edge_spaces）。
+        return (" " + b) if space else b
     return (" " + b) if (last.isalnum() and first.isalnum()) else b
 
 

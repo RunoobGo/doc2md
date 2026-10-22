@@ -250,11 +250,17 @@ class TestTables:
 
 
 class TestSamplerPrimitives:
-    def test_default_backend_samples_tree(self):
+    def test_default_backend_samples_tree(self, sandbox_denies_rss_sampling):
         """CH-469：默认后端断言改为平台无关——写死 "proc" 等于把「本机是 Linux」
         编进断言，macOS 上必红（实测）。契约是：POSIX 本机必然有可用后端，
         且能采到自身 pid 与正的 RSS。
+
+        O-02③：沙箱禁进程枚举（ps 子进程 EPERM）时 `sample_tree` 按设计退化为
+        none——那是环境能力缺失，不是产品缺陷，转 skip 并写明原因。
         """
+        if sandbox_denies_rss_sampling:
+            pytest.skip("sandbox denies process-tree sampling (ps EPERM); "
+                        "T6 RSS column is n/a by design")
         if os.name == "nt" and bench._probe_backend() == "none":
             pytest.skip("Windows without psutil: RSS sampling is intentionally n/a")
         pids, rss, backend = bench.sample_tree(os.getpid())
@@ -300,11 +306,18 @@ class TestSamplerPrimitives:
             assert os.getpid() in pids
             assert rss.get(os.getpid(), 0) > 0
 
-    def test_ps_backend_matches_proc_tree(self, monkeypatch):
+    def test_ps_backend_matches_proc_tree(self, monkeypatch, sandbox_denies_rss_sampling):
         """macOS 分支在 Linux 上实测：GNU procps 与 BSD ps 的
-        `ps -axo pid=,ppid=,rss=` 输出规格一致（无表头、三列 KB）。"""
+        `ps -axo pid=,ppid=,rss=` 输出规格一致（无表头、三列 KB）。
+
+        O-02③：沙箱禁 ps 子进程时该后端按设计退化为 none——环境能力缺失，
+        非产品缺陷，转 skip。
+        """
         if os.name == "nt":
             pytest.skip("POSIX ps backend unavailable on Windows")
+        if sandbox_denies_rss_sampling:
+            pytest.skip("sandbox denies process-tree sampling (ps EPERM); "
+                        "ps backend is n/a by design")
         monkeypatch.setenv("T6_SAMPLER", "ps")
         pids, rss, backend = bench.sample_tree(os.getpid())
         assert backend == "ps"
@@ -347,7 +360,7 @@ class TestRunDrainEndToEnd:
     """真 CLI 子进程：doc2md work --enqueue DIR --once --workers N。
     小语料（2 PDF + 1 DOCX + 3 坏文件），只验证仪器接线与状态契约。"""
 
-    def test_tiny_corpus_drain(self, tmp_path):
+    def test_tiny_corpus_drain(self, tmp_path, sandbox_denies_rss_sampling):
         corpus = tmp_path / "corpus"
         bench.generate_corpus(corpus, n_pdf=2, n_docx=1, n_bad=3, seed=20261014)
         r = bench.run_drain(corpus, tmp_path / "work", 1)
@@ -364,8 +377,9 @@ class TestRunDrainEndToEnd:
         # 「采样器接线正常」不由这里证明——它由 test_queue_counts_reads_db 的
         # 确定性断言 + 下面的 queue_series 非空证明；把宿主时序写进下界就是伪覆盖。
         assert 0 <= r["backlog_peak"] <= 4
-        # Windows 未装 psutil 时驻留列按设计为 n/a；吞吐/失败账目不受影响。
-        if os.name == "nt" and r["sampler"] == "none":
+        # O-02③：沙箱禁进程枚举（ps EPERM）时驻留列按设计 n/a；Windows 未装
+        # psutil 时同样 n/a。两种情况的吞吐/失败账目都不受影响。
+        if sandbox_denies_rss_sampling or (os.name == "nt" and r["sampler"] == "none"):
             assert r["peak_tree_mb"] is None and r["rss_available"] is False
         else:
             assert r["peak_tree_mb"] > 0

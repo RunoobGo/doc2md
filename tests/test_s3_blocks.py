@@ -502,6 +502,29 @@ def test_render_keeps_blank_lines_inside_code_block():
     assert "后文\n\n多余空行" in md, "围栏外的空行压缩仍需生效"
 
 
+def test_render_tight_list_between_items():
+    """O-04（C-05）：连续 list_item 之间单换行（tight list）；块界
+    （段落→列表、列表→段落、列表→标题）仍保留空行——Markdown 需要空行
+    打断段落。块内多行 list_item 不受影响。"""
+    ir = _ir(Block(id="b1", type="heading", text="列表", level=2),
+             Block(id="b2", type="paragraph", text="引导段"),
+             Block(id="b3", type="list_item", text="- 甲"),
+             Block(id="b4", type="list_item", text="- 乙"),
+             Block(id="b5", type="list_item", text="1. 丙"),
+             Block(id="b6", type="paragraph", text="收尾段"))
+    md = render(ir)
+    assert "引导段\n\n- 甲\n- 乙\n1. 丙\n\n收尾段" in md
+
+
+def test_render_page_break_between_list_items_stays_tight():
+    """O-04：page_break 渲染为空串、不参与间距判定——被它隔开的两个列表项
+    仍按连续列表项 tight 相接（GFM 无分页语法，结构信息留在 IR/审阅面）。"""
+    ir = _ir(Block(id="b1", type="list_item", text="- 甲"),
+             Block(id="b2", type="page_break", text=""),
+             Block(id="b3", type="list_item", text="- 乙"))
+    assert render(ir) == "- 甲\n- 乙\n"
+
+
 def test_apply_ops_preserves_links_on_split_and_merge():
     """CH-469：split_block / merge_block 原不搬运 links → 尾块与被吸收块的
     链接静默丢失。"""

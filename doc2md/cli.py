@@ -3,9 +3,14 @@
     doc2md serve [--host --port --root --config]        # 起 API 服务（不内置线程，ADR-30）
     doc2md serve token [--role admin|editor|reader] [--label] [--revoke TOKEN]
     doc2md cron --daily | --weekly                      # launchd StartCalendarInterval 触发
-    doc2md convert <file|dir> [--mode auto|single|two_phase] [--out DIR] [--json] [--workers N]
+    doc2md convert <file|dir> [--mode auto|single|two_phase] [--out DIR] [--json] [--workers N] \
+                [--skip-existing] [--force]
     doc2md watch <dir> [--once]                         # FR-111 稳定性判定 + 入队
     doc2md work [--once|--max-jobs N|--enqueue PATH|--status]   # CH-449 队列消费
+    doc2md search QUERY [--full] [--limit N]    # 检索已入库文档（API /search 的 CLI 等价物，CH-491）
+    doc2md docs list [--limit N --offset N --status S]   # 库内文档清单（O-07）
+    doc2md docs show <doc_id> [--limit N --offset N]     # 单篇元数据 + 块窗口（API /docs/<id> 等价物）
+    doc2md docs export <doc_id...> | --all [--out DIR]   # 导出 content.md + manifest.json 对账
     doc2md tokenizer export <gguf> [--manifest PATH]    # M0：vocab 导出 + manifest
     doc2md tokenizer verify --manifest PATH --gguf GGUF # M0 验收 4：口径可复现
     doc2md doctor                                       # 环境 / 路径 / 权限自检
@@ -23,9 +28,13 @@ import sys
 from pathlib import Path
 
 from . import PIPELINE_VERSION, config
-from .errors import Doc2mdError, E4221_GateReject
+from .errors import Doc2mdError, E4041_NotFound, E4221_GateReject, E5031_StorageError
 
 EXIT_OK, EXIT_USAGE, EXIT_GATE, EXIT_BIZ, EXIT_SYS = 0, 2, 3, 4, 5
+
+# O-07：CLI 只读列表面的分页硬顶——与 API `_MAX_ROWS` 同口径（CH-476 R7-PERF-j：
+# 无界上限会把全库行物化进终端/管道）。超限截断不报错（search 既有口径）。
+DOCS_MAX_ROWS = 500
 
 
 def _console_safe() -> None:
@@ -153,6 +162,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="批量进程数（CH-448）；缺省 = [perf].workers（0 自动 min(4, CPU)），1 = 串行")
     cv.add_argument("--force", action="store_true",
                     help="允许覆盖库内已有用户编辑（默认 E4091 拒收，产物保持可导出）")
+    cv.add_argument("--skip-existing", action="store_true",
+                    help="O-08（C-27）：内容哈希已入库即跳过（结果行 status=skipped，退出码不计失败）；"
+                         "源文件改写后哈希变化，不会误跳过新内容")
     cv.add_argument("--llm-mode", choices=("offline", "server"),
                     help="LLM 补助实现（CH-456 / T2）：offline = 确定性占位（默认，零网络）；"
                          "server = 本地 llama-server（llm.bind:llm.port）")
@@ -202,6 +214,30 @@ def build_parser() -> argparse.ArgumentParser:
                     help="走 blocks.text 全表 LIKE，覆盖 FTS 索引窗口外的块尾部")
     se.add_argument("--limit", type=int,
                     help="返回条数上限（默认 20，上限 500；超限截到 500 而非报错）")
+
+    # O-07（C-26 / F-01）：docs 只读三件套——不起 serve 即可查/导已转内容，
+    # 与 search 合成完整 CLI 读取面。三个子命令全部只读（零 DB 写入）。
+    dc = sub.add_parser("docs", help="已入库文档的只读查询 / 导出（O-07）")
+    _add_common(dc)
+    dcsub = dc.add_subparsers(dest="dc_cmd", required=True)
+    dcl = dcsub.add_parser("list", help="文档清单（分页信封 + 块计数）")
+    _add_common(dcl)
+    dcl.add_argument("--limit", type=int,
+                     help=f"条数上限（默认 50，硬顶 {DOCS_MAX_ROWS}；超限截断不报错）")
+    dcl.add_argument("--offset", type=int, default=0, help="偏移（默认 0）")
+    dcl.add_argument("--status", help="按 docs.status 过滤（默认全部）")
+    dcs = dcsub.add_parser("show", help="单篇元数据 + 块窗口（GET /docs/<id> 等价物）")
+    _add_common(dcs)
+    dcs.add_argument("doc_id", help="文档 id（内容哈希前 16 位十六进制）")
+    dcs.add_argument("--limit", type=int,
+                     help=f"块窗口大小（默认 20，硬顶 {DOCS_MAX_ROWS}）")
+    dcs.add_argument("--offset", type=int, default=0, help="块窗口偏移（默认 0）")
+    dce = dcsub.add_parser("export", help="导出 content.md（与 zip 内逐字节相同）+ manifest.json")
+    _add_common(dce)
+    dce.add_argument("doc_ids", nargs="*", metavar="doc_id",
+                     help="要导出的 doc_id（可多个）；或 --all 全量")
+    dce.add_argument("--all", action="store_true", help="导出库内全部文档")
+    dce.add_argument("--out", help="导出目录（默认 [paths].out）")
     return ap
 
 
@@ -498,7 +534,7 @@ def _apply_format(res: dict, out: Path, fmt: str) -> str:
 
 
 def cmd_convert(args: argparse.Namespace) -> int:
-    from .pipeline.batch import default_workers, run_batch
+    from .pipeline.batch import default_workers, result_row, run_batch, skip_existing_hit, skipped_row
     cfg = _cfg(args)
     _ensure_private_root(_root(cfg))
     # CH-456 / T2：--llm-mode / --llm-no-fallback 覆盖声明性配置（口径与配置键一致）
@@ -515,6 +551,11 @@ def cmd_convert(args: argparse.Namespace) -> int:
         print(f"not found: {src}", file=sys.stderr)
         return EXIT_USAGE
     out = Path(args.out).expanduser() if args.out else _out(cfg)
+    # N-2 附带发现（QA-OPT-3）：--out 覆盖必须回灌 cfg——skip_existing_hit
+    # 的产物回退判据（N-1）按 cfg paths.out 解析 zip 位置，不回灌则
+    # 自定义 --out 的二转永远打不到历史 zip（串行与批量 worker 共用本
+    # cfg，单点修复两路同时生效）。
+    cfg.setdefault("paths", {})["out"] = str(out)
     rc = EXIT_OK
     if not files:
         print(_jline({"status": "empty", "path": str(src)}), file=sys.stderr)
@@ -525,7 +566,8 @@ def cmd_convert(args: argparse.Namespace) -> int:
     if len(files) > 1 and workers > 1:
         results = run_batch(files, cfg=cfg, mode=args.mode, out_dir=out,
                             workers=workers, force=bool(args.force),
-                            precheck_edits=True)
+                            precheck_edits=True,
+                            skip_existing=bool(args.skip_existing))
         for res in results:
             res["md"] = _apply_format(res, out, args.format)
             rc = max(rc, _report(res, as_json=args.json))
@@ -545,6 +587,15 @@ def cmd_convert(args: argparse.Namespace) -> int:
         print(f"[{stage}] {bits}", file=sys.stderr)
 
     for f in files:
+        # O-08（C-27）：串行路径的跳过判定与批量工人共用 skip_existing_hit
+        # 单点、跳过行共用 skipped_row 单点——两条出口同构（O-03 纪律）。
+        if args.skip_existing:
+            hit = skip_existing_hit(cfg, f)
+            if hit is not None:
+                doc_id, source_key, zp = hit
+                rc = max(rc, _report(skipped_row(f, doc_id, source_key, zp),
+                                     as_json=args.json))
+                continue
         try:
             res = convert(f, cfg=cfg, mode=args.mode, out_dir=out,
                           force=bool(args.force), precheck_edits=True,
@@ -558,12 +609,10 @@ def cmd_convert(args: argparse.Namespace) -> int:
             print(_jline(_err_payload(exc, str(exc), file=f.name)), file=sys.stderr)
             rc = max(rc, EXIT_BIZ)
             continue
-        row = {"file": f.name, "status": "ok", "doc_id": res.doc_id,
-               "blocks": len(res.ir.blocks), "chars": res.metrics["chars"],
-               "zip": str(res.zip_path) if res.zip_path else "",
-               "sharded": res.meta.get("sharded"),
-               "shard_stats": res.meta.get("shard_stats", {}),
-               "meta": res.meta}
+        # O-03（C-21）：与批量工人共用 result_row 单点——两条出口的共有字段
+        # （file/status/doc_id/source_key/blocks/chars/zip/sharded/shard_stats/
+        # meta）键集与取值类型逐字节同构，下游脚本一套解析即可。
+        row = result_row(f, res)
         row["md"] = _apply_format(row, out, args.format)
         rc = max(rc, _report(row, as_json=args.json))
     return rc
@@ -595,9 +644,13 @@ def _report(res: dict, *, as_json: bool) -> int:
         if res.get("md"):
             line += f" md={res['md']}"
         print(line)
+    elif status == "skipped":
+        # O-08（C-27）：跳过是「本次未做转换」的正常终态——人读行明示 doc_id
+        # 与既有产物路径，退出码贡献 0（不同步失败聚合）。
+        print(f"{name}: skipped doc_id={payload['doc_id']} zip={payload['zip']}")
     else:
         print(_jline(payload), file=sys.stderr)
-    if status == "ok":
+    if status in ("ok", "skipped"):
         return EXIT_OK
     return EXIT_GATE if status == "rejected" else EXIT_BIZ
 
@@ -646,6 +699,29 @@ def cmd_work(args: argparse.Namespace) -> int:
 
 
 # --- watch --------------------------------------------------------------------
+def _watch_done_hit(store, path) -> tuple[str, str] | None:
+    """O-08（F-07）：watch 重启判据——同路径 + 同内容哈希已有 done 任务行。
+
+    返回 `(doc_id, source_key)`（命中）或 None（未命中 / 读不了）。
+
+    判据落在库面而非新状态文件：`tasks.source_path + source_key` 两列即
+    「这个路径的这份内容已提交且已完成」，不新增表、不引入第二份事实源。
+    源文件被改写 → 内容哈希变 → 不命中，热更新语义完整保留（CH-464 的
+    进程内判据管「同一进程不重复转」，本判据管「重启后不重转」，两层互补）。
+    文件读不了 → None：让调用方走它自己的错误口径，不在这里吞异常。
+    """
+    from .ir.model import hash_of_path
+    try:
+        doc_id, source_key = hash_of_path(path)
+    except OSError:
+        return None
+    row = store.q1(
+        "SELECT job_id FROM tasks WHERE source_path=? AND source_key=?"
+        " AND status='done' ORDER BY created_at DESC LIMIT 1",
+        (str(path), source_key))
+    return (doc_id, source_key) if row else None
+
+
 def _dir_files(src: Path, cfg: dict, follow: bool) -> list[Path]:
     """一次性目录枚举：截断即 E4133（CH-469 / O-10）。
 
@@ -697,6 +773,14 @@ def cmd_watch(args: argparse.Namespace) -> int:
                 p = Path(f)
                 if p.suffix.lower() not in (".pdf", ".docx", ".doc"):
                     continue
+                # O-08（F-07）：重启判据——同路径同内容已 done 即跳过（零转换）。
+                # 反向断言基线：修复前每个新进程的首轮都会把目录内老文件全部
+                # 重转换一遍（ StabilityTracker 是进程内登记簿，重启即失忆）。
+                hit = _watch_done_hit(store, p)
+                if hit is not None:
+                    print(_jline({"watched": p.name, "status": "skipped",
+                                  "doc_id": hit[0], "source_key": hit[1]}))
+                    continue
                 if async_queue:
                     # CH-449：低配机上 watch 目录批量落文件时，稳定即入队、由
                     # `doc2md work` 并发消费；不在轮询线程里做 CPU 重活
@@ -713,7 +797,8 @@ def cmd_watch(args: argparse.Namespace) -> int:
                 try:
                     res = convert(p, cfg=cfg, out_dir=_out(cfg), precheck_edits=True)
                     save_ir(store, res.ir, meta=res.meta, gate=res.gate)
-                    j = sched.submit(res.doc_id, res.source_key)
+                    j = sched.submit(res.doc_id, res.source_key,
+                                     source_path=str(p))
                     # CH-489：`submit` 可能附着到已有的 queued/running 作业
                     # （同 doc_id 的去重路径）。此时该作业的终态由它的消费者
                     # 决定，watch 不能替对端提前写 done（会把仍在跑的作业伪装
@@ -774,23 +859,237 @@ def cmd_search(args: argparse.Namespace) -> int:
     无法检索已入库文档。本命令复用 `storage/repo.py::search`，与 API 同一
     实现、同一默认口径（limit 默认 20、上限 500 截断不报错），结果集逐条相同。
     """
-    from .storage.db import Store
     from .storage.repo import search
     cfg = _cfg(args)
-    root = _root(cfg)
-    db = root / "state.sqlite"
-    if not db.exists():
-        print(_jline({"code": "E4041", "message": f"no library at {db}"}),
-              file=sys.stderr)
-        return EXIT_BIZ
-    limit = args.limit if args.limit is not None else 20
-    store = Store(db)
+    # O-07：库连接与「no library」口径收敛到 _open_store 单点（此前与 docs 三
+    # 命令各自内联，格式漂移过）；limit 走 _nonneg——help 早写明「上限 500
+    # 截断不报错」，而负值经 SQLite `LIMIT -1`（无界）会绕过该口径。
+    limit = _nonneg(args, "limit", 20)
+    if limit is None:
+        return EXIT_USAGE
+    store = _open_store(cfg)
     try:
         result = search(store, args.query, limit, full=bool(args.full))
     finally:
         store.close()
     print(_jline(result, indent=2))
     return EXIT_OK
+
+
+# --- docs（O-07：只读查询 / 导出）-----------------------------------------------
+def _open_store(cfg: dict):
+    """只读命令面共用的库连接；库不存在即 E4041（与 search 同口径，退出码 4）。
+
+    单点收敛的原因：三个 docs 子命令 + search 四处的「no library」消息与
+    退出码此前各自内联，漂移过格式（CH-491 起 search 先收敛过一次）。
+    """
+    from .storage.db import Store
+    db = _root(cfg) / "state.sqlite"
+    if not db.exists():
+        raise E4041_NotFound(f"no library at {db}")
+    return Store(db)
+
+
+def _nonneg(args: argparse.Namespace, name: str, default: int) -> int | None:
+    """--limit / --offset 收口（O-07）：负值打印 E4001 并返回 None（调用方退
+    EXIT_USAGE——argparse 对 `--limit abc` 同样退 2，负值没理由按业务错 4；
+    API `_window` 亦拒负）；超 DOCS_MAX_ROWS 截断不报错（search help 既定的
+    「上限 500」口径）。必须挡在 SQL 之前：SQLite `LIMIT -1` 是无界的反直觉语义。
+    """
+    raw = getattr(args, name, None)
+    if raw is None:
+        return default
+    if raw < 0:
+        print(_jline({"code": "E4001", "message": f"{name} must be >= 0"}),
+              file=sys.stderr)
+        return None
+    return min(raw, DOCS_MAX_ROWS)
+
+
+def cmd_docs(args: argparse.Namespace) -> int:
+    if args.dc_cmd == "list":
+        return _cmd_docs_list(args)
+    if args.dc_cmd == "show":
+        return _cmd_docs_show(args)
+    return _cmd_docs_export(args)
+
+
+def _cmd_docs_list(args: argparse.Namespace) -> int:
+    from .storage.repo import list_docs
+    cfg = _cfg(args)
+    limit = _nonneg(args, "limit", 50)
+    offset = _nonneg(args, "offset", 0)
+    if limit is None or offset is None:
+        return EXIT_USAGE
+    store = _open_store(cfg)
+    try:
+        result = list_docs(store, offset=offset, limit=limit, status=args.status)
+    finally:
+        store.close()
+    print(_jline(result, indent=2))
+    return EXIT_OK
+
+
+def _cmd_docs_show(args: argparse.Namespace) -> int:
+    from .storage.repo import count_blocks, get_doc, list_blocks
+    cfg = _cfg(args)
+    limit = _nonneg(args, "limit", 20)
+    offset = _nonneg(args, "offset", 0)
+    if limit is None or offset is None:
+        return EXIT_USAGE
+    store = _open_store(cfg)
+    try:
+        d = get_doc(store, args.doc_id)              # 不存在 → E4041（退出码 4）
+        # 与 GET /docs/<id> 同一派生字段（O-05）：降维告警不再埋在内嵌 meta 里
+        d["warnings"] = list((d.get("meta") or {}).get("warnings") or [])
+        d["blocks"] = [b.to_dict() for b in
+                       list_blocks(store, args.doc_id, offset=offset, limit=limit)]
+        d["blocks_total"] = count_blocks(store, args.doc_id)
+        d["blocks_offset"] = offset
+        d["blocks_limit"] = limit
+    finally:
+        store.close()
+    print(_jline(d, indent=2))
+    return EXIT_OK
+
+
+def _zip_content_md(zp: Path, doc_id: str) -> bytes:
+    """从产物 zip 原样读出 content.md 字节（不重新序列化——重新拼装会因
+    json 缩进/键序漂移破坏「与 zip 内逐字节相同」的契约，同 _emit_md 口径）。"""
+    import zipfile
+
+    from .artifacts import artifact_entry
+    try:
+        with zipfile.ZipFile(zp) as z:
+            entry = artifact_entry(z.namelist(), "content.md", doc_id)
+            if not entry:
+                raise E4041_NotFound("artifact content.md missing")
+            return z.read(entry)
+    except zipfile.BadZipFile as exc:
+        raise E5031_StorageError("artifact unreadable",
+                                 detail={"reason": type(exc).__name__}) from exc
+
+
+def _export_md_name(source_name: str, doc_id: str, taken: dict) -> str:
+    """导出文件名：消毒后的源文件名（用户可读）；同批冲突按 F-14 既定口径
+    追加 `-<doc_id 前 8>`，再冲突加长到 16，最后回退全 doc_id（PK 唯一）。
+
+    `taken` 为「本批已占名 → doc_id」映射：只在不同 doc_id 争同名时加后缀，
+    同一 doc_id 重复导出走覆盖语义（内容寻址，重导结果逐字节相同）。
+    """
+    from .security.names import assert_name_safe
+    base = (source_name or "").strip()
+    if base:
+        assert_name_safe(base)                      # 与 package() 同一道闸
+        name = base if base.lower().endswith(".md") else f"{base}.md"
+    else:
+        name = f"{doc_id}.md"
+    if taken.get(name) in (None, doc_id):
+        taken[name] = doc_id
+        return name
+    stem = name[:-3] if name.lower().endswith(".md") else name
+    for n in (8, 16, len(doc_id)):
+        cand = f"{stem}-{doc_id[:n]}.md"
+        if taken.get(cand) in (None, doc_id):
+            taken[cand] = doc_id
+            return cand
+    name = f"{doc_id}.md"       # 理论不可达兜底：doc_id 全量唯一（PK）
+    taken[name] = doc_id
+    return name
+
+
+def _atomic_write(path: Path, data: bytes) -> None:
+    """唯一临时文件 + fsync + os.replace：中途失败只留 `.part`（随即清理），
+    不会把目标写成截断内容（CH-491 md 直出同口径）。"""
+    import os
+    import uuid
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.parent / f".{path.name}.{uuid.uuid4().hex}.part"
+    try:
+        with open(tmp, "xb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def _cmd_docs_export(args: argparse.Namespace) -> int:
+    """导出已入库文档的 Markdown（O-07 / F-01）。
+
+    字节口径：从产物 zip 原样提取 content.md，与 zip 内逐字节相同；zip 缺失
+    时按 CH-489 口径（DB 是产物事实源）先重建再读。另写 manifest.json 对账
+    （doc_id ↔ 文件 ↔ sha256），供导出后校验与脚本消费。默认导出目录为
+    `[paths].out`（与 convert 产物同目录）；zip 始终从库里定位，`--out` 只
+    决定 md/manifest 落点。
+    """
+    import hashlib
+
+    from .artifacts import rebuild_artifact
+    from .security.names import assert_name_safe
+    from .storage.repo import get_doc, list_docs
+    cfg = _cfg(args)
+    root = _root(cfg)
+    out_dir = Path(args.out).expanduser() if args.out else _out(cfg)
+    if args.all and args.doc_ids:
+        print(_jline({"code": "E4001",
+                      "message": "doc_ids and --all are mutually exclusive"}),
+              file=sys.stderr)
+        return EXIT_USAGE
+    if not args.all and not args.doc_ids:
+        print(_jline({"code": "E4001",
+                      "message": "give doc_ids or --all"}), file=sys.stderr)
+        return EXIT_USAGE
+    rc = EXIT_OK
+    store = _open_store(cfg)
+    try:
+        if args.all:
+            doc_ids = [r["doc_id"] for r in
+                       list_docs(store, limit=None)["docs"]]
+        else:
+            doc_ids = list(args.doc_ids)
+        manifest: list[dict] = []
+        taken: dict = {}
+        for doc_id in doc_ids:
+            try:
+                # 消毒闸先行：doc_id 进路径拼 `out_dir/<doc_id>.zip` 之前先过
+                # 同一道名字断言（FR-127），路径穿越形态在这里就拒。
+                assert_name_safe(doc_id)
+                row = get_doc(store, doc_id)        # 不存在 → E4041
+                zp = _out(cfg) / f"{doc_id}.zip"
+                if not zp.exists():
+                    try:
+                        rebuild_artifact(store, doc_id, cfg, root)
+                    except Doc2mdError:
+                        raise
+                    except Exception as exc:       # noqa: BLE001 — 统一 E5031 契约
+                        raise E5031_StorageError(
+                            "artifact rebuild failed",
+                            detail={"reason": type(exc).__name__}) from exc
+                    if not zp.exists():
+                        raise E4041_NotFound("artifact not found")
+                body = _zip_content_md(zp, doc_id)
+                name = _export_md_name(row.get("source_name") or "", doc_id, taken)
+                _atomic_write(out_dir / name, body)
+                manifest.append({"doc_id": doc_id, "file": name,
+                                 "bytes": len(body),
+                                 "sha256": hashlib.sha256(body).hexdigest()})
+            except Doc2mdError as exc:
+                # 逐篇失败不中断整批（与 convert 多文件口径一致）：其余文档
+                # 照常导出，失败篇只在 stderr 留受控 payload（NFR-20）。
+                print(_jline(_err_payload(exc, str(exc), doc_id=doc_id)),
+                      file=sys.stderr)
+                rc = max(rc, EXIT_BIZ)
+        # manifest 无条件写（含 count=0）：一次导出 run 的对账面，「实际导出
+        # 几篇」由 count 如实反映——全部失败时也留一个诚实的空对账，而不是
+        # 让上一批的 manifest 冒充本批结果。
+        _atomic_write(out_dir / "manifest.json",
+                      (_jline({"count": len(manifest), "docs": manifest},
+                              indent=2) + "\n").encode("utf-8"))
+    finally:
+        store.close()
+    return rc
 
 
 # --- doctor ---------------------------------------------------------------------
@@ -899,7 +1198,7 @@ def _vendor_models(cfg) -> list[str]:
 COMMANDS = {"serve": cmd_serve, "cron": cmd_cron, "convert": cmd_convert,
             "watch": cmd_watch, "work": cmd_work,
             "tokenizer": cmd_tokenizer, "doctor": cmd_doctor,
-            "backup": cmd_backup, "search": cmd_search}
+            "backup": cmd_backup, "search": cmd_search, "docs": cmd_docs}
 
 
 def main(argv: list[str] | None = None) -> int:

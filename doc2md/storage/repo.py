@@ -271,6 +271,42 @@ def get_doc(store: Store, doc_id: str) -> dict:
     return d
 
 
+def list_docs(store: Store, *, offset: int = 0, limit: int | None = None,
+              status: str | None = None) -> dict:
+    """文档清单（O-07 / C-26 / F-01）：CLI `docs list` 的只读面。
+
+    返回分页信封 {"docs": [...], "total", "offset", "limit", "has_more"}——
+    与 API `/jobs` 同族（CH-471 STOR-7）：`total` 为过滤后全集条数、不受窗口
+    影响；`has_more` 由 `offset+len(rows) < total` 直接判定，不第二遍 COUNT。
+    每行附 `blocks` 计数（相关子查询只在窗口行数上执行，编辑面判断「这篇
+    有没有被改过」不必另发查询）。
+
+    排序 `created_at DESC, doc_id`：doc_id 是唯一 tiebreaker——翻页稳定性
+    不能依赖 rowid 物理序（覆盖写 / VACUUM 都会改 rowid，CH-485 起 DB 是
+    产物事实源、覆盖写是常态）。
+
+    `limit=None` 语义为「无窗口」（`--all` 导出路径用）；CLI 面自行硬顶
+    条数（见 cli.DOCS_MAX_ROWS），本函数不再复制一套上限。
+    """
+    where, args = "", ()
+    if status:
+        where, args = " WHERE d.status=?", (status,)
+    total_row = store.q1(f"SELECT COUNT(*) AS c FROM docs d{where}", args)
+    total = int(total_row["c"]) if total_row else 0
+    sql = ("SELECT d.doc_id, d.source_key, d.source_name, d.format, d.pages,"
+           " d.sharded, d.shard_count, d.status, d.profile, d.created_at,"
+           " d.updated_at,"
+           " (SELECT COUNT(*) FROM blocks b WHERE b.doc_id=d.doc_id) AS blocks"
+           f" FROM docs d{where} ORDER BY d.created_at DESC, d.doc_id"
+           " LIMIT ? OFFSET ?")
+    rows = [dict(r) for r in store.q(
+        sql, args + (-1 if limit is None else int(limit), int(offset)))]
+    for r in rows:
+        r["sharded"] = bool(r["sharded"])      # 库列是 0/1 整数，出口恒布尔
+    return {"docs": rows, "total": total, "offset": int(offset),
+            "limit": limit, "has_more": offset + len(rows) < total}
+
+
 def list_blocks(store: Store, doc_id: str, *, offset: int = 0,
                 limit: int | None = None):
     """块读取（CH-469：加窗口参数）。分片文档可达数千块，

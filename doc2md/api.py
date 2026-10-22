@@ -647,6 +647,10 @@ def create_app(cfg: dict | None = None, root: Path | None = None,
     def get_document(doc_id):
         need("read")
         d = get_doc(store, doc_id)
+        # O-05（C-06 / F-11）：降维告警计数透出到文档响应——调用方不必再翻
+        # meta 嵌套即可判定「本文档是否有信息降级」（W1043/44/45）。
+        # 只读派生字段，不加列、不改既有键。
+        d["warnings"] = list((d.get("meta") or {}).get("warnings") or [])
         # CH-469（V-5）：分片文档可达数千块，原实现无条件全量物化 + 序列化，
         # 首个响应就能到 MB 级。`?offset=&limit=` 走 SQL 窗口；不带参数仍取全部。
         offset, limit = _window(default_limit=_MAX_ROWS)
