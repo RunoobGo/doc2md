@@ -18,6 +18,14 @@ from .s3_structure import _ORDERED_ITEM
 _EXT_SCHEMES = ("http://", "https://", "mailto:", "ftp://")
 _ANCHOR_MARK = ("](#", "#page-")
 _FENCE_RUN = re.compile(r"`+|~+")
+# D2/D3（QA-R2）：源文本是**文本**，不是 Markdown。全角标点与普通英文原样保留，
+# 只转义会被解析器当成语法的 ASCII 元字符；反斜杠必须最先转义，否则后续插入的
+# 转义符会被二次解释。
+_INLINE_ESCAPE = set("\\`*_[]<~")
+_LINE_START_MARK = re.compile(r"^(\s*)([#>])")
+_LINE_START_LIST = re.compile(r"^(\s*)([-+])(?=\s|$)")
+_LINE_START_NUM = re.compile(r"^(\s*)(\d{1,9})([.)])(?=\s)")
+_LINE_START_SETEXT = re.compile(r"^(\s*)([=-])\2{1,}\s*$")
 
 
 def _code_fence(text: str) -> str:
@@ -54,6 +62,38 @@ def _link_dest(url: str) -> str:
     return u
 
 
+def _escape_inline(text: str) -> str:
+    """行内字面量转义：强调/代码/链接/HTML 开标签不得由源文本激活。"""
+    return "".join("\\" + ch if ch in _INLINE_ESCAPE else ch for ch in text)
+
+
+def _escape_line_start(line: str) -> str:
+    """行首块标记转义（ATX 标题 / 引用 / 列表 / setext 下划线）。"""
+    for pat, repl in ((_LINE_START_MARK, r"\1\\\2"),
+                      (_LINE_START_LIST, r"\1\\\2"),
+                      (_LINE_START_NUM, r"\1\2\\\3")):
+        m = pat.match(line)
+        if m:
+            return pat.sub(repl, line, count=1)
+    m = _LINE_START_SETEXT.match(line)
+    if m:
+        return line[:m.start(2)] + "\\" + line[m.start(2):]
+    return line
+
+
+def _escape_text(text: str, *, line_start: bool = True) -> str:
+    """源文本 → Markdown 字面量（逐行处理，保留块内换行）。
+
+    行首块标记只在**渲染行首**时才有结构语义：标题/列表的正文前面已有本层
+    生成的 `#` / `- ` 前缀，此时再转义 `1.` 只会得到 `1\\.` 这类脏输出。
+    """
+    text = str(text)
+    if not line_start:
+        return "\n".join(_escape_inline(ln) for ln in text.splitlines())
+    return "\n".join(_escape_line_start(_escape_inline(ln))
+                     for ln in text.splitlines())
+
+
 def render(ir: IR, *, preserve_strike: bool = False, link_internal: str = "plain") -> str:
     out: list[str] = []
     prev: Block | None = None
@@ -87,7 +127,7 @@ def _render_block(b: Block, **opt) -> str:
     text = b.text or ""
     if b.type == "heading":
         lvl = min(6, max(1, b.level or 1))
-        return "#" * lvl + " " + _inline(text, b, **opt)
+        return "#" * lvl + " " + _inline(text, b, line_start=False, **opt)
     if b.type == "list_item":
         indent = text[:len(text) - len(text.lstrip())]
         m = _ORDERED_ITEM.match(text)
@@ -95,15 +135,15 @@ def _render_block(b: Block, **opt) -> str:
             # CH-478（R6-PIPE-1 收口）：有序项保留序号，分隔符统一为 GFM 的 `N. `
             # CH-483（R8-PIPE-4）：保留 DOCX 自动编号的层级缩进。
             return indent + m.group(1) + ". " + _inline(
-                text[m.end():].strip(), b, **opt)
+                text[m.end():].strip(), b, line_start=False, **opt)
         # CH-485（R9-PIPE-3）：多级编号（2.1.）不是 GFM 有序列表语法；保留
         # 原编号并缩进，绝不落成 `- 2.1.` 的双标记畸形。
         m2 = re.match(r"^\s*(\d+(?:\.\d+)+)[.]?\s+(.*)$", text)
         if m2:
             return indent + m2.group(1) + ". " + _inline(
-                m2.group(2).strip(), b, **opt)
+                m2.group(2).strip(), b, line_start=False, **opt)
         t = re.sub(r"^\s*[·•‣∙○●■□\-\*]\s+", "", text)
-        return indent + "- " + _inline(t, b, **opt)
+        return indent + "- " + _inline(t, b, line_start=False, **opt)
     if b.type == "page_break":
         # CH-459：GFM 无分页符语法——结构信息留在 IR / 审阅页，Markdown 不落字节
         return ""
@@ -111,20 +151,17 @@ def _render_block(b: Block, **opt) -> str:
         fence = _code_fence(text)
         return fence + "\n" + text + "\n" + fence
     if b.type == "quote":
-        return "\n".join("> " + ln for ln in text.splitlines())
+        # D2/D3：引用块内容同样来自源文本，逐行转义；`>` 前缀由本层生成。
+        return "\n".join("> " + _escape_line_start(_escape_inline(ln))
+                         for ln in text.splitlines())
     if b.type == "table":
         return text            # 表格文本已在 S3 组装为 GFM
     return _inline(text, b, **opt)
 
 
-def _inline(text: str, b: Block, *, preserve_strike: bool, link_internal: str) -> str:
+def _inline(text: str, b: Block, *, preserve_strike: bool, link_internal: str,
+            line_start: bool = True) -> str:
     marks = b.marks or {}
-    if marks.get("bold"):
-        text = f"**{text}**"
-    if marks.get("italic"):
-        text = f"*{text}*"
-    if marks.get("strikethrough") and preserve_strike:
-        text = f"~~{text}~~"
     # CH-459：块级 links 至多渲染一条（行内跨度级链接不在 IR 模型内——
     # 多条并列时取首条可渲染的，其余留存在 IR/审阅面，不制造错标数据）
     for lk in b.links or []:
@@ -136,8 +173,16 @@ def _inline(text: str, b: Block, *, preserve_strike: bool, link_internal: str) -
             # 明令禁止自造锚点（GFM 无自动标题锚点，产出的必然是死链），该分支
             # 原实现与自家红线互斥、形同虚设。正文与 plain 同形（纯文本），内部
             # 链接信息完整保留在 IR（`links[].dest`）与审阅页，由下游按需消费。
-            return text
+            return _escape_text(text, line_start=line_start)
         # plain：内部链接保持纯文本，不产生锚点语法
+    # D2/D3：先转义源文本，再叠加 S3 生成的强调标记——生成语法与源字面量分离。
+    text = _escape_text(text, line_start=line_start)
+    if marks.get("bold"):
+        text = f"**{text}**"
+    if marks.get("italic"):
+        text = f"*{text}*"
+    if marks.get("strikethrough") and preserve_strike:
+        text = f"~~{text}~~"
     return text
 
 
@@ -149,3 +194,8 @@ def assert_render_contract(md: str) -> None:
             raise AssertionError(f"render contract violated: found {mark!r}")
     if "~~" in low:
         raise AssertionError("render contract violated: strikethrough in default output")
+    # D3：未转义的原始 HTML 标签 / javascript: 链接目标不得直通下游。
+    if re.search(r"(?<!\\)<script", low) or re.search(r"(?<!\\)<img", low):
+        raise AssertionError("render contract violated: raw HTML tag")
+    if re.search(r"(?<!\\)\]\(\s*(?:javascript|data|vbscript):", low, re.I):
+        raise AssertionError("render contract violated: active link scheme")

@@ -68,6 +68,45 @@ _FENCE = re.compile(r"^\s{0,3}(```|~~~)")
 _QUOTE_PREFIX = re.compile(r"^\s{0,3}>\s?")
 _QUOTE_OPEN = "「『“‘"
 _QUOTE_CLOSE = "」』”’"
+# D2（QA-R2）：当文档同时出现多种 Markdown 字面量形态时，显式段落里的
+# `#` / `>` / `1.` 是**被展示的语法**而非结构信号。至少命中两类才判定，
+# 避免把「一句以 > 开头的真实引用 + 一个普通编号列表」误降为纯文本。
+_LITERAL_MARKERS = (
+    re.compile(r"^\s{0,3}#{1,6}\s+\S"),
+    re.compile(r"^\s{0,3}>\s?\S"),
+    re.compile(r"^\s*\d{1,3}[.)]\s+\S"),
+    re.compile(r"^\s*[-+*]\s+\S"),
+    re.compile(r"^\s*```"),
+    re.compile(r"\[[^\]]+\]\([^)]+\)"),
+    re.compile(r"\*\*[^*]+\*\*"),
+    re.compile(r"<[A-Za-z/][^>]*>"),
+)
+
+
+def _markdown_literal_doc(pages: list[RawPage]) -> bool:
+    """文档是否在演示 Markdown 字面量（D2 的保守判定）。
+
+    只统计显式 DOCX 段落（无表格/等宽/样式提示），且要求 ≥2 类不同形态；
+    现有语料中 docx_07 只有一类 `>`、docx_09/11 只有一类有序编号，不受影响。
+    """
+    kinds: set[int] = set()
+    for pg in pages:
+        for ln in pg.lines:
+            t = (ln.text or "").strip()
+            if not t or ln.row or not ln.explicit_para or ln.mono \
+                    or ln.level_hint or ln.list_marker:
+                continue
+            for i, pat in enumerate(_LITERAL_MARKERS):
+                if pat.search(t):
+                    kinds.add(i)
+                    break
+    return len(kinds) >= 2
+
+
+def _plain_docx_line(ln) -> bool:
+    return bool(getattr(ln, "explicit_para", False)) and not ln.level_hint \
+        and not ln.list_marker and not ln.mono and ln.row is None
+
 _SENT_END = ("。", "！", "？", "；", ".", "!", "?", ";", "：", ":")
 # 冒号/分号在中文排版里常出现在折行末尾（“如下：”），句义并未结束；
 # 只有硬句末才默认切段，软句末交给几何/结构信号判断。
@@ -485,11 +524,25 @@ def _gfm_table(rows: list[list[str]]) -> str:
     不预拼：`|` 必须转义（否则提前结束单元格），换行统一为 `<br>`（S1 的
     段落边界标记与 run 内 `w:br` 映射的 `\\n` 同一口径，不再一个可辨一个
     掉空格）。`<br>` 本身不再转义——GFM 单元格内的合法换行。
+    D4（QA-R2）：**先转义反斜杠再转义管道**。原实现只转义管道，源文本
+    `\\|` 先留下一个未转义反斜杠，渲染器把 `\\` 还原成字面反斜杠后管道
+    成为分隔符，整行多出一格。按 `<br>` 分段处理：结构换行保留，段内
+    Markdown 元字符转义（含源文本的字面 `<`）。
     """
+    def cell_md(c: str) -> str:
+        parts = str(c).strip().replace("\n", "<br>").split("<br>")
+        esc = []
+        for part in parts:
+            for a, b in (("\\", "\\\\"), ("|", "\\|"), ("*", "\\*"),
+                         ("_", "\\_"), ("[", "\\["), ("]", "\\]"),
+                         ("`", "\\`"), ("~", "\\~"), ("<", "&lt;")):
+                part = part.replace(a, b)
+            esc.append(part)
+        return "<br>".join(esc)
+
     ncols = max(len(r) for r in rows)
     padded = [(r + [""] * ncols)[:ncols] for r in rows]
-    esc = [[c.strip().replace("\n", "<br>").replace("|", "\\|") for c in row]
-           for row in padded]
+    esc = [[cell_md(c) for c in row] for row in padded]
     head, body = esc[0], esc[1:]
     sep = "| " + " | ".join(["---"] * ncols) + " |"
     lines = ["| " + " | ".join(head) + " |", sep]
@@ -565,6 +618,7 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
     # 页眉页脚/页码先于分段剔除：否则页脚会把跨页段落切断，页码也会被
     # 当作普通短行进入正文。字号基准取原始页（正文仍占字符多数）。
     pages = _strip_page_furniture(pages, base_size)
+    literal_doc = _markdown_literal_doc(pages)
     # N-8（QA-OPT-3）：页标题形态豁免集。无编号行的**数字折叠键**（“正常页面 1”
     # →“正常页面 #”）在 ≥2 页的边距带内重复 → 逐页变体的页标题/页眉残留
     # （furniture 剔除只认「页/栏」量词等显式页码片段，“正常页面 1” 这类
@@ -715,7 +769,7 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
                     flush_rows(True)
                 continue
             # --- 代码围栏（CH-459）---
-            if _FENCE.match(text):
+            if _FENCE.match(text) and not (literal_doc and _plain_docx_line(ln)):
                 flush_para()
                 flush_quote()
                 flush_rows(True)             # 行组被结构行终止：按事实判定
@@ -764,12 +818,14 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
                 lvl = None
             elif ln.level_hint is not None:
                 lvl = _heading_level(text, ln.size, base_size, ln.bold,
-                                     hint=ln.level_hint)
+                                     hint=ln.level_hint, top=ln.top,
+                                     page_height=getattr(page, "height", None))
             elif re.sub(r"\d+", "#", _furniture_key(text)) in page_titles:
                 lvl = None        # N-8：逐页变体页标题，字号再大也不抬（宁漏勿误）
             else:
                 lvl = None if ln.list_marker else _heading_level(
-                    text, ln.size, base_size, ln.bold)
+                    text, ln.size, base_size, ln.bold, top=ln.top,
+                    page_height=getattr(page, "height", None))
             if lvl:
                 flush_para()
                 flush_quote()
@@ -819,7 +875,7 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
                 _mark_provenance(blocks[-1], (ln,))
                 continue
             # --- 列表（既有口径不变）---
-            if _BULLET.match(text):
+            if _BULLET.match(text) and not (literal_doc and _plain_docx_line(ln)):
                 flush_para()
                 flush_quote()
                 flush_rows(True)             # 行组被结构行终止：按事实判定
@@ -832,7 +888,8 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
             # --- 有序列表（CH-478 / R6-PIPE-1 收口：同字号单级编号行的归宿）---
             # 表格行优先于本分支：S1 已按横向间隙聚出 ≥2 单元格时，行首的 "1、"
             # 是单元格内容而非列表标记（宁漏勿误）。
-            if _is_ordered_item(text) and not (ln.row and len(ln.row) >= 2):
+            if _is_ordered_item(text) and not (ln.row and len(ln.row) >= 2) \
+                    and not (literal_doc and _plain_docx_line(ln)):
                 flush_para()
                 flush_quote()
                 flush_rows(True)             # 行组被结构行终止：按事实判定
@@ -843,7 +900,8 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
                 _mark_provenance(blocks[-1], (ln,))
                 continue
             # --- 字母编号列表（“a. …”）：与数字列表同口径 ---
-            if _is_alpha_item(text) and not (ln.row and len(ln.row) >= 2):
+            if _is_alpha_item(text) and not (ln.row and len(ln.row) >= 2) \
+                    and not (literal_doc and _plain_docx_line(ln)):
                 flush_para()
                 flush_quote()
                 flush_rows(True)
@@ -878,12 +936,21 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
             if row_buf:
                 flush_rows(True)
             # --- 引用块（CH-459：段间边界起算，段中引用行按保守口径留在段内）---
-            if _is_quote_line(text) and not para_buf:
-                if not quote_buf:
-                    quote_page = page.index
-                quote_buf.append(_quote_text(text))
-                quote_lines.append(ln)
-                continue
+            # D3（QA-R2）：引用前缀是**源文本字面量**时不得激活；文档同时演示多种
+            # Markdown 语法（literal_doc）时，显式段落一律按正文处理。
+            # 真实引用行（docx_07）仍需先冲刷已缓冲段落，否则会被续段逻辑吞成段落；
+            # PDF 段中折行以 `>` 开头仍按保守口径留在段内（宁漏勿误）。
+            if _is_quote_line(text) and not (literal_doc and _plain_docx_line(ln)):
+                if para_buf and not ln.explicit_para:
+                    pass
+                else:
+                    if para_buf:
+                        flush_para()
+                    if not quote_buf:
+                        quote_page = page.index
+                    quote_buf.append(_quote_text(text))
+                    quote_lines.append(ln)
+                    continue
             flush_quote()   # CH-464：非引用行到达 → 引用缓冲立即落块（原实现推迟到
                             # 下一个空行/结构行，quote 块会排进其后的段落之间，乱序）
             # --- 等宽字体连续段 → 代码块（CH-459）---
@@ -994,7 +1061,8 @@ def modal_size(pages: list[RawPage]) -> float:
 
 
 def _heading_level(text: str, size: float, base: float, bold: bool,
-                   hint: int | None = None) -> int | None:
+                   hint: int | None = None, *, top: float | None = None,
+                   page_height: float | None = None) -> int | None:
     """R-03：字号显著大于正文，或编号 + 短行 + 粗体。
 
     CH-459：`hint` 为 DOCX 段落样式显式声明的层级（"Heading N"）——
@@ -1041,10 +1109,16 @@ def _heading_level(text: str, size: float, base: float, bold: bool,
     # 消失；N-4 同批暴露的 pdf_04「代码说明」（+4.0）/ pdf_07「结语」（+3.5）
     # 被续段合并吞掉，阈值降到 base+3.5（与 numbered 分支的字号信号对齐）。
     # 逐页变体页标题的残余风险由调用方的 page_titles 豁免集兜底。
+    # D7（QA-R2）：字号只是必要条件，不足以单独晋升——14pt 提示框在正文中部
+    # 会被误判成 H2。再要求至少一个版面信号：页顶（≤10% 页高）、短行（≤16 字）
+    # 或粗体；pdf_04「代码说明」/ pdf_07「结语」均满足页顶 + 短行，语料不变。
     if (not numbered and size and base and size >= base + 3.5
             and len(t) <= 60
             and not t.endswith(("。", "！", "？", ".", "!", "?"))):
-        return 1 if size >= base + 10.0 else 2
+        at_top = bool(top is not None and page_height
+                      and top <= float(page_height) * 0.10)
+        if bold or len(t) <= 16 or at_top:
+            return 1 if size >= base + 10.0 else 2
     return None
 
 

@@ -71,6 +71,12 @@ def patch_block(store: Store, doc_id: str, block_id: str, body: dict, actor: str
             if int(base) != int(current_rev):
                 raise E4251_RevisionConflict(
                     "revision conflict", detail={"current_revision": int(current_rev)})
+        # D8（QA-R2）：同文提交是幂等 no-op——不升 revision、不写审计、不重建索引。
+        # 原实现每次 PATCH 都 +1 并落一条 before==after 的审计，编辑器「保存但没改」
+        # 也会制造版本漂移，并让下游把无变更当变更重新转换。
+        if text == old_text:
+            return {"revision": int(current_rev), "block_id": block_id,
+                    "unchanged": True}
         tx.execute(
             "UPDATE blocks SET text=?, revision=revision+1, updated_by=?, updated_at=?"
             " WHERE doc_id=? AND block_id=? AND revision=?",

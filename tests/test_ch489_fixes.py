@@ -75,7 +75,8 @@ def test_docx_single_row_and_single_column_tables_stay_tables(tmp_path, tmp_cfg)
 
 # --- 分页硬顶 -----------------------------------------------------------------
 @pytest.mark.gate
-def test_explicit_zero_limit_is_capped_at_500(api_client, headers):
+def test_explicit_zero_limit_is_empty_and_default_caps_at_500(api_client, headers):
+    """D9（QA-R2）：显式 limit=0 = 取空集；缺省 limit 仍受 500 行硬顶。"""
     client, tokens = api_client
     store = client.application.config["doc2md"]["store"]
     doc_id = "z" * 16
@@ -85,8 +86,11 @@ def test_explicit_zero_limit_is_capped_at_500(api_client, headers):
     save_ir(store, ir)
     h = headers(tokens, "reader")
     body = client.get(f"/docs/{doc_id}?limit=0", headers=h).get_json()
-    assert len(body["blocks"]) == 500 and body["blocks_total"] == 600
-    assert body["blocks_limit"] == 500
+    assert body["blocks"] == [] and body["blocks_total"] == 600
+    assert body["blocks_limit"] == 0
+
+    default = client.get(f"/docs/{doc_id}", headers=h).get_json()
+    assert len(default["blocks"]) == 500 and default["blocks_limit"] == 500
 
     with store.tx() as tx:
         tx.executemany(
@@ -96,7 +100,10 @@ def test_explicit_zero_limit_is_capped_at_500(api_client, headers):
               "2026-01-01T00:00:00+00:00", "") for i in range(600)])
     audit = client.get(f"/docs/{doc_id}/audit?limit=0",
                        headers=headers(tokens, "editor")).get_json()
-    assert len(audit["audit"]) == 500 and audit["total"] == 600
+    assert audit["audit"] == [] and audit["total"] == 600 and audit["limit"] == 0
+    audit_all = client.get(f"/docs/{doc_id}/audit",
+                           headers=headers(tokens, "editor")).get_json()
+    assert len(audit_all["audit"]) == 500
 
     with store.tx() as tx:
         tx.executemany(
@@ -106,7 +113,10 @@ def test_explicit_zero_limit_is_capped_at_500(api_client, headers):
              for i in range(600)])
     dels = client.get("/audit/deletions?limit=0",
                       headers=headers(tokens, "admin")).get_json()
-    assert len(dels["deletions"]) == 500 and dels["total"] == 600
+    assert dels["deletions"] == [] and dels["total"] == 600 and dels["limit"] == 0
+    dels_all = client.get("/audit/deletions",
+                          headers=headers(tokens, "admin")).get_json()
+    assert len(dels_all["deletions"]) == 500
 
 
 # --- 配置路径安全 -------------------------------------------------------------

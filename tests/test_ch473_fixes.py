@@ -368,7 +368,9 @@ def test_pipe11_stray_fence_in_text_does_not_expose_code_block():
     md = render(ir)
     # 代码块三连空行逐字节保留（旧实现此处被压成 x\n\ny）
     assert "```\nx\n\n\ny\n```" in md, md
-    assert md == "看示例：\n```\n\n```\nx\n\n\ny\n```\n", md
+    # D2（QA-R2）：段落里的 ``` 属源文本字面量，必须转义——否则它会与本层
+    # 代码块围栏配对，把后面的真实代码块错切成正文/代码之外的第三种结构。
+    assert md == "看示例：\n\\`\\`\\`\n\n```\nx\n\n\ny\n```\n", md
 
 
 def test_pipe11_nested_fence_inside_code_block_is_untouched():

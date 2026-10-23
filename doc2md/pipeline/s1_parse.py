@@ -1049,6 +1049,10 @@ def _docx_cell_text(tc) -> str:
         # 会把 "A\nB\tC" 粘成 "ABC"。Run.text 已按 python-docx 口径映射。
         txt = "".join(Run(r, p).text or "" for r in p.iter(f"{_W_NS}r")).strip()
         if txt:
+            # D3（QA-R2）：单元格里的 `<`/`>` 是源文本字面量，不是允许直通的
+            # HTML；`<br>` 只在下面作为**结构**分隔符由本函数自己拼入。
+            txt = (txt.replace("&", "&amp;").replace("<", "&lt;")
+                   .replace(">", "&gt;"))
             parts.append(txt)
     return "<br>".join(parts)
 
@@ -1102,6 +1106,11 @@ def _docx_table_rows(tbl) -> list[tuple[list[str], bool, int]]:
                     cont = vm.get(f"{_W_NS}val", "continue") != "restart"
             cells.append("" if cont else _docx_cell_text(tc))
             flat += (span - 1) + (1 if cont else 0)
+            if not cont:
+                # D5（QA-R2）：嵌套 `w:tbl` 被拍平成 `<br>` 文本，必须计入
+                # 降维计数，否则 W1045 永远不触发（静默丢结构）。
+                flat += sum(1 for t in tc.iter(f"{_W_NS}tbl")
+                            if not _inside_textbox(t))
             cells.extend([""] * (span - 1))
         if cells:
             rows.append((cells, _docx_has_revision(tr), flat))
@@ -1155,6 +1164,52 @@ def _iter_docx_blocks(container):
             yield from _iter_docx_blocks(child)
 
 
+def _docx_page_break_offsets(p, *, use_all: bool) -> list[int]:
+    """段落内 `<w:br w:type="page"/>` 在 `Run.text` 串中的字符偏移。
+
+    与 python-docx 的 `Run.text` 口径对齐：`w:t` 计文本长度，`w:tab` / 普通
+    `w:br` / `w:cr` 各计 1 个字符；分页符本身贡献空串，只记录当前位置。
+    """
+    runs = _docx_all_runs(p) if use_all else p.runs
+    offs: list[int] = []
+    pos = 0
+    for r in runs:
+        for child in r._r.iterchildren():
+            tag = child.tag
+            if tag == f"{_W_NS}t":
+                pos += len(child.text or "")
+            elif tag == f"{_W_NS}tab":
+                pos += 1
+            elif tag == f"{_W_NS}br":
+                if child.get(f"{_W_NS}type") == "page":
+                    offs.append(pos)
+                else:
+                    pos += 1
+            elif tag == f"{_W_NS}cr":
+                pos += 1
+    return offs
+
+
+def _split_docx_page_break(ln: Line, offsets: list[int], raw: str) -> list[Line]:
+    """D6（QA-R2）：按分页符**在段内的位置**切分，前后文各成一行。"""
+    lead = 0 if ln.mono else len(raw) - len(raw.lstrip())
+    text = ln.text or ""
+    out: list[Line] = []
+    prev = 0
+    for cut in sorted({max(0, min(len(text), int(o) - lead)) for o in offsets}):
+        seg = text[prev:cut]
+        if seg.strip():
+            out.append(replace(ln, text=seg if ln.mono else seg.strip(),
+                               leading_space=False))
+        out.append(Line(text="\x0c", size=0.0))
+        prev = cut
+    tail = text[prev:]
+    if tail.strip():
+        out.append(replace(ln, text=tail if ln.mono else tail.strip(),
+                           leading_space=False))
+    return out
+
+
 def read_docx(path: str | Path, fmt: str | None = None) -> list[RawPage]:
     """DOCX → 页级行结构（DOCX 无物理页，按节合成单页序列，每 40 行一页）。
 
@@ -1176,11 +1231,29 @@ def read_docx(path: str | Path, fmt: str | None = None) -> list[RawPage]:
     lines: list[Line] = []
     for kind, child in _iter_docx_blocks(d.element.body):
         if kind == "p":
-            ln = _docx_para_line(_dp.Paragraph(child, d), d, ctx=ctx)
-            if ln is not None:
-                lines.append(ln)
+            para = _dp.Paragraph(child, d)
+            ln = _docx_para_line(para, d, ctx=ctx)
             if child.findall(f".//{_W_NS}br[@{_W_NS}type='page']"):
-                lines.append(Line(text="\x0c", size=0.0))
+                # D6（QA-R2）：分页符属于段落内部——按它的字符位置切分，
+                # 原实现把整段写完再补 `\x0c`，分页后的文字被错误地留在前一页。
+                use_all = (_docx_has_revision(child) or ctx.has_sdt
+                           or ctx.has_custom_xml or ctx.has_links
+                           or ctx.has_fields or ctx.has_smart_tag)
+                offs = _docx_page_break_offsets(para, use_all=use_all)
+                if ln is not None:
+                    runs = (_docx_all_runs(para) if use_all else para.runs)
+                    raw = "".join(r.text or "" for r in runs)
+                    if not offs:
+                        # `<w:br>` 直接挂在 w:p 下（不在任何 run 内）时取不到字符
+                        # 偏移；按段末处理，至少保住页分隔信号本身。
+                        offs = [len(raw)]
+                    lines.extend(_split_docx_page_break(ln, offs, raw))
+                elif offs:
+                    lines.extend(Line(text="\x0c", size=0.0) for _ in offs)
+                else:
+                    lines.append(Line(text="\x0c", size=0.0))
+            elif ln is not None:
+                lines.append(ln)
         else:
             rows = _docx_table_rows(child)
             for i, (cells, rev, flat) in enumerate(rows):

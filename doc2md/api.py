@@ -154,7 +154,21 @@ def create_app(cfg: dict | None = None, root: Path | None = None,
     # 多次 PUT 的净效果仍会回退（本项要修的就是这类丢失）。
     cfg_baseline = copy.deepcopy(cfg)
     if override.is_file():
-        _deep(cfg, json.loads(override.read_text(encoding="utf-8")))
+        # D10（QA-R2）：人手改坏的 settings_override.json 原来是裸 json.loads，
+        # JSONDecodeError 逃逸到 CLI 兜底 → E5000 / 退出码 5，把「配置写错」
+        # 误报成系统故障。收敛为 ConfigError（CLI 映射 E4001 / 退出码 2），
+        # 并带上文件、行列号，让用户直接定位。
+        try:
+            override_data = json.loads(override.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise config.ConfigError(
+                f"{override}: line {exc.lineno} column {exc.colno}: {exc.msg}") from None
+        except (OSError, UnicodeDecodeError) as exc:
+            raise config.ConfigError(
+                f"{override}: {type(exc).__name__}: {exc}") from None
+        if not isinstance(override_data, dict):
+            raise config.ConfigError(f"{override}: JSON object required")
+        _deep(cfg, override_data)
     store = Store(root / "state.sqlite")
     sched = Scheduler(store)
     # NFR-19：轮转由服务内置执行（禁止依赖 newsyslog/cron）——服务自己持有写入器；
@@ -231,20 +245,19 @@ def create_app(cfg: dict | None = None, root: Path | None = None,
     def err(exc: Doc2mdError):
         return jsonify(exc.to_body()), exc.http
 
-    def _window(default_limit: int = 0) -> tuple[int, int | None]:
-        """分页窗口解析（CH-469，V-5；B-20；CH-489）。
+    def _window(default_limit: int = 0) -> tuple[int, int]:
+        """分页窗口解析（CH-469，V-5；B-20；CH-489；D9）。
 
-        `limit` 缺省或显式 0 都取该端点的默认窗口（大列表为 500），再统一
-        硬顶 `_MAX_ROWS`——原实现把显式 0 当“无界”，`?limit=0` 可绕过 B-20
-        的 500 行上限，把整库审计正文一次物化。非数字 / 负值 → 400/E4001。
+        `limit` **缺省**才取该端点的默认窗口（大列表为 500）；显式 `limit=0`
+        就是「取空集」——与 `/jobs`、`/search` 的既有语义一致（三处自相矛盾
+        正是 D9 的根因）。所有结果统一硬顶 `_MAX_ROWS`，非数字 / 负值 → 400。
         """
         offset = _int_arg("offset", 0)
-        limit = _int_arg("limit", default_limit)
+        limit = (default_limit if request.args.get("limit") is None
+                 else _int_arg("limit", 0))
         if offset < 0 or limit < 0:
             raise E4001_BadRequest("offset/limit must be >= 0")
-        if limit == 0:
-            limit = default_limit
-        return offset, (min(limit, _MAX_ROWS) if limit else None)
+        return offset, min(limit, _MAX_ROWS)
 
     def _int_arg(name: str, default: int) -> int:
         """查询参数整数解析：非数字走 400/E4001（CH-464，原裸 int() 逃逸 500 HTML）。"""
@@ -658,7 +671,7 @@ def create_app(cfg: dict | None = None, root: Path | None = None,
         d["blocks"] = [b.to_dict() for b in blocks]
         d["blocks_total"] = count_blocks(store, doc_id)
         d["blocks_offset"] = offset
-        d["blocks_limit"] = min(limit, _MAX_ROWS) if limit else _MAX_ROWS
+        d["blocks_limit"] = limit
         return jsonify(d)
 
     @app.get("/docs/<doc_id>/markdown")
@@ -714,6 +727,9 @@ def create_app(cfg: dict | None = None, root: Path | None = None,
         res = patch_block(store, doc_id, block_id, b, actor_id(b),
                           require_base_revision=bool(
                               config.get(cur(), "api.base_revision_required", True)))
+        if res.get("unchanged"):
+            # D8：无内容变更 → 不制造 text_edited 事件，也不重建 artifact。
+            return jsonify(res)
         emit(store, "text_edited", doc_id, None, {"block_id": block_id,
                                                    "revision": res["revision"]}, logw())
         try:
@@ -801,8 +817,7 @@ def create_app(cfg: dict | None = None, root: Path | None = None,
             args += (offset,)
         rows = store.q(sql, args)
         return jsonify({"doc_id": doc_id, "audit": [dict(r) for r in rows],
-                        "total": total, "offset": offset,
-                        "limit": min(limit, _MAX_ROWS) if limit else _MAX_ROWS})
+                        "total": total, "offset": offset, "limit": limit})
 
     @app.get("/audit/deletions")
     def deletion_audit():
@@ -825,7 +840,7 @@ def create_app(cfg: dict | None = None, root: Path | None = None,
             d["cascade"] = json.loads(d.pop("cascade_json") or "{}")
             out.append(d)
         return jsonify({"deletions": out, "total": total, "offset": offset,
-                        "limit": min(limit, _MAX_ROWS) if limit else _MAX_ROWS})
+                        "limit": limit})
 
     # --- 搜索 / 事件 --------------------------------------------------------
     @app.get("/search")

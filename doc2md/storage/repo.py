@@ -303,8 +303,10 @@ def list_docs(store: Store, *, offset: int = 0, limit: int | None = None,
         sql, args + (-1 if limit is None else int(limit), int(offset)))]
     for r in rows:
         r["sharded"] = bool(r["sharded"])      # 库列是 0/1 整数，出口恒布尔
+    # D9：显式 limit=0 = 取空集，不存在“下一页”，has_more 不能反着报 True。
+    has_more = False if limit == 0 else offset + len(rows) < total
     return {"docs": rows, "total": total, "offset": int(offset),
-            "limit": limit, "has_more": offset + len(rows) < total}
+            "limit": limit, "has_more": has_more}
 
 
 def list_blocks(store: Store, doc_id: str, *, offset: int = 0,

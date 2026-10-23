@@ -518,18 +518,23 @@ def _apply_format(res: dict, out: Path, fmt: str) -> str:
         return ""
     try:
         md_path = _emit_md(Path(zp), out, _md_name(res))
-    except Exception as exc:            # noqa: BLE001 — md 直出失败不翻转转换结果
-        print(_jline({"file": Path(str(res.get("file", ""))).name,
-                      "status": "md_emit_failed",
-                      "code": "E5031",
-                      "message": f"{type(exc).__name__}"}), file=sys.stderr)
+    except Exception as exc:            # noqa: BLE001 — md 直出失败收敛为结果行错误
+        # D1（QA-R2）：md 是用户显式要求的产物，落盘失败不能仍报 status=ok/rc=0。
+        # 结果行翻成 error + E5031，zip 保留供调用方降级取件；退出码归业务失败。
+        res["status"] = "error"
+        res["code"] = "E5031"
+        res["message"] = f"markdown emit failed: {type(exc).__name__}"
         return ""
     if fmt == "md":
         # md 已落盘且字节等价，移除 zip 避免「md 模式却留 zip」的语义混淆。
+        # D12（QA-R2）：删掉 zip 后结果行不得再报 zip 路径，用 zip_removed 表达结果。
         try:
             Path(zp).unlink()
         except OSError:
             pass
+        else:
+            res.pop("zip", None)
+            res["zip_removed"] = True
     return str(md_path)
 
 
@@ -623,8 +628,11 @@ def _report(res: dict, *, as_json: bool) -> int:
     status = res.get("status")
     name = Path(str(res.get("file", ""))).name
     payload = {"file": name, "status": status, "doc_id": res.get("doc_id", ""),
-               "blocks": res.get("blocks", 0), "chars": res.get("chars", 0),
-               "zip": res.get("zip", "")}
+               "blocks": res.get("blocks", 0), "chars": res.get("chars", 0)}
+    if "zip" in res:
+        payload["zip"] = res["zip"]
+    if res.get("zip_removed"):
+        payload["zip_removed"] = True
     if res.get("md"):
         payload["md"] = res["md"]
     if res.get("code"):
@@ -640,14 +648,17 @@ def _report(res: dict, *, as_json: bool) -> int:
         line = (f"{name}: doc_id={payload['doc_id']} blocks={payload['blocks']} "
                 f"chars={payload['chars']} sharded={res.get('sharded')} "
                 f"shards={st.get('shards', 1)} stitched={st.get('stitched', 0)} "
-                f"dropped_dupes={st.get('dropped_dupes', 0)} zip={payload['zip']}")
+                f"dropped_dupes={st.get('dropped_dupes', 0)} "
+                f"zip={payload.get('zip', '')}")
+        if res.get("zip_removed"):
+            line += " zip_removed=true"
         if res.get("md"):
             line += f" md={res['md']}"
         print(line)
     elif status == "skipped":
         # O-08（C-27）：跳过是「本次未做转换」的正常终态——人读行明示 doc_id
         # 与既有产物路径，退出码贡献 0（不同步失败聚合）。
-        print(f"{name}: skipped doc_id={payload['doc_id']} zip={payload['zip']}")
+        print(f"{name}: skipped doc_id={payload['doc_id']} zip={payload.get('zip', '')}")
     else:
         print(_jline(payload), file=sys.stderr)
     if status in ("ok", "skipped"):

@@ -19,6 +19,8 @@
 """
 from __future__ import annotations
 
+import hashlib
+import os
 import sqlite3
 import time
 from dataclasses import dataclass, field
@@ -412,15 +414,32 @@ def _finish_ok(store: Store, sched: Scheduler, job: dict, res: dict, ir,
                     force=bool(job.get("force")), prepared=prepared)
         emit(store, "job_done", res.get("doc_id") or job.get("doc_id"), job["job_id"],
              {"blocks": int(res.get("blocks", 0) or 0), "source": "work",
-              "file": str(job.get("path", ""))[-64:]}, writer, tx=tx)
+              "file": _file_label(job.get("path"))}, writer, tx=tx)
     return drift
+
+
+def _file_label(path) -> str:
+    """D13（QA-R2）：事件里的文件标识必须可定位。
+
+    原实现取路径末 64 字符——`work/inbox/2026/10/23/` 这类长目录前缀一占满，
+    文件名被从中间截断（`umes/fx/.../xxx.pdf`），排障时既认不出是哪个文件，
+    也无法反查绝对路径。改为 `basename#sha256(绝对路径)[:8]`：
+    短、稳定、无歧义，且总长受控（`scrub_record` 的 64 字符上限不再触发指纹化）。
+    """
+    raw = str(path or "")
+    if not raw:
+        return ""
+    abs_path = os.path.abspath(raw)
+    base = os.path.basename(abs_path) or abs_path
+    digest = hashlib.sha256(abs_path.encode("utf-8", "surrogatepass")).hexdigest()[:8]
+    return f"{base[:54]}#{digest}"
 
 
 def _event(store: Store, job: dict, res: dict, code: str, writer,
            doc_id: str | None = None) -> None:
     """事件入库 + 落 work.jsonl（复用 events.emit，NFR-19/20 同一口径，CH-444）。"""
     payload = {"blocks": int(res.get("blocks", 0) or 0), "source": "work",
-               "file": str(job.get("path", ""))[-64:]}
+               "file": _file_label(job.get("path"))}
     if code != "job_done" and res.get("code"):
         payload["code"] = res["code"]
     emit(store, code, doc_id or job.get("doc_id"), job["job_id"], payload, writer)

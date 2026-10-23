@@ -145,7 +145,9 @@ def test_format_md_removes_zip(tmp_path, capsys):
     assert rc == 0
     payload = json.loads(capsys.readouterr().out)
     assert Path(payload["md"]).exists()
-    assert not Path(payload["zip"]).exists(), "md 模式不应保留 zip"
+    # D12（QA-R2）：zip 已删，结果行不再报路径，改以 zip_removed 表达
+    assert payload.get("zip_removed") is True
+    assert "zip" not in payload
     assert list(out.glob("*.zip")) == [], "输出目录不应有 zip"
 
 
