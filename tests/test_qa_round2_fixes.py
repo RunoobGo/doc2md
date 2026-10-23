@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import zipfile
 from pathlib import Path
@@ -371,5 +372,9 @@ def test_d13_worker_event_path_is_locatable(store):
                   {"blocks": 1}, "job_done", None)
     row = store.q1("SELECT payload_json FROM events WHERE code='job_done'")
     payload = json.loads(row["payload_json"])
-    digest = hashlib.sha256(path.encode("utf-8")).hexdigest()[:8]
+    # 实现按 `os.path.abspath` 取平台绝对路径——Windows runner 上 /Volumes/...
+    # 会落成 D:\Volumes\...，断言必须同口径计算，否则测的是宿主而不是契约。
+    digest = hashlib.sha256(
+        os.path.abspath(path).encode("utf-8")).hexdigest()[:8]
     assert payload["file"] == f"pdf_01_simple_1p.pdf#{digest}", payload["file"]
+    assert len(payload["file"]) <= 64, "必须短于 scrub_record 的指纹化阈值"
