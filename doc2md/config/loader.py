@@ -131,6 +131,7 @@ SPEC: dict[str, tuple[str, Any]] = {
     "perf.min_free_mb": _int(0, 10_000_000),
     "perf.disk_safety_factor": _int(0, 100),
     "perf.stale_job_minutes": _int(0, 100_000),
+    "perf.job_lease_cap_minutes": _int(0, 100_000),
     "perf.stale_check_seconds": _int(0, 100_000),
     "perf.batch_file_timeout_s": _int(0, 10_000_000),
     # [watch]

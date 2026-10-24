@@ -7,6 +7,8 @@
 
 分工纪律：
 - 父进程 = 唯一 DB 写入者（claim / mark / save_ir / 事件），sqlite 不开跨进程共享连接；
+  CH-499 的租约心跳是父进程内的**线程**，按 CH-459 的线程独占连接另开一条
+  （写入者仍只有这一个进程，只是同一进程两条连接）；
 - 子进程 = 纯计算（`pipeline.batch._convert_one`），只回传紧凑摘要，不回传 IR 对象；
 - 认领用 `BEGIN IMMEDIATE` + `UPDATE ... WHERE status='queued'` 双条件，
   两个 work 进程同时跑也不会重复消费（与 CH-412 的 uq_tasks_doc_active 附着语义一致）。
@@ -19,11 +21,15 @@
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import os
 import sqlite3
+import threading
 import time
+import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from . import config
@@ -58,20 +64,30 @@ class WorkReport:
                 "rejected": self.rejected, "drift": self.drift, "notes": self.notes}
 
 
-def claim(store: Store, limit: int) -> list[dict]:
+def claim(store: Store, limit: int, *, lease_seconds: int = 0,
+          owner: str = "") -> list[dict]:
     """原子认领最多 limit 个 queued 作业 → 置 running（同事务，防双认领）。
 
     消费参数取 `source_path` / `mode` 列（CH-448），进程崩溃后靠它们重新排队。
+
+    CH-499（B-27，`DB_VERSION` 10）：给了 `owner` 且 `lease_seconds>0` 时，同一事务里
+    打上**所有权 + 租约到期时刻**——转换在途期间由 `_lease_keeper` 持续前移，
+    `reclaim_stale` 只认「租约过期」而不认「started_at 太老」，合法长作业不再被误抢。
+    旧调用方（不传这两个参数）两列写空串 = 无租约行，回收落回 `started_at` 窗口分支。
     """
     limit = max(1, int(limit))
+    stamped = int(lease_seconds or 0) > 0 and bool(owner)
+    until = _lease_expiry(int(lease_seconds)) if stamped else ""
     out: list[dict] = []
     with store.tx() as tx:
         rows = tx.execute(
             "SELECT job_id, doc_id, source_key, source_path, mode, del_seq, force FROM tasks"
             " WHERE status='queued' ORDER BY created_at LIMIT ?", (limit,)).fetchall()
         for r in rows:
-            tx.execute("UPDATE tasks SET status='running', started_at=?, error_code=''"
-                       " WHERE job_id=? AND status='queued'", (now_iso(), r["job_id"]))
+            tx.execute("UPDATE tasks SET status='running', started_at=?, error_code='',"
+                       " owner=?, lease_expires_at=?"
+                       " WHERE job_id=? AND status='queued'",
+                       (now_iso(), owner if stamped else "", until, r["job_id"]))
             if tx.execute("SELECT changes()").fetchone()[0] != 1:
                 continue
             out.append({"job_id": r["job_id"], "doc_id": r["doc_id"],
@@ -87,8 +103,21 @@ def _out_dir(cfg: dict, root):
 
 
 def reclaim_stale(store: Store, cfg: dict) -> int:
-    """遗骸回收（CH-448）：`doc2md work` 被 OOM killer 干掉是低配机常态，
-    其认领的 running 作业若超过 [perf].stale_job_minutes 未更新，重新置 queued。
+    """遗骸回收（CH-448 / CH-499 B-27）：把卡死的 running 作业重回 queued。
+
+    `doc2md work` 被 OOM killer 干掉是低配机常态。CH-499 前本函数只看
+    `started_at` 的年龄，于是「合法但超过窗口的在途转换」也会被判成遗骸——
+    第二个 worker 把它重跑一遍（CH-498 双进程实测：≈70s 纯浪费 + 一条与终态
+    `done` 矛盾的假 `rejected`）。现判据三条，任一命中才回收：
+
+    ① **租约已过期**——认领进程的心跳停了（被杀 / 崩溃 / 机器重启）。这是主判据。
+    ② **无租约的历史行**沿用 `started_at` 超窗——旧库升级前写入的行、外部写入、
+       不传 owner 的 `claim()` 旧调用方（CH-448 / CH-469 语义逐字保留）。
+    ③ **硬上限**：超过 `[perf].job_lease_cap_minutes` 仍未终态（默认 240 分钟）。
+       这是「进程活着但卡死」的兜底——`batch_file_timeout_s=0`（默认）时损坏 PDF
+       能让子进程无限挂起，而父进程还活着就会一直续租；没有上限这类行永不回收。
+       `0` = 不设上限。
+
     只动带消费路径的 running 行（同步 serve 路径写的 running 不带 path 语义，不回收）。
 
     CH-469：常驻 `run_work` 按 [perf].stale_check_seconds 周期性重跑本函数，
@@ -97,25 +126,135 @@ def reclaim_stale(store: Store, cfg: dict) -> int:
     minutes = int(config.get(cfg, "perf.stale_job_minutes", 30) or 0)
     if minutes <= 0:
         return 0
+    cap = int(config.get(cfg, "perf.job_lease_cap_minutes", 240) or 0)
+    parts = [
+        "(lease_expires_at <> ''"
+        " AND datetime(lease_expires_at) < datetime('now'))",
+        "(lease_expires_at = '' AND started_at IS NOT NULL"
+        " AND datetime(started_at) < datetime('now', ?))",
+    ]
+    params: list[str] = [f"-{minutes} minutes"]
+    if cap > 0:
+        parts.append("started_at IS NOT NULL AND datetime(started_at) < datetime('now', ?)")
+        params.append(f"-{cap} minutes")
+    pred = "(" + " OR ".join(parts) + ")"
     with store.tx() as tx:
         # `datetime(started_at)` 不是冗余：started_at 由 now_iso() 写成
         # `YYYY-MM-DDTHH:MM:SS.mmm+00:00`，而 datetime('now') 给 `YYYY-MM-DD HH:MM:SS`。
         # SQLite 的字符串比较在第 11 位就分出胜负（'T'=0x54 > ' '=0x20），
-        # 直比起作用的同日内过期作业永远判不出来（缺陷 CH-455）。
+        # 直比起作用的同日内过期作业永远判不出来（缺陷 CH-455）。lease 列同口径。
         rows = tx.execute(
-            "SELECT job_id FROM tasks WHERE status='running'"
-            " AND started_at IS NOT NULL AND datetime(started_at) < datetime('now', ?)"
-            " AND source_path IS NOT NULL",
-            (f"-{minutes} minutes",)).fetchall()
+            f"SELECT job_id FROM tasks WHERE status='running'"
+            f" AND source_path IS NOT NULL AND {pred}", tuple(params)).fetchall()
         reclaimed = 0
         for r in rows:
-            tx.execute("UPDATE tasks SET status='queued', started_at=NULL, error_code=''"
-                       " WHERE job_id=? AND status='running'", (r["job_id"],))
+            # 谓词在 UPDATE 上重评一遍（同一写事务内）：SELECT 与 UPDATE 之间若有
+            # 别的心跳把租约续上，这一行就不该被误抢。
+            tx.execute("UPDATE tasks SET status='queued', started_at=NULL, error_code='',"
+                       " owner='', lease_expires_at=''"
+                       f" WHERE job_id=? AND status='running' AND {pred}",
+                       (r["job_id"], *params))
             # CH-496：并发下另一进程可能已抢先回收同一行；返回值必须是**实际**
             # 改到的行数，不能把「选中但没改到」也算进来（会虚报 reclaim 计数）。
             if tx.execute("SELECT changes()").fetchone()[0]:
                 reclaimed += 1
     return reclaimed
+
+
+# --- CH-499（B-27）：所有权 / 租约 / 心跳 -----------------------------------------
+
+LEASE_RENEW_MAX_SECONDS = 60.0   # 续租间隔上界：窗口再长也至少每分钟续一次
+_LEASE_ID_CHUNK = 500            # IN (…) 分片，避免极端批次撞上 SQLite 变量上限
+_PROC_OWNER: str | None = None   # 本进程所有权标识（惰性生成，见 _proc_owner()）
+
+
+def _proc_owner() -> str:
+    """本进程的作业所有权标识：`<pid>-<随机后缀>`。
+
+    随机后缀不可省：PID 会被复用，只看 PID 会让新进程继承旧进程在同一行上的所有权
+    （续租会替一个早已死掉的进程说话）。这里不用进程存活性判定——`os.kill(pid, 0)`
+    在 Windows 上是向进程组广播 Ctrl+C（bpo-14484，本仓 X-18 已为此付过代价）。
+    """
+    global _PROC_OWNER
+    if _PROC_OWNER is None:
+        _PROC_OWNER = f"{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    return _PROC_OWNER
+
+
+def _lease_expiry(lease_seconds: int) -> str:
+    """租约到期时刻（与 `now_iso()` 同格式：ISO + '+00:00'，SQLite 侧一律过 `datetime()`）。"""
+    return (datetime.now(timezone.utc)
+            + timedelta(seconds=max(1, int(lease_seconds)))).isoformat(timespec="milliseconds")
+
+
+def job_lease(cfg: dict | None) -> tuple[str, int]:
+    """本进程认领作业时应当使用的 `(owner, lease_seconds)`。
+
+    租约时长取 `[perf].stale_job_minutes` 的窗口——两条判据（①/②）共用一个时间尺度，
+    运维只调一个键。窗口被关掉（`<=0`，即彻底停用回收）时不打租约，行为回到旧口径。
+    """
+    minutes = int(config.get(cfg, "perf.stale_job_minutes", 30) or 0)
+    if minutes <= 0:
+        return "", 0
+    return _proc_owner(), minutes * 60
+
+
+def renew_leases(store: Store, owner: str, job_ids, lease_seconds: int) -> int:
+    """把 `owner` 名下**仍在 running** 的作业租约前移，返回实际前移的行数。
+
+    守卫 `owner=? AND status='running'`：被别的进程接手（owner 已换）或已落终态
+    （done/failed/rejected）的行不得再被本进程心跳改写。
+    """
+    ids = [str(j) for j in job_ids if j]
+    if not ids or int(lease_seconds or 0) <= 0 or not owner:
+        return 0
+    until = _lease_expiry(int(lease_seconds))
+    moved = 0
+    with store.tx() as tx:
+        for i in range(0, len(ids), _LEASE_ID_CHUNK):
+            chunk = ids[i:i + _LEASE_ID_CHUNK]
+            marks = ",".join("?" * len(chunk))
+            tx.execute(f"UPDATE tasks SET lease_expires_at=? WHERE owner=?"
+                       f" AND status='running' AND job_id IN ({marks})",
+                       (until, owner, *chunk))
+            moved += int(tx.execute("SELECT changes()").fetchone()[0])
+    return moved
+
+
+@contextlib.contextmanager
+def _lease_keeper(store: Store, owner: str, job_ids, lease_seconds: int, *,
+                  interval: float | None = None):
+    """转换在途期间为已认领作业续租；退出即停线程，不留尾巴。
+
+    只在 `run_batch` 阻塞期间存活（CH-497 的 B1 单池形态下这一段就是整批的墙钟）。
+    心跳线程用**自己的连接**——sqlite3 连接不跨线程，`Store` 按线程独占（CH-459），
+    线程消亡即随弱引用登记出列，不留 fd。续租失败不打断转换：判据②/③（窗口与硬上限）
+    仍会兜住，宁可让回收晚一点，也不让心跳把一次真实转换炸掉。
+    `interval` 只为测试把间隔压到亚秒级（生产按 `min(60s, 租约/3)`）。
+    """
+    ids = [str(j) for j in job_ids if j]
+    if not ids or int(lease_seconds or 0) <= 0 or not owner:
+        yield
+        return
+    step = (float(interval) if interval else
+            max(1.0, min(LEASE_RENEW_MAX_SECONDS, int(lease_seconds) / 3.0)))
+    stop = threading.Event()
+
+    def beat() -> None:
+        while not stop.wait(step):
+            try:
+                renew_leases(store, owner, ids, int(lease_seconds))
+            except (sqlite3.Error, OSError):
+                pass
+
+    t = threading.Thread(target=beat, name="doc2md-job-lease", daemon=True)
+    t.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        t.join(timeout=max(1.0, step * 3))
+
 
 
 def _startup_reconcile(store: Store) -> dict:
@@ -218,7 +357,9 @@ def _claim_batch(store: Store, cfg: dict, root, n: int,
     「无路径作业」的 failed/notes——入队时未带路径（历史行 / 只给了
     doc_id）的作业明确失败，不静默挂起。
     """
-    jobs = claim(store, queue_claim_size(cfg, n))
+    owner, lease_seconds = job_lease(cfg)
+    jobs = claim(store, queue_claim_size(cfg, n),
+                 lease_seconds=lease_seconds, owner=owner)
     if not jobs:
         return None
     rep.drained = len(jobs)
@@ -249,8 +390,11 @@ def _claim_batch(store: Store, cfg: dict, root, n: int,
         force = any(bool(j.get("force")) for j in by_path[path])
         plans.append((path, mode, force))
     if plans:
-        results.extend(run_batch(cfg=cfg, out_dir=_out_dir(cfg, root),
-                                 workers=n, plans=plans))
+        # CH-499（B-27）：整批转换在途期间持续续租本批已认领作业的租约——否则超过
+        # stale 窗口的合法长作业会被另一个 worker 判成遗骸重跑（重复转换 + 假 rejected）。
+        with _lease_keeper(store, owner, [j["job_id"] for j in jobs], lease_seconds):
+            results.extend(run_batch(cfg=cfg, out_dir=_out_dir(cfg, root),
+                                     workers=n, plans=plans))
     return by_path, results
 
 

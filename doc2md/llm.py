@@ -274,6 +274,9 @@ class OpValidator:
              if b.type == "heading" and (b.text or "").strip()), None)
         # CH-483（R8-LLM-1）：显式空列表表示“全部拒绝”，不得回退默认白名单。
         self.whitelist = set(DEFAULT_OP_WHITELIST if whitelist is None else whitelist)
+        # CH-499（B-3）：源块正文的注入话术证据位。`None` = 本次校验还没出现过拒绝，
+        # 因此一次都没扫；首次拒绝时扫一遍并落 True/False，之后复用。
+        self._doc_hint: bool | None = None
 
     def apply(self, ops: list[dict]) -> tuple[list[dict], list[dict]]:
         accepted: list[dict] = []
@@ -396,11 +399,36 @@ class OpValidator:
                 targets.append(self._order[i - 1].id)
         return targets
 
-    @staticmethod
-    def _attribute(op: dict) -> str:
-        """拒绝归因：injection_candidate（文档内容试图改规则）vs model_hallucination。"""
+    def _doc_side_injection(self) -> bool:
+        """源块正文里是否存在注入话术（CH-499 / B-3 的去循环证据）。
+
+        按实例惰性缓存：只有出现拒绝才扫，且每趟校验至多扫一遍全部块。成本口径沿用
+        CH-476 / R7-PERF-a——逐块 `text` 过 `scan_injection()` 的预检，而不是
+        `json.dumps` 整份 IR（后者在大文档上先放大成一个巨型字符串）。
+        """
+        if self._doc_hint is None:
+            hit = False
+            for b in self._order:
+                if scan_injection(b.text or ""):
+                    hit = True
+            self._doc_hint = hit
+        return self._doc_hint
+
+    def _attribute(self, op: dict) -> str:
+        """拒绝归因：injection_candidate（文档内容试图改规则）vs model_hallucination。
+
+        CH-499（B-3）前只看算子自身 JSON，是个循环判据：真实话术长在**文档正文**里，
+        模型被诱导后产出的越权 op 通常不复述话术（`{"op":"delete_block","target":"b7"}`
+        就是典型形态），于是这类拒绝恒被标成 `model_hallucination`，「注入是否得手」
+        这个可观测指标被自己的判据压成 0。现在证据面 = 算子 JSON ∪ 源块正文。
+
+        诚实边界：文档侧证据是「本文档存在话术 + 该 op 被拒」的相关性而非因果；含话术
+        文档里的真模型胡话会被一并归 injection_candidate。误报/漏报率留 B-3 待真实语料。
+        """
         blob = json.dumps(op, ensure_ascii=False, default=str)  # R7-LLM-1：非 JSON 值不得崩归因
-        return "injection_candidate" if _INJECT_HINT.search(blob) else "model_hallucination"
+        if _INJECT_HINT.search(blob) or self._doc_side_injection():
+            return "injection_candidate"
+        return "model_hallucination"
 
 
 def scan_injection(text: str) -> bool:

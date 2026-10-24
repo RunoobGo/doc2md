@@ -212,7 +212,7 @@ Windows 任务计划不捕获标准输出，日志目录里没有 `launchd-*` �
 
 ## 文档地图
 
-`docs/` 现有 **24 份 / 14,333 行**（顶层 `.md`，`wc -l` 实测，CH-498；CH-497 时为 24 份 / 14,327 行，本轮增量是 `dev-plan` 自身的登记与口径同步）。另有 **`docs/qa/` 子树（QA 优化轮 2.13–2.15 新增，10 份 / 3,520 行**：两轮 `test-plan` / `deviation-analysis` / `comparison` / `optimization-plan` / `optimization-report` / `fix-verification`，O-01~O-12 / N-1~N-8 / D1~D13 的过程产物，不计入顶层 24 份）。此前本文只索引 `docs/` 里的 2 份（`dev-plan.md` 与 `plan-delta-v1.1.md`），其余无任何入口——查规格的人无从判断「`review-round8-CH-483.md` 是权威还是历史」。下表按两个角度给出完整地图；**地位列是判读依据，不是推荐阅读顺序**。
+`docs/` 现有 **24 份 / 14,340 行**（顶层 `.md`，`wc -l` 实测，CH-499；CH-498 时为 24 份 / 14,333 行、CH-497 时 14,327 行，增量都是 `dev-plan` 自身的登记与口径同步）。另有 **`docs/qa/` 子树（QA 优化轮 2.13–2.15 新增，10 份 / 3,520 行**：两轮 `test-plan` / `deviation-analysis` / `comparison` / `optimization-plan` / `optimization-report` / `fix-verification`，O-01~O-12 / N-1~N-8 / D1~D13 的过程产物，不计入顶层 24 份）。此前本文只索引 `docs/` 里的 2 份（`dev-plan.md` 与 `plan-delta-v1.1.md`），其余无任何入口——查规格的人无从判断「`review-round8-CH-483.md` 是权威还是历史」。下表按两个角度给出完整地图；**地位列是判读依据，不是推荐阅读顺序**。
 
 ### 表一：按问题找权威
 
@@ -259,7 +259,7 @@ Windows 任务计划不捕获标准输出，日志目录里没有 `launchd-*` �
 
 运维侧另有两份细则，不在 `docs/` 下：**`ops/backup.md`**（备份介质与恢复演练细则，94 行）、**`ops/llm.md`**（本地 LLM 模型接入实操：选型 / 下载 GGUF / llama-server / 故障排查，206 行）；Windows 任务计划的安装 / 校验 / 卸载见 `ops/windows/install-doc2md-tasks.ps1`（280 行）。
 
-跟踪约定：契约变更、缺陷、更优做法一律按登记流写入方案 第十一章（当前编号至 `CH-498`，下一条自 `CH-499`），实测数字进第十二章并标注语料与测量方法；规格发生变化时同步主题篇章节与本文相应小节，并递增 `doc2md.PLAN_VERSION`（管线契约变化另递增 `PIPELINE_VERSION`；状态库结构变化另递增 `DB_VERSION`，CH-476 起为 `6`、CH-483 起为 `7`、CH-485 起为 `8`、CH-486 起为 `9`）。
+跟踪约定：契约变更、缺陷、更优做法一律按登记流写入方案 第十一章（当前编号至 `CH-499`，下一条自 `CH-500`），实测数字进第十二章并标注语料与测量方法；规格发生变化时同步主题篇章节与本文相应小节，并递增 `doc2md.PLAN_VERSION`（管线契约变化另递增 `PIPELINE_VERSION`；状态库结构变化另递增 `DB_VERSION`，CH-476 起为 `6`、CH-483 起为 `7`、CH-485 起为 `8`、CH-486 起为 `9`、CH-499 起为 `10`）。
 
 ## 验收与测试
 
@@ -288,9 +288,9 @@ push 面 `full-suite` 必须保持无矩阵且钉死 `3.12`、每个作业必须
 > 也成立，需为 `main` 打开「Require a pull request before merging」，那是改变日常工作流的决策项。
 
 ```bash
-pytest -m gate            # 红线层：六条 merge-gate + 低配机专项 + CH-469 两批安全/契约专项 + CH-473 第五轮 12 项 + CH-474 补入 X-17 1 项 + CH-475 第六轮 7 项 + CH-476 第七轮 91 项 + CH-477 版本对账 4 项 + CH-478 批次① 有序列表端到端 4 项 + 批次② 等价门缩进敏感度 4 项 + CH-479 CI 版本矩阵口径 4 项 + CH-480 常驻资产同构 7 项 + CH-481 捕获档截断 8 项 + CH-482 代码块缩进重建 10 项 + CH-483 结构修复 23 项 + CH-484 并发夹具 3 项 + CH-485 第九轮 28 项 + CH-486 第十轮 5 项 + CH-487 结构修复 24 项 + CH-488 复杂语料 12 项 + CH-489 第十一轮 15 项 + CH-490 本机收口 7 项 + CH-491 静态对账 2 项 + CH-494 X-18 回归 15 项 + QA 轮（2.13–2.15）41 项（LLM P0 契约 16 / N-04 家具扩展 11 / v2.4 门禁扩容 10 / 既有门禁补强 4）+ CH-495 第十四轮 37 项（pipeline 13 / round2 14 / service 7 / watch 3）+ CH-496 本机收口 11 项 + CH-497 B1/B-12 5 项 + CH-498 竞态/缝线/定档 8 项（全绿方可合并）
-                          # 当前 521 项（CH-498；构成与完整耗时历史见 docs/dev-plan.md 附录 F / 12.1。项数是硬口径，耗时只作历史）
-                          # 耗时历史记录：Linux 沙箱轮次 72–110s、T8 优化后 53.0s、CH-469 本机（macOS arm64 / Py 3.15）28.7s、CH-473 62.7s、CH-475 30.0s、CH-476 33.9s、CH-477 33.25s / 31.98s、CH-478 批次① 31.54s、批次② 31.16s、CH-479 38.55s / 收口复跑 33.74s、CH-480 36.13s / 收口复跑 35.43s（新七条红线只做 plistlib 解析与 XML 读 DOM，差值属同机负载抖动）、CH-481 36.14s / 34.92s / 35.91s、CH-482 35.71s（`--junitxml` 35.36s）、QA 轮 + CH-495 本机复跑（macOS arm64 / Py 3.15，497 项全绿）`--junitxml` 33.58s、CH-497 `--junitxml` 38.30s、CH-498 `--junitxml` 41.979s（per-case 求和 41.31s，54.6% 压在两条 320 页真实转换上——见 dev-plan §9.1 门禁分层复核）——项数是硬口径，耗时只作历史
+pytest -m gate            # 红线层：六条 merge-gate + 低配机专项 + CH-469 两批安全/契约专项 + CH-473 第五轮 12 项 + CH-474 补入 X-17 1 项 + CH-475 第六轮 7 项 + CH-476 第七轮 91 项 + CH-477 版本对账 4 项 + CH-478 批次① 有序列表端到端 4 项 + 批次② 等价门缩进敏感度 4 项 + CH-479 CI 版本矩阵口径 4 项 + CH-480 常驻资产同构 7 项 + CH-481 捕获档截断 8 项 + CH-482 代码块缩进重建 10 项 + CH-483 结构修复 23 项 + CH-484 并发夹具 3 项 + CH-485 第九轮 28 项 + CH-486 第十轮 5 项 + CH-487 结构修复 24 项 + CH-488 复杂语料 12 项 + CH-489 第十一轮 15 项 + CH-490 本机收口 7 项 + CH-491 静态对账 2 项 + CH-494 X-18 回归 15 项 + QA 轮（2.13–2.15）41 项（LLM P0 契约 16 / N-04 家具扩展 11 / v2.4 门禁扩容 10 / 既有门禁补强 4）+ CH-495 第十四轮 37 项（pipeline 13 / round2 14 / service 7 / watch 3）+ CH-496 本机收口 11 项 + CH-497 B1/B-12 5 项 + CH-498 竞态/缝线/定档 8 项 + CH-499 租约/归因/跨卷 18 项与文档内部对账 3 项（全绿方可合并）
+                          # 当前 542 项（CH-499；构成与完整耗时历史见 docs/dev-plan.md 附录 F / 12.1。项数是硬口径，耗时只作历史）
+                          # 耗时历史记录：Linux 沙箱轮次 72–110s、T8 优化后 53.0s、CH-469 本机（macOS arm64 / Py 3.15）28.7s、CH-473 62.7s、CH-475 30.0s、CH-476 33.9s、CH-477 33.25s / 31.98s、CH-478 批次① 31.54s、批次② 31.16s、CH-479 38.55s / 收口复跑 33.74s、CH-480 36.13s / 收口复跑 35.43s（新七条红线只做 plistlib 解析与 XML 读 DOM，差值属同机负载抖动）、CH-481 36.14s / 34.92s / 35.91s、CH-482 35.71s（`--junitxml` 35.36s）、QA 轮 + CH-495 本机复跑（macOS arm64 / Py 3.15，497 项全绿）`--junitxml` 33.58s、CH-497 `--junitxml` 38.30s、CH-498 `--junitxml` 41.979s（per-case 求和 41.31s，54.6% 压在两条 320 页真实转换上——见 dev-plan §9.1 门禁分层复核）、CH-499 `--junitxml` 41.934s（542 项 / 0 skipped，新增 21 项均为纯静态或纯单元断言，慢项清单未扩容）——项数是硬口径，耗时只作历史
 pytest tests/             # 全量（marker 实际取值：M0+M2 / M3 / M5 / M6c / M8 / M9a / DoD / PERF，见 pytest.ini）
 python3 tests/make_golden.py            # 重建黄金样本（输出目录随脚本位置，--golden 可覆盖）
 python3 tests/make_golden.py --force    # 强制重生成
@@ -325,6 +325,13 @@ python tests/corpus/run_corpus.py --write-baseline  # 审阅后更新目标
 六条门禁：`shard_two_phase`、`malicious_filenames`、`injection_resistance`、
 `edit_optimistic_lock`、`delete_cascade`、`log_rotation`；另含本实现补强的 CJK 检索、渲染分级、
 目录递归防护与低配机专项断言（完整清单见方案 附录 F）。
+
+本机最新收口取证（CH-499，macOS arm64 / Python 3.15）：`pytest -m gate` **542 项全绿 / 0
+skipped**（`--junitxml` 41.934s），全量 **1311 项 = 1309 passed / 2 skipped / 0 failed**（97.972s，
+2 条 skip 是既有的 Windows junction 平台门控，非新增）；`ruff check doc2md tests config ops`
+全绿、`doc2md doctor` 退 0；黄金逐字节可复现 7 项与产物面 63 项全绿——本轮三项改动（租约
+回收、注入归因、跨卷权限告警）都不落在产物路径上，产物字节未变，故 `PIPELINE_VERSION` 停在
+**2.17.0**，bump 的是状态库结构版本 `DB_VERSION` **9→10**。逐轮数字与构成见方案 12.1 / 附录 F。
 
 正文里出现的 `CH-xxx` 只是索引，条目原文与实测证据统一收录在
 `docs/dev-plan.md` 第十一、十二章。

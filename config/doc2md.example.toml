@@ -58,6 +58,8 @@ sync_min_bytes = 1048576               # CH-492（QA M-1）：与 sync_min_paral
 min_free_mb = 512                      # CH-450（NFR-6）：写产物/备份前的剩余空间下限；本项与 disk_safety_factor 同时为 0 才关闭门禁
 disk_safety_factor = 3                 # 需求 = 源大小 × 该系数
 stale_job_minutes = 30                 # CH-448：`doc2md work` 回收 running 超过该时长且崩溃遗骸（仅限队列来源）
+                                       # CH-499（B-27）：同值也是**在途作业的租约时长**（心跳按 min(60s, 该值/3) 续期）
+job_lease_cap_minutes = 240            # CH-499（B-27）：running 的硬上限——进程活着但卡死（租约一直续）也最迟在此时长后回收；0 = 不设上限
 stale_check_seconds = 60               # CH-469：常驻 work 进程重跑遗骸回收的节流周期；0 = 只启动时回收一次
 batch_file_timeout_s = 0               # CH-469：批量进程池内单文件墙钟上限；0 = 不设限
                                        # >0 时损坏 PDF 让 pdfplumber 挂死也只拖这一件（超时记 E5000 并取消）

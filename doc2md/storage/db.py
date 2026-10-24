@@ -20,7 +20,7 @@ import weakref
 from datetime import datetime, timezone
 from pathlib import Path
 
-DB_VERSION = 9   # state.sqlite 结构版本（user_version）；与 IR 的 SCHEMA_VERSION=14 是两套口径
+DB_VERSION = 10  # state.sqlite 结构版本（user_version）；与 IR 的 SCHEMA_VERSION=14 是两套口径
 # CH-490：SQLite 页缓存是**每连接私有**的。serve 按请求线程建连接，原 64MB/连接
 # 在 50MB 扫描表上实测 8/16/32 线程驻留 473/867/2144MB。改为 8MB 页缓存并关闭
 # mmap：16 线程并发扫描实测 807MB（mmap=64MB）→ 164MB（mmap=0）；读路径仍由
@@ -36,6 +36,11 @@ SQLITE_MMAP_BYTES = 0
 # `_new_conn` 在切换成功后立刻把 busy_timeout 恢复成 30000（写锁串行化仍按老口径）。
 WAL_SWITCH_BUSY_MS = 250
 WAL_RETRY_DEADLINE_S = 60.0
+# v10（CH-499 / B-27）：tasks 增 owner / lease_expires_at——running 行的「所有权 +
+# 租约」。此前 reclaim_stale 只看 started_at 的年龄，合法但超过窗口的在途转换会被
+# 第二个 worker 判成遗骸并重跑（CH-498 双进程实测：≈70s 纯浪费 + 一条与终态矛盾的
+# 假 rejected）。租约由在途 worker 的心跳续期，回收判据改为「租约过期 / 无租约且
+# 超窗 / 超硬上限」三选一；默认值空串 = 旧行与旧调用方语义不变。
 # v9（CH-486）：新增 ix_tasks_created，覆盖 /jobs 无状态过滤的 created_at DESC。
 # v8（CH-485 / R9-SVC-1 / R9-SVC-2）：tasks 增加 del_seq/force；blocks 增加
 # links/font/provenance JSON；docs 增加 gate_json——异步 drift 删除守护与
@@ -128,7 +133,9 @@ CREATE TABLE IF NOT EXISTS tasks (
   error_code TEXT, detail_json TEXT DEFAULT '{{}}',
   source_path TEXT, mode TEXT,
   del_seq INTEGER NOT NULL DEFAULT 0,
-  force INTEGER NOT NULL DEFAULT 0
+  force INTEGER NOT NULL DEFAULT 0,
+  owner TEXT NOT NULL DEFAULT '',
+  lease_expires_at TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS ix_tasks_idem ON tasks(idem_key);
 -- CH-448（DB_VERSION=4）：队列入队即带消费路径与转换档位，独立列而非塞 detail_json：
@@ -391,6 +398,13 @@ class Store:
             self._add_column("tasks", "del_seq", "INTEGER NOT NULL DEFAULT 0")
         if "force" not in tcols:
             self._add_column("tasks", "force", "INTEGER NOT NULL DEFAULT 0")
+        # CH-499（B-27，DB10）：所有权与租约。存量 running 行补列后为空串 = 「无租约」，
+        # 回收判定随之落回 started_at 窗口分支（CH-448/CH-469 语义不变）；升级瞬间
+        # 正在转换的行最多多等一个窗口被回收，不会丢数据（重排后重新认领）。
+        if "owner" not in tcols:
+            self._add_column("tasks", "owner", "TEXT NOT NULL DEFAULT ''")
+        if "lease_expires_at" not in tcols:
+            self._add_column("tasks", "lease_expires_at", "TEXT NOT NULL DEFAULT ''")
         tcols = {r["name"] for r in self._conn.execute("PRAGMA table_info(tokens)")}
         if tcols and "role" not in tcols:
             # 方案 8.5 兼容期：存量 token 默认 admin
