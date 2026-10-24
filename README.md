@@ -332,6 +332,10 @@ skipped**（`--junitxml` 41.934s），全量 **1311 项 = 1309 passed / 2 skippe
 全绿、`doc2md doctor` 退 0；黄金逐字节可复现 7 项与产物面 63 项全绿——本轮三项改动（租约
 回收、注入归因、跨卷权限告警）都不落在产物路径上，产物字节未变，故 `PIPELINE_VERSION` 停在
 **2.17.0**，bump 的是状态库结构版本 `DB_VERSION` **9→10**。逐轮数字与构成见方案 12.1 / 附录 F。
+远端确认 = run `40090700532`（push `6d01dd1`）六作业全绿：三档 merge-gate 各 **542 passed / 769
+deselected**、`full-suite` 1308 passed / 3 skipped（黄金逐字节 7 项全过、`doctor` 打 2.17.0）、
+`windows-suite` 门禁层 **542 passed / 0 skipped**——本轮 21 项新红线在 Windows 上真跑（跨卷权限
+那条走 `icacls` 分支，不是跳过），三口径互证 542+769 = 1308+3 = 1304+7 = **1311**。
 
 正文里出现的 `CH-xxx` 只是索引，条目原文与实测证据统一收录在
 `docs/dev-plan.md` 第十一、十二章。
