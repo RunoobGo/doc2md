@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 import threading
+import time
 import weakref
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,6 +27,15 @@ DB_VERSION = 9   # state.sqlite 结构版本（user_version）；与 IR 的 SCHE
 # OS page cache 兜底，单机自用不需要每连接映射整个库文件。
 SQLITE_CACHE_KB = 8192
 SQLITE_MMAP_BYTES = 0
+# CH-498（B-17）：切 WAL 的等待口径。实测（本机 macOS / CPython 3.15 sqlite3）
+# `PRAGMA journal_mode=WAL` **会**按连接的 busy_timeout 等待——`timeout=30.0` 下
+# 撞锁一次就是 31.0s 才抛 `database is locked`（另见 12.7 B-17 行）。因此重试若沿用
+# 30s 单次等待，200 次上限等于最长 100 分钟的挂起，比修复前（一次 30s 后 E5000 退出）
+# 更坏。做法是切换阶段先把单次等待压到 250ms，再以总预算 60s 重试：竞态窗口是毫秒级，
+# 一次 250ms 就够让过；真被长时间持锁则 60s 内 fail-closed，绝不无限等。
+# `_new_conn` 在切换成功后立刻把 busy_timeout 恢复成 30000（写锁串行化仍按老口径）。
+WAL_SWITCH_BUSY_MS = 250
+WAL_RETRY_DEADLINE_S = 60.0
 # v9（CH-486）：新增 ix_tasks_created，覆盖 /jobs 无状态过滤的 created_at DESC。
 # v8（CH-485 / R9-SVC-1 / R9-SVC-2）：tasks 增加 del_seq/force；blocks 增加
 # links/font/provenance JSON；docs 增加 gate_json——异步 drift 删除守护与
@@ -237,10 +247,48 @@ class Store:
             if side.exists():
                 ensure_private(side, 0o600)
 
+    def _set_wal(self, conn: sqlite3.Connection) -> None:
+        """切 WAL：并发首开同一全新库时，另一进程正持独占建库 → SQLite 判忙。
+
+        CH-498（B-17）：修复前这一句是 E5000 的唯一来源，常驻 worker 直接退出。
+        实测机制（本机 CPython 3.15 / SQLite，见模块头 WAL_* 常量注释）：这条 PRAGMA
+        **按** busy_timeout 等待，`timeout=30.0` 下撞锁一次要 31.0s 才抛
+        `database is locked`。所以这里先把单次等待压到 `WAL_SWITCH_BUSY_MS`，再以
+        `WAL_RETRY_DEADLINE_S` 为总预算重试——毫秒级的建库竞态窗口一次就过，真被长期
+        持锁则超时 fail-closed，不会把「30s 后退出的故障」换成「挂起 100 分钟的故障」。
+        只消化「database is locked」，其余 OperationalError 原样上抛——绝不把真正的
+        迁移失败当成并发噪声。切换成功后 `_new_conn` 把 busy_timeout 恢复为 30000。
+        """
+        conn.execute(f"PRAGMA busy_timeout={WAL_SWITCH_BUSY_MS}")
+        deadline = time.monotonic() + WAL_RETRY_DEADLINE_S
+        delay = 0.02
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                conn.execute("PRAGMA journal_mode=WAL")
+            except sqlite3.OperationalError as exc:
+                if "database is locked" not in str(exc).lower():
+                    raise
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    raise RuntimeError(
+                        f"state.sqlite stayed locked while switching to WAL "
+                        f"(>{WAL_RETRY_DEADLINE_S:.0f}s, {attempt} attempts); "
+                        "another process may be holding the database (refusing to run)"
+                    ) from exc
+                time.sleep(min(delay * (1.0 + attempt * 0.05), 0.5, left))
+                continue
+            if str(conn.execute("PRAGMA journal_mode").fetchone()[0]).lower() != "wal":
+                raise RuntimeError(
+                    f"state.sqlite journal_mode is not WAL after {attempt} "
+                    "attempts; refusing to run without WAL")
+            return
+
     def _new_conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.path), timeout=30.0, isolation_level=None)
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
+        self._set_wal(conn)
         conn.execute("PRAGMA busy_timeout=30000")
         # CH-471（STOR-7 / 决策 D6）：DDL（见本文件建表段）**不声明任何 FOREIGN KEY**，
         # 所以这条 pragma 是防御性的空转——保留它只为「若将来加 FK 则即刻生效」，当前

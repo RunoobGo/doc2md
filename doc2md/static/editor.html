@@ -114,8 +114,12 @@ async function api(path, opt) {
 
 // --- T4：队列可视化 ---------------------------------------------------------
 // 数据面：GET /jobs（CH-449，只回计数与任务元数据，NFR-20 不含正文）。
-// 渲染面：状态计数 chips（点击过滤）+ 任务表（排队等待 / 耗时 / 错误码 / 失败原因），
-// 「卡在哪一步」= 状态机阶段 + 时间差，无需翻日志。
+// 渲染面：状态计数 chips（点击过滤，过滤态经 `?status=` 由服务端判定）+ 任务表
+// （排队等待 / 耗时 / 错误码 / 失败原因），「卡在哪一步」= 状态机阶段 + 时间差，
+// 无需翻日志。chip 计数是全库口径，任务表只回 `limit` 条窗口——两者别混为一谈。
+// 「转换中」= **已认领**：`claim` 一轮取 workers × [perf].queue_batch_factor（默认 4）
+// 件并全部置 running（CH-476 / R7-PERF-1），故它可以大于 `--workers`，
+// 且 running 行的「耗时」从认领起算，不是真正开跑的时刻。
 const QSTAGES = { queued: "排队中", running: "转换中", done: "完成",
                   failed: "失败", rejected: "拒绝" };
 const QORDER = ["queued", "running", "failed", "rejected", "done"];
@@ -155,8 +159,10 @@ function renderCounts(counts) {
     b.innerHTML = `${QSTAGES[st]} <b>${n}</b>`;
     b.onclick = () => {
       QSTATE.filter = (QSTATE.filter === st ? "" : st);
-      renderCounts(counts);
-      renderQueue(QSTATE.tasks);          // 过滤必须同时作用于表格，否则 chip 是摆设
+      // CH-498 / B-11 走查：过滤必须走服务端 `?status=`。`GET /jobs` 只回最近
+      // `limit` 条（created_at DESC），本地过滤在窗口截断时会「计数非 0、表格全空」
+      // 并弹出「暂无任务」的假提示。
+      loadQueue();
     };
     el.appendChild(b);
   });
@@ -207,7 +213,8 @@ async function loadQueue() {
     return;
   }
   let j;
-  try { j = await api("/jobs?limit=50"); }
+  try { j = await api("/jobs?limit=50" +
+                     (QSTATE.filter ? "&status=" + encodeURIComponent(QSTATE.filter) : "")); }
   catch (e) { return log(`队列拉取失败：${e.message}`, true); }
   QSTATE.tasks = j.tasks || [];
   renderCounts(j.counts || {});
@@ -442,14 +449,21 @@ async function doSearch() {
   let j;
   try { j = await api(`/search?q=${encodeURIComponent(q)}`); }
   catch (e) { return log(`检索失败：${e.message}`, true); }
-  log(`检索「${q}」→ ${j.total} 命中（mode=${j.mode}）`);
-  let off = 0;
+  // CH-498 / B-11 走查：`total` 是**本页**命中数（服务端截断时 has_more=true），
+  // 原实现只报总数，用户看到「20 命中」会以为是全部。
+  log(`检索「${q}」→ ${j.total} 命中（mode=${j.mode}）` +
+      (j.has_more ? "，结果已截断（命中多于本页，请收窄查询或用 doc2md search --limit）" : ""));
+  let off = 0, other = 0;
   (j.hits || []).forEach(h => {
+    // /search 是跨文档的：其他文档的命中永远不会落在当前块窗口里，
+    // 把它们计入「未载入窗口」等于让用户白点「加载更多」。
+    if (h.doc_id && h.doc_id !== VIEW.doc) { other++; return; }
     const el = blkEl(h.block_id);
     if (el) el.querySelector("textarea").classList.add("hit");
     else off++;
   });
   if (off) log(`${off} 条命中在未载入的块窗口内（点「加载更多」后重新检索）`, true);
+  if (other) log(`${other} 条命中在其他文档（本页只高亮当前文档；doc2md search 可看全量）`, true);
 }
 
 $("blocks").addEventListener("click", (ev) => {

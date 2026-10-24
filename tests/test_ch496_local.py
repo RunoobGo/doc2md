@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import os
 import re
 import shutil
 import subprocess
@@ -182,23 +183,30 @@ def test_arch_claim_batch_pins_first_mode_and_notes_conflict(tmp_path, monkeypat
 
 
 @pytest.mark.gate
-@pytest.mark.skipif(__import__("os").name == "nt", reason="POSIX mode bits")
 def test_arch_db_permissions_are_private(tmp_path):
-    """库目录/主库/WAL 必须是 0700/0600（含首次迁移创建出的边车文件）。"""
-    import os
+    """库目录/主库/WAL 必须只对当前用户可访问（含首次迁移创建出的边车文件）。
 
+    CH-498 / B-16：原来整项用 `skipif(nt)` 跳过，而 CH-496 恰恰改了 `Store.__init__`
+    的收紧顺序（目录先 0700 再建库，随后主库与 -wal/-shm）——Windows 走的是
+    `ensure_private` 的 icacls 分支，改却没有回归。改为两端都跑：POSIX 断精确 mode 位，
+    Windows 断 `is_private()`（仅当前用户 DACL、无继承 ACE）。
+    """
+    from doc2md.security.perms import is_private
     from doc2md.storage.db import Store
 
     root = tmp_path / "work"
     store = Store(root / "state.sqlite")
-    assert (root.stat().st_mode & 0o777) == 0o700
-    assert ((root / "state.sqlite").stat().st_mode & 0o777) == 0o600
-    for suffix in ("-wal", "-shm"):
-        side = root / f"state.sqlite{suffix}"
-        if side.exists():
-            assert (side.stat().st_mode & 0o777) == 0o600
+    sides = [root / f"state.sqlite{s}" for s in ("-wal", "-shm")
+             if (root / f"state.sqlite{s}").exists()]
+    paths = [root, root / "state.sqlite", *sides]
+    if os.name == "nt":
+        not_private = [str(p) for p in paths if not is_private(p)]
+        assert not not_private, f"Windows DACL 未收紧到仅当前用户: {not_private}"
+    else:
+        assert (root.stat().st_mode & 0o777) == 0o700
+        for p in paths[1:]:
+            assert (p.stat().st_mode & 0o777) == 0o600, str(p)
     store.close()
-    assert os.name != "nt"
 
 
 # ------------------------------------------------------------------ G4' / B-11
@@ -264,3 +272,38 @@ def test_serve_startup_reports_bound_port():
     body = m.group(0)
     assert "make_server(" in body and "server.server_port" in body
     assert "app.run(host=" not in body, "启动行必须使用实际绑定端口，而不是请求端口"
+
+
+@pytest.mark.gate
+def test_search_panel_reports_truncation_and_cross_doc_hits():
+    """CH-498 / B-11 浏览器走查发现：检索面板把两件 API 已经明说的事藏了。
+
+    Chromium 实测（5770 块 / 跨 5 文档的库）：`GET /search` 在 `has_more=true`
+    （命中多于本页）时，页面仍只报「20 命中」，用户会以为是全部；而 `hits[].doc_id`
+    属其他文档的命中被计入「未载入的块窗口内（点「加载更多」后重新检索）」——
+    当前文档的窗口再大也永远不会出现它们。两处都是 GUI 与 API 契约不一致，
+    数据本身没错，故只补提示、不动服务端。
+    """
+    body = _function_body(_editor_source(), "doSearch")
+    assert "has_more" in body, "未读 has_more：截断结果被当成全部命中报出"
+    assert "VIEW.doc" in body, "未按 doc_id 区分跨文档命中"
+    # 失败 / 主行 / 窗口外 / 跨文档 四条提示各自独立，合并即回退成走查看到的旧行为
+    assert body.count("log(") >= 4, "跨文档命中与窗口外命中必须分别提示"
+
+
+@pytest.mark.gate
+def test_queue_chip_filter_requests_server_side_status():
+    """CH-498 / B-11 浏览器走查发现：状态 chip 的客户端过滤会「假空」。
+
+    实测（51 条任务 + `GET /jobs?limit=50`，`ORDER BY created_at DESC`）：点「失败」
+    chip 时表格全空并弹出「暂无任务」，而 chip 上的计数写着 1——那条失败作业
+    （`broken.pdf` / E4151）排在窗口之外。`/jobs` 本来就支持 `?status=`，走查后
+    改为过滤态由服务端判定，窗口截断不再影响可见性。
+    """
+    src = _editor_source()
+    load = _function_body(src, "loadQueue")
+    assert "QSTATE.filter" in load and "status=" in load, "loadQueue 必须按过滤态请求 /jobs?status="
+    m = re.search(r"b\.onclick = \(\) => \{(.*?)\};", src, re.S)
+    assert m is not None, "renderCounts 的 chip 点击处理漂移"
+    assert "loadQueue()" in m.group(1), "chip 点击须重新拉取（过滤交给服务端）"
+    assert "renderQueue(QSTATE.tasks)" not in m.group(1), "不得退回纯客户端过滤"

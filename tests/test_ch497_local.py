@@ -2,11 +2,13 @@
 
 - B1：`run_batch` 接受逐作业 (path, mode, force) 计划，一串作业只建一个池；
   `_claim_batch` 每次 drain 只调一次，不再按 (mode, force) 分组重建池。
-- B-12：`ops/bench/soak_resident.py` 可独立执行、不被 pytest 收集、带 JSON 出口。
+- B-12：`ops/bench/soak_resident.py` 可独立执行、不被 pytest 收集、带 JSON 出口，
+  且在非 UTF-8 控制台（Windows cp1252）下也能出帮助。
 """
 from __future__ import annotations
 
 import concurrent.futures as cf
+import os
 import shutil
 import subprocess
 import sys
@@ -104,13 +106,25 @@ def test_b1_mixed_modes_real_pool(tmp_path, cfg, golden_dir):
 
 @pytest.mark.gate
 def test_b12_soak_harness_contract():
-    """B-12 夹具必须可独立执行、不被 pytest 收集、参数与 JSON 出口稳定。"""
+    """B-12 夹具必须可独立执行、不被 pytest 收集、参数与 JSON 出口稳定。
+
+    CH-498 / B-16 补的第二段：夹具的帮助文本是中文，Windows 控制台默认 cp1252，
+    `--help` 曾直接在 argparse 里崩 UnicodeEncodeError（windows-latest 的 gate 腿
+    实测红）。这里用 `PYTHONIOENCODING=cp1252` 在任意宿主上复现该代码页，
+    锁住「非 UTF-8 控制台也必须能出帮助」这条契约。
+    """
     path = REPO_ROOT / "ops" / "bench" / "soak_resident.py"
     src = path.read_text(encoding="utf-8")
     assert "__main__" in src and "import pytest" not in src
     assert '"SUMMARY "' in src
+    assert "ensure_ascii=False" not in src, "SUMMARY 是机读行，必须 ASCII 转义"
     proc = subprocess.run([sys.executable, str(path), "--help"],
                           capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr
     for flag in ("--minutes", "--interval", "--root", "--keep"):
         assert flag in proc.stdout, (flag, proc.stdout[:400])
+    legacy = subprocess.run([sys.executable, str(path), "--help"],
+                            capture_output=True, text=True, errors="replace",
+                            env=dict(os.environ, PYTHONIOENCODING="cp1252"))
+    assert legacy.returncode == 0, legacy.stderr
+    assert "--minutes" in legacy.stdout

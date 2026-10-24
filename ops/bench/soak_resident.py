@@ -15,11 +15,13 @@
 
 **平台**：夹具为 POSIX-only（macOS/Linux）——依赖 `.venv/bin/doc2md`、
 `ps -o rss=`、`/proc/<pid>/fd`、`lsof`；Windows 需适配副本
-（`.venv/Scripts/doc2md.exe`，且无 `ps`/`/proc`/`lsof`）。
+（`.venv/Scripts/doc2md.exe`，且无 `ps`/`/proc`/`lsof`）。在 Windows 上真跑
+会直接退 2（`unsupported_platform`），**不**输出「渗漏判据通过」——RSS/FD 取不到
+样本时判据会真空成立。`--help` 在任何平台都必须可用（gate 层锁这条契约）。
 
 退出码：0 = 全部判据通过；2 = 队列未排空 / 有失败作业 / RSS·FD 超界 /
 常驻进程在收尾前已退出 / 排空采样异常 / 建库预初始化失败（此时 SUMMARY 为
-`{"error": "init_failed", ...}`）。
+`{"error": "init_failed", ...}`）/ 非 POSIX 平台（`{"error": "unsupported_platform", ...}`）。
 """
 from __future__ import annotations
 
@@ -40,8 +42,26 @@ GOLDEN = REPO / "tests/golden"
 CYCLE = ["small_3p.pdf", "codeindent_1p.pdf", "numlist_1p.pdf", "links_pdf.pdf"]
 
 
+def _console_safe() -> None:
+    """CH-498 / B-16：Windows 控制台默认 cp1252/cp936，本夹具的帮助与提示里有
+    中文——`--help` 会直接被 argparse 打成 UnicodeEncodeError（实测在
+    windows-latest 的 gate 腿上崩栈）。与 `doc2md/cli.py` 的 `_console_safe`
+    同口径：输出流按 errors="replace" 降级，机器可读行另走 ASCII 转义。
+    """
+    for name in ("stdout", "stderr"):
+        stream = getattr(sys, name, None)
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            if (stream.encoding or "").lower().replace("-", "") != "utf8":
+                reconfigure(errors="replace")
+        except (ValueError, OSError):
+            pass
+
+
 def _sh(*a):
-    return subprocess.run(a, capture_output=True, text=True)
+    return subprocess.run(a, capture_output=True, text=True, errors="replace")
 
 
 def _conn(root: Path):
@@ -96,6 +116,7 @@ def _enqueue(root: Path, src: Path, attempts: int = 100) -> int:
 
 
 def main(argv=None) -> int:
+    _console_safe()
     ap = argparse.ArgumentParser(description="常驻 worker 长跑夹具（手动，非 CI gate）")
     ap.add_argument("--minutes", type=float, default=2.0,
                     help="运行时长；0 = 仅一轮冒烟")
@@ -105,6 +126,16 @@ def main(argv=None) -> int:
                     help="工作根（默认 tempfile；用户传入则不代删）")
     ap.add_argument("--keep", action="store_true", help="留存工作根供取证")
     args = ap.parse_args(argv)
+
+    # 渗漏判据靠 ps / /proc/<pid>/fd / lsof，非 POSIX 上全部取不到样本；若继续跑，
+    # rss_ok/fd_ok 会因「None 即放行」真空成立，等于给出假的「无渗漏」结论。
+    if os.name != "posix":
+        print("SUMMARY " + json.dumps(
+            {"error": "unsupported_platform", "os": os.name,
+             "reason": "RSS/FD samplers need ps + /proc (or lsof)"},
+            ensure_ascii=True))
+        print("[platform] 本夹具仅支持 macOS/Linux，未运行。", file=sys.stderr)
+        return 2
 
     # 只代删自己用 mkdtemp 造的根；--root 是用户目录，绝不整目录删除（Ruling I）。
     created = not args.root
@@ -122,7 +153,7 @@ def main(argv=None) -> int:
     if init.returncode != 0:
         print("SUMMARY " + json.dumps(
             {"error": "init_failed", "rc": init.returncode,
-             "stderr_tail": (init.stderr or "")[-200:]}, ensure_ascii=False))
+             "stderr_tail": (init.stderr or "")[-200:]}, ensure_ascii=True))
         if created and not args.keep:
             shutil.rmtree(root, ignore_errors=True)
         elif args.keep:
@@ -205,7 +236,9 @@ def main(argv=None) -> int:
         "worker_stderr_tail": (err or "")[-200:],
     }
     # 契约：SUMMARY 必须是 stdout 最后一行——提示信息一律走 stderr。
-    print("SUMMARY " + json.dumps(summary, ensure_ascii=False))
+    # ASCII 转义（与 CLI `_jline` 同口径）：SUMMARY 是机读行，中文根路径在
+    # 非 UTF-8 管道里被 errors="replace" 打成 `?` 就不再是有效 JSON。
+    print("SUMMARY " + json.dumps(summary, ensure_ascii=True))
     ok = (drained and failed == 0 and done >= cycles and rss_ok and fd_ok
           and worker_alive and not drain_error)
     if created and not args.keep:
