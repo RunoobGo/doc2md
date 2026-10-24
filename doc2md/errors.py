@@ -99,6 +99,11 @@ class E5031_StorageError(Doc2mdError):
 
 
 class E5041_LlmUnavailable(Doc2mdError):
+    """503 服务暂不可用。CH-495（R14-API-5）口径登记：同步转换池忙
+    （api.py `_SYNC_POOL_GATE` 有界等待超时）复用本码 + `Retry-After`，
+    以 `detail.reason="sync_pool_busy"` 与 LLM 不可用区分。独立码 E5051
+    已在 CH-456 删除（降级语义吸收），守卫测试 test_t9_convergence 禁止复活。
+    """
     code, http = "E5041", 503
 
 

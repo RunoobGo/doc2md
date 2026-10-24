@@ -209,12 +209,20 @@ def drop_orphan_artifact(store: Store, root, cfg: dict, doc_id: str) -> None:
     删数据（数据安全护栏）。best-effort：删除失败不翻转已判定的 rejected 终态，
     孤儿至多留在盘上、绝不影响库面正确性。
     """
-    if not doc_id or store.q1("SELECT 1 FROM docs WHERE doc_id=? LIMIT 1",
-                              (doc_id,)) is not None:
+    if not doc_id:
         return
-    purge_files(doc_id, root,
-                out_dir=config.path_setting(cfg, "paths.out", root, str(Path(root) / "out")),
-                tmp_dir=config.path_setting(cfg, "paths.tmp", root, str(Path(root) / "tmp")))
+    out_dir = Path(config.path_setting(cfg, "paths.out", root,
+                                       str(Path(root) / "out")))
+    # CH-496 / G8：检查与清除必须与同 doc 的重建/打包串行。原实现两次独立
+    # 读盘之间没有互斥——检查时 docs 无行、清除前重建路径刚发布新 zip，
+    # 就会删掉活文档的产物。锁内复查是最终判据。
+    with _artifact_lock(out_dir, doc_id):
+        if store.q1("SELECT 1 FROM docs WHERE doc_id=? LIMIT 1",
+                    (doc_id,)) is not None:
+            return
+        purge_files(doc_id, root, out_dir=out_dir,
+                    tmp_dir=config.path_setting(cfg, "paths.tmp", root,
+                                                str(Path(root) / "tmp")))
 
 
 def artifact_entry(names: list[str], base: str, doc_id: str = "") -> str | None:

@@ -18,7 +18,6 @@ from pathlib import Path
 
 from . import PIPELINE_VERSION, auth, config
 from .artifacts import artifact_entry, drop_orphan_artifact, read_ir, rebuild_artifact
-from .cron import sweep_tmp
 from .edits import patch_block, rollback
 from .errors import (
     ApiError,
@@ -27,11 +26,15 @@ from .errors import (
     E4031_Forbidden,
     E4041_NotFound,
     E4091_DocOverwrite,
+    E4131_TooLarge,
+    E4221_GateReject,
     E5031_StorageError,
+    E5041_LlmUnavailable,
 )
 from .events import emit
 from .ops.backup import BackupPlan
 from .ops.logging import RotatingJsonlWriter
+from .ops.tmpclean import sweep_tmp
 from .pipeline.convert import convert
 from .scheduler import Scheduler
 from .security.dirguard import scan_or_raise, walk_limits
@@ -66,10 +69,8 @@ _MAX_ROWS = 500
 # CH-476（R7-PERF-k）：/docs/<id>/markdown 的分块流式读大小。
 _MD_CHUNK = 64 * 1024
 
-# CH-476（R7-SVC-2）：`mode` 档位白名单，与 CLI `--mode` 的 choices 同集合
-# （`cli.py:107`）。用 tuple 不用 set：`in` 走 == 比较，对不可哈希的值（dict/list）
-# 也只会返回 False，不会在校验器里抛 TypeError。
-_MODES = ("auto", "single", "two_phase")
+# CH-495（R14-API-1）：请求体硬上限（Flask MAX_CONTENT_LENGTH）；超限 → 413/E4131。
+_MAX_BODY_BYTES = 32 * 1024 * 1024
 
 # CH-476（R7-SVC-3）：同步池的排队上界与超时提示。闸门原为无超时 `acquire()`——
 # 小时级大批量占池期间，后续 `POST /jobs` 的请求线程无限期挂起（连接与线程一直被
@@ -193,6 +194,11 @@ def create_app(cfg: dict | None = None, root: Path | None = None,
                   "rotate_mb": writer.rotate_mb, "keep": writer.rotate_keep})
     writer.flush()
     app = Flask("doc2md")
+    # CH-495（R14-API-1）：请求体硬上限。Werkzeug 默认无界读取——editor token
+    # 单请求数百 MB 的 `text` 会同时放大进内存、blocks、edit_audit（前后双份）
+    # 与 FTS。32MiB 远超单块正文/批量路径清单的合法量级；超限由下方 413
+    # 处理器收敛为 E4131 JSON 契约（Werkzeug 默认回 HTML）。
+    app.config["MAX_CONTENT_LENGTH"] = _MAX_BODY_BYTES
     # CH-469：配置热更改为「copy-on-write + 锁」。原实现 `merged = dict(cfg)` 是浅拷贝，
     # `_deep` 就地改写共享的嵌套 dict，而并发请求线程正在读 cur() → 读到半改状态。
     # baseline 保存未叠加 override 的配置，用于把 override 文件算成「稀疏差量」
@@ -235,8 +241,13 @@ def create_app(cfg: dict | None = None, root: Path | None = None,
     def body() -> dict:
         # CH-483（R8-API-1）：数组/字符串/数字 JSON 会让调用方 `.get()` 抛
         # AttributeError → 500；请求体契约只接受 JSON 对象。
+        # CH-495（R14-API-2）：「非法 JSON / 错误 Content-Type」不再与「空体」
+        # 同形折叠成 {}——前者会让 PUT /settings 空转重写 override 回 200、
+        # POST /tokens 静默签出 reader token（明确失败优先于看似成功）。
         data = request.get_json(silent=True)
         if data is None:
+            if request.data:
+                raise E4001_BadRequest("invalid JSON body")
             return {}
         if not isinstance(data, dict):
             raise E4001_BadRequest("JSON object required")
@@ -282,6 +293,13 @@ def create_app(cfg: dict | None = None, root: Path | None = None,
     def _404(e):
         return err(E4041_NotFound("no such route"))
 
+    @app.errorhandler(413)
+    def _413(e):
+        # CH-495（R14-API-1）：MAX_CONTENT_LENGTH 超限同样收敛为 JSON 契约
+        # （Werkzeug 默认回 HTML 413，违反附录 C「响应错误一律走该契约」）。
+        return err(E4131_TooLarge("request body too large",
+                                  {"max_bytes": _MAX_BODY_BYTES}))
+
     @app.errorhandler(Exception)
     def _unhandled(e):
         """SVC-2（CH-471）：未归类异常一律走 {code,message,detail} JSON 契约。
@@ -324,10 +342,12 @@ def create_app(cfg: dict | None = None, root: Path | None = None,
         # CH-476（R7-SVC-2）：`mode` 白名单。原实现把任意 JSON 值直送 `tasks.mode`，
         # 消费侧（`convert`）只区分 `"single"`，其余一律按 auto 执行——于是 `mode:"singel"`
         # （拼写错）与 `mode:{}`（对象）都能入库，用户以为切了档位、实际跑的是默认档，
-        # 而队列行里留着一条永远不被识别的值。CLI 侧 `--mode` 早有 choices（`cli.py:107`），
-        # API 面补齐同一口径：非白名单 → 400/E4001，在入队/转换之前拒。
+        # 而队列行里留着一条永远不被识别的值。CLI `--mode` 与 `[s2].mode` 枚举共用
+        # `config.MODES`（CH-496 / F11），API 面补齐同一口径：非白名单 → 400/E4001，
+        # 在入队/转换之前拒。用 tuple 不用 set：`in` 走 == 比较，对不可哈希的值
+        # （dict/list）也只会返回 False，不会在校验器里抛 TypeError。
         mode = b.get("mode")
-        if mode is not None and mode not in _MODES:
+        if mode is not None and mode not in config.MODES:
             raise E4001_BadRequest("mode must be auto/single/two_phase",
                                    detail={"mode": type(mode).__name__})
         if not path:
@@ -431,12 +451,12 @@ def create_app(cfg: dict | None = None, root: Path | None = None,
             detail = {"reason": "edited_blocks_present",
                       "edited_blocks": edited_blocks,
                       "doc_id": doc_id, "source_key": source_key}
-            j = sched.submit_rejected(f.name, "E4091", detail,
+            j = sched.submit_rejected(f.name, E4091_DocOverwrite.code, detail,
                                       idem_key=_idem_for(f))
             emit(store, "job_rejected", doc_id or None, j.job_id,
-                  {"code": "E4091", "source": source}, logw())
+                  {"code": E4091_DocOverwrite.code, "source": source}, logw())
             return {"file": f.name, "job_id": j.job_id, "doc_id": doc_id,
-                    "status": "conflict", "code": "E4091",
+                    "status": "conflict", "code": E4091_DocOverwrite.code,
                     "edited_blocks": edited_blocks}
 
         def _finish_one(f, ir, doc_id, source_key, since, *, meta=None, gate=None):
@@ -483,16 +503,16 @@ def create_app(cfg: dict | None = None, root: Path | None = None,
             except E4041_NotFound:
                 # 行可能已被删除级联收走，也可能是 submit 新建后被墓碑拦截。
                 # 后者补 rejected 终态（mark 返回 False 时不再写事件，避免孤儿行）。
-                if sched.mark(j.job_id, "rejected", "E4041",
+                if sched.mark(j.job_id, "rejected", E4041_NotFound.code,
                               {"reason": "doc_deleted_during_conversion"}):
                     emit(store, "job_rejected", doc_id, j.job_id,
-                          {"code": "E4041", "source": "api"}, logw())
+                          {"code": E4041_NotFound.code, "source": "api"}, logw())
                 # CH-484：删除×在途转换——convert 刚写进 out/{doc_id}.zip 的产物
                 # 随本轮回滚成为孤儿（库面已不复活，字节却仍占盘）。仅在 doc 确已
                 # 出 docs 时 best-effort 清掉，绝不误删存活文档的载体。
                 drop_orphan_artifact(store, root, cur(), doc_id)
                 out.append({"file": f.name, "job_id": j.job_id, "doc_id": doc_id,
-                            "status": "rejected", "code": "E4041",
+                            "status": "rejected", "code": E4041_NotFound.code,
                             "reason": "doc_deleted_during_conversion"})
                 return
             except E4091_DocOverwrite as e:
@@ -543,7 +563,8 @@ def create_app(cfg: dict | None = None, root: Path | None = None,
             # CH-476（R7-SVC-3）：等待改为有界——超时明确回 503 + Retry-After，
             # 不让请求线程为上一个大批量的池无限期挂起。
             if not _SYNC_POOL_GATE.acquire(timeout=_SYNC_GATE_WAIT_S):
-                return jsonify({"code": "E5041", "message": "sync conversion pool busy",
+                return jsonify({"code": E5041_LlmUnavailable.code,
+                                "message": "sync conversion pool busy",
                                 "detail": {"reason": "sync_pool_busy",
                                            "waited_s": _SYNC_GATE_WAIT_S,
                                            "files": len(files)}}), 503, {
@@ -555,28 +576,33 @@ def create_app(cfg: dict | None = None, root: Path | None = None,
                                                 str(root / "out")),
                     workers=default_workers(cfg), precheck_edits=True)}
                 for f in pending:
-                    r = by_file.get(str(f)) or {"status": "error", "code": "E5000"}
+                    r = by_file.get(str(f)) or {"status": "error",
+                                                "code": Doc2mdError.code}
                     if r["status"] == "conflict":
                         out.append(_conflict_one(
                             f, r.get("doc_id", ""), r.get("source_key", ""),
                             r.get("edited_blocks"), "api_batch_precheck"))
                     elif r["status"] == "rejected":
-                        j = sched.submit_rejected(f.name, r.get("code", "E4221"),
+                        j = sched.submit_rejected(f.name,
+                                                  r.get("code", E4221_GateReject.code),
                                                   {"reason": r.get("message", "")},
                                                   idem_key=_idem_for(f))
                         emit(store, "job_rejected", None, j.job_id,
-                              {"code": r.get("code", "E4221"), "source": "api_batch"},
+                              {"code": r.get("code", E4221_GateReject.code),
+                               "source": "api_batch"},
                               logw())
                         out.append({"file": f.name, "job_id": j.job_id,
-                                    "status": "rejected", "code": r.get("code", "E4221")})
+                                    "status": "rejected",
+                                    "code": r.get("code", E4221_GateReject.code)})
                     elif r["status"] != "ok":
                         out.append({"file": f.name, "status": "error",
-                                    "code": r.get("code", "E5000")})
+                                    "code": r.get("code", Doc2mdError.code)})
                     else:
                         ir = read_ir(r.get("zip", ""))
                         if ir is None:
                             out.append({"file": f.name, "doc_id": r.get("doc_id", ""),
-                                        "status": "error", "code": "E5031"})
+                                        "status": "error",
+                                        "code": E5031_StorageError.code})
                             continue
                         _finish_one(f, ir, r.get("doc_id", ""),
                                     r.get("source_key", ""), since_seq,
@@ -601,7 +627,7 @@ def create_app(cfg: dict | None = None, root: Path | None = None,
                     e.detail.get("edited_blocks"), "api_precheck"))
                 continue
             except Doc2mdError as e:
-                if e.code == "E4221":
+                if e.code == E4221_GateReject.code:
                     j = sched.submit_rejected(f.name, e.code, e.detail,
                                               idem_key=_idem_for(f))
                     emit(store, "job_rejected", None, j.job_id,
@@ -795,7 +821,9 @@ def create_app(cfg: dict | None = None, root: Path | None = None,
 
         CH-469（V-5）：审计每块每次编辑一行，长期跑的库能积累到数万行且**每行带
         前后两份正文**——全量返回是这套 API 里最重的一次序列化。`?offset=&limit=`
-        走 SQL 窗口并回 `total`（不带 limit 仍取全部，契约不漂移）。
+        走 SQL 窗口并回 `total`；缺省 limit 取 `_MAX_ROWS` 硬顶（CH-495 / R14-API-10
+        清理：`_window` 恒返回 int，原 `limit is None` / `elif offset` 的
+        `LIMIT -1` 分支不可达，且旧 docstring「不带 limit 仍取全部」与硬顶矛盾）。
         """
         need("edit")
         get_doc(store, doc_id)
@@ -808,13 +836,8 @@ def create_app(cfg: dict | None = None, root: Path | None = None,
             args += (block_id,)
         total = store.q1(f"SELECT COUNT(*) c FROM edit_audit WHERE {cond}", args)["c"]
         sql = ("SELECT block_id, before, after, from_revision, to_revision, actor, ts, reason"
-               f" FROM edit_audit WHERE {cond} ORDER BY rowid")
-        if limit is not None:
-            sql += " LIMIT ? OFFSET ?"
-            args += (limit, offset)
-        elif offset:
-            sql += " LIMIT -1 OFFSET ?"
-            args += (offset,)
+               f" FROM edit_audit WHERE {cond} ORDER BY rowid LIMIT ? OFFSET ?")
+        args += (limit, offset)
         rows = store.q(sql, args)
         return jsonify({"doc_id": doc_id, "audit": [dict(r) for r in rows],
                         "total": total, "offset": offset, "limit": limit})
@@ -825,15 +848,11 @@ def create_app(cfg: dict | None = None, root: Path | None = None,
         need("delete")
         offset, limit = _window(default_limit=_MAX_ROWS)
         total = store.q1("SELECT COUNT(*) c FROM deletions")["c"]
+        # CH-495（R14-API-10）：同 doc_audit——`_window` 恒返回 int，
+        # `LIMIT -1` 分支不可达，直接走窗口查询。
         sql = ("SELECT doc_id, source_key, actor, ts, kind, cascade_json"
-               " FROM deletions ORDER BY rowid")
-        args: list = []
-        if limit is not None:
-            sql += " LIMIT ? OFFSET ?"
-            args = [limit, offset]
-        elif offset:
-            sql += " LIMIT -1 OFFSET ?"
-            args = [offset]
+               " FROM deletions ORDER BY rowid LIMIT ? OFFSET ?")
+        args: list = [limit, offset]
         out = []
         for r in store.q(sql, tuple(args)):
             d = dict(r)
@@ -874,11 +893,13 @@ def create_app(cfg: dict | None = None, root: Path | None = None,
         UA 检查只是把误用（前端应走 /events 总线）尽早挡回并给出引导，不构成鉴权。
         """
         ua = request.headers.get("User-Agent", "")
+        # CH-495（R14-API-3）：鉴权先于 UA 咨询——原顺序让未认证请求也能拿到
+        # 403/E4031 的 detail.rule 探测端点语义；先 need("read")，无 token 一律 401。
+        need("read")
         if not any(h in ua for h in SCRIPT_UA_HINTS):
             raise E4031_Forbidden(
                 "per-job events endpoint is CLI/script only; use /events bus",
                 detail={"ua": ua[:60], "rule": "FR-125", "advisory": True})
-        need("read")
         rows = store.q("SELECT * FROM events WHERE job_id=? ORDER BY seq", (job_id,))
         return jsonify({"events": [dict(r) for r in rows]})
 
@@ -892,8 +913,6 @@ def create_app(cfg: dict | None = None, root: Path | None = None,
     def put_settings():
         need("settings_put")
         b = body()
-        if not isinstance(b, dict):
-            raise E4001_BadRequest("settings body must be an object")
         unknown = config.unknown_keys(b)
         if unknown:
             raise E4001_BadRequest(

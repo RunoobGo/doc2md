@@ -526,6 +526,42 @@ def test_s3_paragraph_survives_page_break():
     assert half_sentence_heads(ir) == []
 
 
+def test_s3_list_item_continuation_survives_page_break():
+    """A5（CH-496）：列表项折行跨页——分页行先冲刷段缓冲，续行原被
+    `_join_list_continuation` 的 page_break 守卫挡回，产出
+    「列表项 + 分页 + 半句段落」。续行非结构起始、无缩进证据时必须并回。"""
+    ir = analyze([_page(
+        _line("- 这是一个很长的列表项内容，包含多个分句，结尾是逗号，", size=10.5),
+        _line("\x0c", size=0.0),
+        _line("续行内容在下一页结束。", size=10.5),
+    )])
+    assert _types(ir) == ["list_item", "page_break"]
+    assert ir.blocks[0].text == (
+        "- 这是一个很长的列表项内容，包含多个分句，结尾是逗号，续行内容在下一页结束。")
+    assert ir.blocks[0].flags.get("joined_across_break") is True
+
+
+def test_s3_short_complete_list_item_not_joined_across_page_break():
+    """A5 反例：语义完整的短列表项不得因跨页跳过变成「无边界吸附」。"""
+    ir = analyze([_page(
+        _line("- 甲。", size=10.5),
+        _line("\x0c", size=0.0),
+        _line("独立段落。", size=10.5),
+    )])
+    assert _types(ir) == ["list_item", "page_break", "paragraph"]
+
+
+def test_s3_continuation_led_line_joins_paragraph_across_page_break():
+    """A5 同类：续句标点起头的行跨分页仍应并回上一段（`_join_back` 原止步）。"""
+    ir = analyze([_page(
+        _line("这一段在逗号处停住，", size=10.5),
+        _line("\x0c", size=0.0),
+        _line("…下一页继续。", size=10.5),
+    )])
+    assert _types(ir) == ["paragraph", "page_break"]
+    assert ir.blocks[0].text == "这一段在逗号处停住，…下一页继续。"
+
+
 def test_render_keeps_blank_lines_inside_code_block():
     """CH-469：全局 `re.sub(r"\\n{3,}", "\\n\\n")` 会把 S3 emit_code 特意保留的
     代码块内空行压扁（代码内容失真）。压缩只允许作用于围栏之外。"""

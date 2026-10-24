@@ -768,11 +768,20 @@ class _DocxNumbering:
 
     @staticmethod
     def _fmt_num(n: int, fmt: str) -> str:
+        # CH-495（R14-PIPE-2）：罗马数值表原只到 10——n=40 渲染成 "xxxx"
+        # （应为 "xl"）、50 → "xxxxx"；补全到 1000 与 Word 口径一致。
+        # 字母序原按 %26 回绕——第 27 项变回 "a"（与首项撞号）；改为 Word 的
+        # 双字母续接口（z 之后是 aa、ab…，bijective base-26）。
         if fmt in ("lowerLetter", "upperLetter"):
-            ch = chr(ord("a") + (max(1, n) - 1) % 26)
-            return ch.upper() if fmt == "upperLetter" else ch
+            k, out = max(1, n), ""
+            while k > 0:
+                k, r = divmod(k - 1, 26)
+                out = chr(ord("a") + r) + out
+            return out.upper() if fmt == "upperLetter" else out
         if fmt in ("lowerRoman", "upperRoman"):
-            vals = ((10, "x"), (9, "ix"), (5, "v"), (4, "iv"), (1, "i"))
+            vals = ((1000, "m"), (900, "cm"), (500, "d"), (400, "cd"),
+                    (100, "c"), (90, "xc"), (50, "l"), (40, "xl"),
+                    (10, "x"), (9, "ix"), (5, "v"), (4, "iv"), (1, "i"))
             out, k = "", max(1, n)
             for v, s in vals:
                 while k >= v:
@@ -836,8 +845,7 @@ def _docx_style_name(el, d, ctx: _DocxCtx) -> str:
 
 
 
-def _docx_para_line(p, d, rels=None, ctx: _DocxCtx | None = None,
-                    *, text_box: bool = False) -> Line | None:
+def _docx_para_line(p, d, rels=None, ctx: _DocxCtx | None = None) -> Line | None:
     """段落 → Line（含 CH-459 的等宽 / 超链接 / 标题层级提示 / 分页符信号）。
 
     CH-476（R7-GAP-1，决策 D4「提取而非拒收」）：含修订痕迹的段落改走「接受后」口径。
@@ -861,7 +869,7 @@ def _docx_para_line(p, d, rels=None, ctx: _DocxCtx | None = None,
     use_all = (rev or ctx.has_sdt or ctx.has_custom_xml or ctx.has_links
                or ctx.has_fields or ctx.has_smart_tag)
     if use_all:
-        runs = _docx_all_runs(p, include_textbox=text_box)
+        runs = _docx_all_runs(p)
         # `w:del` 里的文本是 `w:delText`，`Run.text` 本就不取 → 拼出来即「接受后」正文
         raw_text = "".join(r.text or "" for r in runs)
     else:
@@ -922,12 +930,23 @@ def _docx_has_revision(el) -> bool:
     return any(e.tag in marks for e in el.iter())
 
 
-def _inside_textbox(el) -> bool:
+def _inside_textbox(el, stop=None) -> bool:
+    """el 的祖先链上是否有文本框/绘图边界（CH-495：可指定止步元素）。
+
+    `stop` 非空时只检查 el 到 stop（不含）之间的祖先——用于判定「run 是否属于
+    段落 p 自己这一层」：p 在 txbxContent 里时，p 的直接 run 不算「在文本框内」
+    （相对 p 无边界），而 p 内**嵌套**文本框的 run 算（相对 p 有 drawing 边界）。
+    """
     tags = (_W_NS + "drawing", _W_NS + "txbxContent", _MC_NS + "AlternateContent")
-    return any(a.tag in tags for a in el.iterancestors())
+    for a in el.iterancestors():
+        if stop is not None and a is stop:
+            return False
+        if a.tag in tags:
+            return True
+    return False
 
 
-def _docx_all_runs(p, *, include_textbox: bool = False) -> list:
+def _docx_all_runs(p) -> list:
     """段落内**全部** run（含 `w:ins` / `w:hyperlink` 包裹者），包装成 python-docx Run。
 
     只在 `_docx_has_revision` 命中时调用；`Run.text` 沿用 python-docx 口径
@@ -936,8 +955,13 @@ def _docx_all_runs(p, *, include_textbox: bool = False) -> list:
     from docx.text.run import Run
     # CH-485（R9-PIPE-1）：文本框/绘图里的 run 由 _docx_textbox_paragraphs 单独
     # 产出；若在此一并拼入宿主段落，会重复（AlternateContent 双分支还会翻倍）。
-    return [Run(r, p) for r in p._element.iter(f"{_W_NS}r")
-            if include_textbox or not _inside_textbox(r)]
+    # CH-495（R14-PIPE-1）：边界改按「相对段落 p」判定——txbxContent 内的段落
+    # 收自己的全部 run（原 include_textbox=True 的口径），但其内嵌套文本框的
+    # run 归嵌套层段落单独产出，不再拼进宿主（原口径下嵌套文本一段文本 ×2，
+    # 叠加 Choice/Fallback 双分支扁平遍历可达 ×4）。
+    pe = p._element
+    return [Run(r, p) for r in pe.iter(f"{_W_NS}r")
+            if not _inside_textbox(r, stop=pe)]
 
 
 def _name_is_mono(name: str | None) -> bool:
@@ -1124,8 +1148,12 @@ def _docx_table_rows(tbl) -> list[tuple[list[str], bool, int]]:
 def _docx_textbox_paragraphs(container, seen: set[int] | None = None):
     """按文档顺序产出文本框内的 w:p（AlternateContent 只取 Choice 一支）。
 
-    Office 模板可能把文本框嵌套在另一个文本框/绘图中；对选中的 txbxContent
-    扁平遍历全部 w:p（含 sdt/customXml/嵌套文本框），并用元素 id 去重。
+    Office 模板可能把文本框嵌套在另一个文本框/绘图中。CH-495（R14-PIPE-1）：
+    原实现对选中的 txbxContent 扁平 `iter(w:p)`——嵌套 AlternateContent 的
+    Choice 与 Fallback 两支 w:p 全部产出（文本翻倍），且宿主段落拼 run 时再
+    收一遍（叠加至 ×4）。现改为层级递归：本层段落由 `_txbx_paragraphs` 产出
+    后即向下钻进段内嵌套文本框，嵌套层段落由嵌套层自己产出一次；元素 id 去重
+    兜底（防模板病态自引用）。
     """
     seen = seen if seen is not None else set()
     for child in container:
@@ -1136,12 +1164,32 @@ def _docx_textbox_paragraphs(container, seen: set[int] | None = None):
             if branch is not None:
                 yield from _docx_textbox_paragraphs(branch, seen)
         elif child.tag == f"{_W_NS}txbxContent":
-            for p in child.iter(f"{_W_NS}p"):
-                if id(p) not in seen:
-                    seen.add(id(p))
-                    yield p
+            yield from _txbx_paragraphs(child, seen)
         else:
             yield from _docx_textbox_paragraphs(child, seen)
+
+
+def _txbx_paragraphs(txbx, seen: set[int]):
+    """单个 txbxContent 层内的 w:p：产出本层段落，再递归段内嵌套文本框。
+
+    sdt / customXml / 嵌套表格等包装层透明下钻（R8-PIPE-2 口径，本层被包起来
+    的 w:p 不丢）；嵌套 AlternateContent 仍只取 Choice 一支；嵌套文本框经
+    `_docx_textbox_paragraphs` 的 txbxContent 分支进入，每层段落恰好产出一次。
+    """
+    for child in txbx:
+        if child.tag == f"{_W_NS}p":
+            if id(child) not in seen:
+                seen.add(id(child))
+                yield child
+            yield from _docx_textbox_paragraphs(child, seen)
+        elif child.tag == f"{_MC_NS}AlternateContent":
+            branch = child.find(f"{_MC_NS}Choice")
+            if branch is None:
+                branch = child.find(f"{_MC_NS}Fallback")
+            if branch is not None:
+                yield from _docx_textbox_paragraphs(branch, seen)
+        else:
+            yield from _txbx_paragraphs(child, seen)
 
 
 def _iter_docx_blocks(container):
@@ -1265,7 +1313,7 @@ def read_docx(path: str | Path, fmt: str | None = None) -> list[RawPage]:
     # 无文本框的文档不做全树遍历（常见路径省一次 O(全部 XML 元素) 扫描）。
     if ctx.has_textbox:
         for p_el in _docx_textbox_paragraphs(d.element.body):
-            ln = _docx_para_line(_dp.Paragraph(p_el, d), d, ctx=ctx, text_box=True)
+            ln = _docx_para_line(_dp.Paragraph(p_el, d), d, ctx=ctx)
             if ln is not None:
                 lines.append(ln)
     lines += _docx_notes_lines(d, ctx)

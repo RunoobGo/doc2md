@@ -65,7 +65,7 @@ def test_worker_orphan_zip_purged_on_e4041(tmp_cfg, tmp_path, monkeypatch):
     sched = Scheduler(store)
     sched.submit("d1", "s1", source_path=str(src), mode=None)
 
-    def racing_batch(files, **kw):
+    def racing_batch(*args, **kw):
         # 真实 delete_doc 级联（收走 docs + tasks），随后 pool 把产物落盘——
         # 复刻「删除在转换完成之前落地、pool 写完才返回」的真实时序。
         repo.delete_doc(store, "d1", "tester", root)
@@ -102,7 +102,7 @@ def test_worker_keeps_live_doc_artifact_on_e4041(tmp_cfg, tmp_path, monkeypatch)
     sched = Scheduler(store)
     sched.submit("alive", "s1", source_path=str(src), mode=None)
 
-    def racing_batch(files, **kw):
+    def racing_batch(*args, **kw):
         # 只收走 task 行（docs 仍在库）→ mark 返回 False → E4041，但文档存活。
         with store.tx() as t:
             t.execute("DELETE FROM tasks WHERE doc_id='alive'")

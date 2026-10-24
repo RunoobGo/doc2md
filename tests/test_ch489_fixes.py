@@ -254,7 +254,7 @@ def test_drain_reads_and_saves_duplicate_path_once(tmp_path, tmp_cfg, monkeypatc
 
     ir = IR(doc_id="cons", source_key="sk", source_name="x.pdf",
             blocks=[Block(id="b1", text="正文")])
-    monkeypatch.setattr(worker, "run_batch", lambda files, **_kw: [{
+    monkeypatch.setattr(worker, "run_batch", lambda *args, **_kw: [{
         "file": str(src), "status": "ok", "zip": "fake.zip", "doc_id": "cons",
         "blocks": 1, "code": "", "message": ""}])
     reads: list[str] = []

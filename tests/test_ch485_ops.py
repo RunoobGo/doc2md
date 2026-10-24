@@ -104,7 +104,7 @@ def test_junction_not_followed_by_dirguard(tmp_path):
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows junction semantics")
 def test_sweep_tmp_removes_junction_not_target(tmp_path):
-    from doc2md import cron
+    from doc2md.ops.tmpclean import sweep_tmp
     root = tmp_path / "work"
     tmp = root / "tmp"
     outside = tmp_path / "outside"
@@ -115,7 +115,7 @@ def test_sweep_tmp_removes_junction_not_target(tmp_path):
     link = tmp / "jump"
     if not _mklink_junction(link, outside):
         pytest.skip("cannot create junction in this environment")
-    cleaned = cron.sweep_tmp({"paths": {"root": str(root), "tmp": str(tmp)},
+    cleaned = sweep_tmp({"paths": {"root": str(root), "tmp": str(tmp)},
                               "perf": {"stale_job_minutes": 0}}, root)
     assert cleaned >= 1
     assert not link.exists()

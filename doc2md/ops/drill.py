@@ -3,7 +3,7 @@
 一条命令跑完闭环：**快照 → 外置加密 → 模拟数据丢失 → 轮出确认 → 解密恢复 →
 integrity_check → 内容比对**。全程在 `work/tmp/drill-<ts>/` 隔离沙箱内进行，
 不触碰线上 `state.sqlite`（只读拷贝），演练结束即清理（`--keep` 可留存取证）。
-CH-476（R7-OPS-1）：`--keep` 的 `drill-*` 目录由 `cron.sweep_tmp` **永久豁免**——
+CH-476（R7-OPS-1）：`--keep` 的 `drill-*` 目录由 `ops.tmpclean.sweep_tmp` **永久豁免**——
 serve 启动清扫与 `cron --daily` 共用该函数，原实现 30 分钟后就把取证整个 rmtree，
 「留存取证」承诺兑现不了。
 

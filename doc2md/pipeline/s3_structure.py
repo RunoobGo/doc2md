@@ -56,7 +56,9 @@ _BULLET = re.compile(r"^\s*([·•‣∙○●■□\-\*])\s+")
 # 分隔符集含全角 `．）`，空格可选（"1.安装依赖" 同样成立）。
 # 正文首字用先行断言而非 `\S`：S4 复用本式取 `m.end()` 切序号，多吃一个字符会把
 # 列表项内容削掉首字（"1. 安装依赖" → "1. 装依赖"）。
-_ORDERED_ITEM = re.compile(r"^\s*(\d{1,3})[、.．)）]\s*(?!\d)(?=\S)")
+# CH-495（R14-PIPE-12）：S4 直接导入本式（dev-plan §列表渲染的既定设计），
+# 跨模块共享契约转正为公共名，不再是私有符号。
+ORDERED_ITEM = re.compile(r"^\s*(\d{1,3})[、.．)）]\s*(?!\d)(?=\S)")
 # CH-430：只能「续句」不能「起句」的行首标点 —— 这类行必是上一段的延续，
 # 即便中间被标题行或空行打断（PDF 折行 + 页眉/编号标题插入是常态），
 # 也必须并回前一个段落块，否则产出「半句开头」块（G1 明令禁止）。
@@ -212,7 +214,7 @@ def _is_ordered_item(text: str) -> bool:
     编号在 S4 保留（`1. `），不再退化成段落或假 H1。
     """
     t = (text or "").strip()
-    if not _ORDERED_ITEM.match(t) or len(t) >= 30:
+    if not ORDERED_ITEM.match(t) or len(t) >= 30:
         return False
     return not t.endswith(("。", "！", "？", ".", "!", "?"))
 
@@ -430,6 +432,11 @@ def _join_list_continuation(blocks: list[Block], text: str, ln,
             return False
         if b.type == "heading":
             continue
+        if b.type == "page_break":
+            # CH-496 / A5：列表项折行恰好落在页界时，分页行先冲刷段缓冲，
+            # 续行到这里若被 page_break 挡回就退化成半句段落。分页符不是
+            # 语义边界（上面的结构起始/缩进守卫才是），可穿过。
+            continue
         return False
     return False
 
@@ -478,9 +485,10 @@ def _wrap_space(b: Block, ln) -> bool:
 def _join_back(blocks: list[Block], text: str, font: dict, ln=None) -> Block | None:
     """把续句行并回最近的内容块；成功返回被并入的块，失败返回 None。
 
-    CH-459：遇到 quote / code / table / page_break 即止步——这些是结构块，
-    续句穿过它们并回更前的段落会制造错位（原实现它们不存在，该分支不可达）。
-    标题块照旧可穿过（CH-430：页眉/编号标题插在折行中间是常态）。
+    CH-459：遇到 quote / code / table 即止步——这些是结构块，续句穿过它们
+    并回更前的段落会制造错位（原实现它们不存在，该分支不可达）。标题块照旧
+    可穿过（CH-430：页眉/编号标题插在折行中间是常态）；CH-496 / A5 起
+    page_break 也可穿过——分页符只是版面事件，续句标点起头已经证明是同一句。
 
     `ln`（O-01 / C-04）：续行本身。行缘空白证据（`leading_space`）与块尾
     `line_trail` 共同决定折行点是否补空格；缺省 None 时按无证据处理
@@ -497,6 +505,8 @@ def _join_back(blocks: list[Block], text: str, font: dict, ln=None) -> Block | N
             return b
         if b.type == "heading":
             continue
+        if b.type == "page_break":
+            continue                  # CH-496 / A5：续句跨页（见 docstring）
         return None
     return None
 
@@ -1154,19 +1164,29 @@ def _flush(buf: list[str], blocks: list[Block], font: dict, page: int,
 
     CH-473（PIPE-9）：不再收 `seq` 预写 id——唯一赋值点是 `analyze` 收尾重排。
     `lines`（O-01）：与 `buf` 逐行对齐的来源行（可含 None 占位）。跨行拼接时
-    把行缘空白几何证据（`trailing_space` / `leading_space`）传给 `_append_line`，
+    把行缘空白几何证据（`trailing_space` / `leading_space`）传给 `_join_line`，
     折行恰好切在空格上时补回该空格（"数字 2026" → "数字" + "2026"）。
     """
     if not buf:
         return
-    text = buf[0]
+    # CH-495（R14-PERF-7）：原实现逐行 `text = _append_line(text, nxt)` 整串复制，
+    # 超长段落（PDF 无断行分段时 buf 可达数千行）O(n²)。`_append_line`/`_join_line`
+    # 的判定只依赖累积串的**末字符**（连字符剥除 / 数字断行 / 中西文空白），
+    # 改为片段列表 + 末字符跟踪，收尾一次 join → O(n)，拼接口径逐字节等价。
+    pieces = [buf[0]]
+    tail = buf[0][-1:]
     for i, nxt in enumerate(buf[1:], start=1):
         prev_ln = lines[i - 1] if lines and i - 1 < len(lines) else None
         next_ln = lines[i] if lines and i < len(lines) else None
         space = bool(getattr(prev_ln, "trailing_space", False)
                      or getattr(next_ln, "leading_space", False))
-        text = _append_line(text, nxt, space=space)
-    text = text.strip()
+        strip_hyphen = tail.endswith("-") and nxt[:1].islower()
+        frag = _join_line(tail, nxt, space=space)
+        if strip_hyphen:
+            pieces[-1] = pieces[-1][:-1]
+        pieces.append(frag)
+        tail = frag[-1:] or ("".join(pieces))[-1:]
+    text = "".join(pieces).strip()
     if text:
         last = lines[-1] if lines else None
         blocks.append(Block(id="", type="paragraph", text=text,
@@ -1192,7 +1212,7 @@ def _append_line(a: str, b: str, *, space: bool = False) -> str:
 
 
 def _join_line(a: str, b: str, *, space: bool = False) -> str:
-    """跨行拼接的**待追加片段**（只经 _append_line 消费，CH-469）。
+    """跨行拼接的**待追加片段**（经 _append_line 与 _flush 消费，CH-469 / CH-495）。
 
     连字符断词分支只返回 b：整串 `a[:-1] + b` 是替换语义的写法，
     而两个调用方都是追加语义，直接返回整串会产出 "under-underscore"

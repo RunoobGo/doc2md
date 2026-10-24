@@ -218,16 +218,24 @@ class Store:
     def __init__(self, path: str | Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        # CH-496：目录必须先收紧再建库。原顺序先 `_migrate()`（首连即创建
+        # state.sqlite / -wal / -shm）再 chmod 目录与主库——新建的 WAL/SHM
+        # 在窗口内沿用进程 umask（常见 0644），且目录此刻仍可能是 755。
+        from ..security.perms import ensure_private
+        ensure_private(self.path.parent, 0o700)
         self._local = threading.local()
         self._conns: weakref.WeakSet[_ConnRef] = weakref.WeakSet()
         self._lock = threading.Lock()
         self._migrate()
         # NFR-20：状态库含正文与编辑审计，目录/库文件不能依赖调用方先前的
         # chmod。Windows 上 chmod 不落 ACL，统一走 ensure_private（POSIX chmod，
-        # Windows icacls）；WAL/SHM 随同目录继承私有 ACL。
-        from ..security.perms import ensure_private
-        ensure_private(self.path.parent, 0o700)
+        # Windows icacls）；WAL/SHM 随主库权限创建，这里再显式收紧一次，
+        # 覆盖「首次连接已建出 WAL」的情形。
         ensure_private(self.path, 0o600)
+        for suffix in ("-wal", "-shm"):
+            side = self.path.with_name(self.path.name + suffix)
+            if side.exists():
+                ensure_private(side, 0o600)
 
     def _new_conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.path), timeout=30.0, isolation_level=None)
@@ -278,6 +286,15 @@ class Store:
 
     def _migrate(self) -> None:
         cur_ver = int(self._conn.execute("PRAGMA user_version").fetchone()[0])
+        # CH-495（R14-STOR-8）：fail-closed——库版本比本二进制新（旧版程序打开
+        # 新版库）时拒绝继续。DDL 尾部的 `PRAGMA user_version={DB_VERSION}` 会把
+        # 新库的版本戳**静默降级**，且旧代码读不懂新结构的列语义，任何写入都可能
+        # 破坏数据。明确报错优于带病运行（与 NFR-18「备份必须加密」同口径）。
+        if cur_ver > DB_VERSION:
+            raise RuntimeError(
+                f"state.sqlite user_version={cur_ver} is newer than this build "
+                f"(DB_VERSION={DB_VERSION}); upgrade doc2md before opening this "
+                "database (refusing to run to avoid silent downgrade/corruption)")
         # CH-476（R7-STOR-2，决策 D1）：DDL 改为**无条件**执行。原 `if cur_ver <
         # DB_VERSION` 把「加 schema 必须 bump user_version」当作纪律，而 CH-469 补
         # ix_events_*/ix_tasks_doc 恰恰没 bump——user_version=5 的存量库永远缺这些

@@ -1,5 +1,6 @@
 from .default_toml import DEFAULT_TOML, TOML_BASENAME
 from .loader import (
+                     MODES,
                      PROFILES,
                      RUNTIME_IMMUTABLE_KEYS,
                      SECTIONS,
@@ -15,7 +16,7 @@ from .loader import (
                      validate,
 )
 
-__all__ = ["load", "get", "path_setting", "validate", "PROFILES", "SPEC", "SECTIONS",
+__all__ = ["load", "get", "path_setting", "validate", "MODES", "PROFILES", "SPEC", "SECTIONS",
            "ConfigError", "unknown_keys", "check_runtime_immutable",
            "RUNTIME_IMMUTABLE_KEYS", "is_loopback_bind", "last_unknown_keys",
            "DEFAULT_TOML", "TOML_BASENAME"]

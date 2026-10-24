@@ -430,7 +430,7 @@
 | 实际结果 | 四种形态均正确判为 list_item；DOCX 编号归一为 `N. `（CH-485/R9-PIPE-3） |
 | 通过状态 | **通过** |
 | 优先级 | P0 |
-| 覆盖指标 | `_BULLET` / `_ORDERED_ITEM` / `_normalize_marker` |
+| 覆盖指标 | `_BULLET` / `ORDERED_ITEM` / `_normalize_marker` |
 
 #### TC-M5-004 代码块三模式与缩进重建
 

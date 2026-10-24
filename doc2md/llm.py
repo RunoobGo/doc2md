@@ -852,15 +852,22 @@ def _parse_ops(resp: dict) -> list[dict]:
 
 
 def _cfg_vendor_models(cfg) -> str:
-    """paths.vendor_models 相对 paths.root 解析（llm 基座不 import config）。"""
+    """paths.vendor_models 相对 paths.root 解析（llm 基座保持模块级零项目依赖）。
+
+    CH-495（R14-ARCH-2）：口径与 `config.path_setting` 对齐——原实现不
+    expanduser、且只剥实际根段名不剥默认根名 "work"：`--root /data/d2m` 下
+    默认值 "work/models" 被解析成 "/data/d2m/work/models"，而 cli/doctor
+    （走 path_setting）解析成 "/data/d2m/models"，同一配置两个模型目录。
+    """
+    from .config.loader import DEFAULT_ROOT_NAME
     v = str(_cfg_get(cfg, "paths.vendor_models", "") or "")
     if not v:
         return ""
-    p = Path(v)
+    p = Path(v).expanduser()
     if p.is_absolute():
         return str(p)
-    root = Path(str(_cfg_get(cfg, "paths.root", ".") or "."))
-    if p.parts and p.parts[0] == root.name:
+    root = Path(str(_cfg_get(cfg, "paths.root", ".") or ".")).expanduser()
+    if p.parts and p.parts[0] in (root.name, DEFAULT_ROOT_NAME):
         p = Path(*p.parts[1:])
     return str(root / p)
 
@@ -984,7 +991,10 @@ def apply_ops(ir, accepted: list[dict], *, return_report: bool = False):
                 before = {"text": b.text or "",
                           "prev_text": (ir.blocks[idx - 1].text
                                         if idx is not None and idx > 0 else "")}
-                if _merge_block(ir, b):
+                if _merge_block(ir, b, idx):
+                    # CH-496 / B5：被吸收块已从 ir.blocks 移除，索引必须同步——
+                    # 否则后续 op 仍能命中它并「计数成功、产物没变」。
+                    index.pop(b.id, None)
                     changed = True
                 else:
                     reason = "merge_rejected"
@@ -1045,10 +1055,15 @@ def _split_block(ir, b, op: dict, index: dict | None = None) -> bool:
     return True
 
 
-def _merge_block(ir, b) -> bool:
-    """并入前一块（无前一块 / 前块是结构块时拒绝——段落合并没有合理目标）。"""
-    idx = ir.blocks.index(b)
-    if idx == 0:
+def _merge_block(ir, b, idx: int | None = None) -> bool:
+    """并入前一块（无前一块 / 前块是结构块时拒绝——段落合并没有合理目标）。
+
+    `idx` 由调用方（apply_ops）预计算，避免再次 `list.index` 全表扫描；
+    缺省时自算，保持直接调用方的健壮性。
+    """
+    if idx is None:
+        idx = ir.blocks.index(b)
+    if idx <= 0 or idx >= len(ir.blocks) or ir.blocks[idx] is not b:
         return False
     prev = ir.blocks[idx - 1]
     # SVC-1：validator 已在写集里拦 immutable 前驱；此处二次设防，覆盖绕过校验

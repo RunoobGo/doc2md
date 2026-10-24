@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Callable, Sequence
 
 from .. import config
-from ..errors import Doc2mdError
+from ..errors import Doc2mdError, E4091_DocOverwrite, E4221_GateReject
 
 
 def default_workers(cfg: dict | None = None) -> int:
@@ -106,6 +106,24 @@ def _zip_front_version(zp: Path, doc_id: str) -> bool:
     return fm.get("pipeline_version") == PIPELINE_VERSION
 
 
+def _skip_store(db: Path):
+    """CH-495（R14-PERF-3）：`skip_existing_hit` 的 Store 进程内缓存。
+
+    原实现每件文件新建 Store——构造含全量 DDL 重放（数十条 IF NOT EXISTS）
+    加 5 次列探测，千件串行批纯重复开销。池 worker 是常驻进程，缓存跨件复用；
+    生命周期与 cron 的 Store 同口径（进程退出即回收，不做显式 close，
+    CH-473 / R5-SVC-8 注释）。构造失败不缓存，调用方 fail-open 语义不变。
+    """
+    from ..storage.db import Store
+    s = _SKIP_STORES.get(str(db))
+    if s is None:
+        s = _SKIP_STORES[str(db)] = Store(db)
+    return s
+
+
+_SKIP_STORES: dict = {}
+
+
 def skip_existing_hit(cfg: dict | None, path: str | Path) -> tuple[str, str, str] | None:
     """O-08（C-27）：`--skip-existing` 判据——内容寻址 doc_id 已命中库内 docs 行。
 
@@ -126,7 +144,6 @@ def skip_existing_hit(cfg: dict | None, path: str | Path) -> tuple[str, str, str
        产物 / 字段缺失 / 读不了 → None 照常重转（fail-closed，见助手）。
     """
     from ..ir.model import hash_of_path
-    from ..storage.db import Store
     root = Path(config.path_setting(cfg or {}, "paths.root", "."))
     db = root / "state.sqlite"
     try:
@@ -137,12 +154,8 @@ def skip_existing_hit(cfg: dict | None, path: str | Path) -> tuple[str, str, str
     db_hit: bool | None = None
     if db.is_file():
         try:
-            s = Store(db)
-            try:
-                db_hit = bool(s.q1(
-                    "SELECT 1 AS x FROM docs WHERE doc_id=?", (doc_id,)))
-            finally:
-                s.close()
+            db_hit = bool(_skip_store(db).q1(
+                "SELECT 1 AS x FROM docs WHERE doc_id=?", (doc_id,)))
         except Exception:                    # noqa: BLE001 — 库损坏等：fail-open
             return None
     out_dir = config.path_setting(cfg or {}, "paths.out", root,
@@ -211,19 +224,19 @@ def _convert_one(path: str, cfg: dict | None, mode: str | None,
         detail = exc.detail or {}
         # CH-490：预检命中的编辑冲突是「明确的业务终态」，不是内部错误；
         # 与 E4221 一样回传可判定 status，API 侧保持 conflict/202 语义。
-        status = ("rejected" if exc.code == "E4221"
-                  else "conflict" if exc.code == "E4091" else "error")
+        status = ("rejected" if exc.code == E4221_GateReject.code
+                  else "conflict" if exc.code == E4091_DocOverwrite.code else "error")
         return Summary(file=str(path), status=status,
                        doc_id=str(detail.get("doc_id", "")),
                        source_key=str(detail.get("source_key", "")),
                        code=exc.code, message=str(exc),
-                       gate=_gate(detail) if exc.code == "E4221" else None,
+                       gate=_gate(detail) if exc.code == E4221_GateReject.code else None,
                        edited_blocks=int(detail.get("edited_blocks", 0) or 0)
-                       if exc.code == "E4091" else 0).to_dict()
+                       if exc.code == E4091_DocOverwrite.code else 0).to_dict()
     except Exception as exc:                # noqa: BLE001 — 解析层未预期异常不得拖垮整批
         # CH-485（R9-PIPE-9）：第三方解析异常的消息可能夹带页正文；任务明细会
         # 经 GET /jobs 暴露给 reader。只留类名，与 worker died 同口径。
-        return Summary(file=str(path), status="error", code="E5000",
+        return Summary(file=str(path), status="error", code=Doc2mdError.code,
                        message=f"{type(exc).__name__}").to_dict()
     # O-03（C-21）：与串行 CLI 共用同一行组装单点，共有字段逐字节同构
     return result_row(path, res)
@@ -234,12 +247,14 @@ def _gate(detail: dict) -> dict:
             "reasons": detail.get("reasons")}
 
 
-def run_batch(paths: Sequence[str | Path], *, cfg: dict | None = None,
+def run_batch(paths: Sequence[str | Path] = (), *, cfg: dict | None = None,
               mode: str | None = None, out_dir: str | Path | None = None,
               workers: int | None = None, start_method: str | None = None,
               on_result: Callable[[dict], None] | None = None,
               force: bool = False, precheck_edits: bool = False,
-              skip_existing: bool = False) -> list[dict]:
+              skip_existing: bool = False,
+              plans: Sequence[tuple[str | Path, str | None, bool]] | None = None,
+              ) -> list[dict]:
     """有界进程池批量转换；顺序不保证，完成即回调。单文件或 workers=1 走串行同一路径。
 
     start_method="spawn" 用于在 Linux 上复现 Windows 的进程启动方式（验收用）；
@@ -248,13 +263,22 @@ def run_batch(paths: Sequence[str | Path], *, cfg: dict | None = None,
     `skip_existing`（O-08 / C-27）：doc_id 已入库即跳过（判据见
     `skip_existing_hit`）。串行快路径与进程池路径共用 `_convert_one` 的同一
     处判定，两条出口的跳过行同构。
+
+    `plans`（CH-497 / B1）：逐作业 `(path, mode, force)`。给出时 `mode` / `force`
+    不再生效，且整串作业只建一个进程池——drain 内多档位原先每组重建一次池，
+    组间固定开销按档位数累加。`paths` 与 `plans` 互斥。`paths` / `plans` 均为空
+    （或都未给出）时返回 `[]` 而非报错；`plans` 与非空 `paths` 同时给出则抛
+    `ValueError`。
     """
-    files = [str(p) for p in paths]
-    if not files:
+    if plans is not None and paths:
+        raise ValueError("pass either paths or plans, not both")
+    jobs = ([(str(p), m, bool(f)) for p, m, f in plans] if plans is not None
+            else [(str(p), mode, bool(force)) for p in paths])
+    if not jobs:
         return []
     out = str(out_dir) if out_dir else None
     n = workers if workers is not None else default_workers(cfg)
-    n = max(1, min(int(n), len(files)))
+    n = max(1, min(int(n), len(jobs)))
     results: list[dict] = []
     # CH-469：单文件墙钟上限（完整口径见并行分支注释）。先算 window——串行分支共用。
     per_file_s = 0
@@ -270,9 +294,9 @@ def run_batch(paths: Sequence[str | Path], *, cfg: dict | None = None,
     # 语义不一致（dev-plan 亦未声明此例外）。配了上限（>0）时落到下方单 worker
     # 进程池：同一 wait 空窗判定、同一 E5000 记账、同一 terminate 收尾；默认 0
     # （不设限）保持进程内零开销、零行为变化（G6 不受影响）。
-    if (n == 1 or len(files) == 1) and window is None:
-        for f in files:
-            r = _convert_one(f, cfg, mode, out, force=force,
+    if (n == 1 or len(jobs) == 1) and window is None:
+        for f, jmode, jforce in jobs:
+            r = _convert_one(f, cfg, jmode, out, force=jforce,
                              precheck_edits=precheck_edits,
                              skip_existing=skip_existing)
             results.append(r)
@@ -300,9 +324,9 @@ def run_batch(paths: Sequence[str | Path], *, cfg: dict | None = None,
     try:
         # submit 也要在 try 内：BrokenProcessPool / 资源耗尽时否则会跳过
         # finally 的 shutdown+terminate，把 worker 留到解释器退出（X-17 回归面）。
-        futs = {pool.submit(_convert_one, f, cfg, mode, out, force,
+        futs = {pool.submit(_convert_one, f, cfg, jmode, out, jforce,
                             precheck_edits, skip_existing): f
-                for f in files}
+                for f, jmode, jforce in jobs}
         pending = set(futs)
         while pending:
             done, pending_now = wait(pending, timeout=window, return_when=FIRST_COMPLETED)
@@ -311,7 +335,8 @@ def run_batch(paths: Sequence[str | Path], *, cfg: dict | None = None,
                 # 但批次必须给出结论——逐个记超时并取消排队件。
                 for fut in pending:
                     fut.cancel()
-                    r = Summary(file=str(futs[fut]), status="error", code="E5000",
+                    r = Summary(file=str(futs[fut]), status="error",
+                                code=Doc2mdError.code,
                                 message=f"batch file timeout after {per_file_s}s").to_dict()
                     results.append(r)
                     if on_result:
@@ -324,7 +349,8 @@ def run_batch(paths: Sequence[str | Path], *, cfg: dict | None = None,
                     r = fut.result()
                 except Exception as exc:        # noqa: BLE001 — 进程崩溃（OOM killer 等）
                     # CH-469：只带类名，不带 str(exc)（pdfminer 异常消息常夹带页正文，NFR-20）
-                    r = Summary(file=str(futs[fut]), status="error", code="E5000",
+                    r = Summary(file=str(futs[fut]), status="error",
+                                code=Doc2mdError.code,
                                 message=f"worker died: {type(exc).__name__}").to_dict()
                 results.append(r)
                 if on_result:

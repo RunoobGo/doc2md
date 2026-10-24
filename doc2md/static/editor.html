@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<title>Doc2md 审阅编辑器（M9a 最小前端 + T4 队列可视化）</title>
+<title>Doc2md 审阅编辑器（M9a 最小前端 + T4 队列可视化 + G4' 回滚）</title>
 <style>
   :root { color-scheme: light dark; }
   body { font: 14px/1.6 system-ui, "PingFang SC", "Microsoft YaHei", sans-serif;
@@ -47,10 +47,17 @@
                         cursor: pointer; text-decoration: underline; font-size: inherit; }
   #qstamp { font-size: 12px; opacity: .6; }
   #qempty { font-size: 12.5px; opacity: .7; padding: 6px 0; }
+  /* --- G4'（FR-211）块历史 / 回滚 ---------------------------------------- */
+  .hist { border-top: 1px dashed #8886; margin-top: 8px; padding-top: 6px; font-size: 12.5px; }
+  .histrow { border-bottom: 1px solid #8882; padding: 4px 0; }
+  .histrow:last-child { border-bottom: none; }
+  .histprev { white-space: pre-wrap; font-family: ui-monospace, monospace; font-size: 11.5px;
+              opacity: .85; margin: 2px 0 4px; overflow-wrap: anywhere; }
+  .histrow button { font-size: 12px; padding: 2px 8px; }
 </style>
 </head>
 <body>
-<h1>Doc2md 审阅编辑器 · M9a（revision 锁定与重取） · T4（队列可视化）</h1>
+<h1>Doc2md 审阅编辑器 · M9a（revision 锁定与重取） · T4（队列可视化） · G4'（历史与回滚）</h1>
 
 <section id="queue">
   <div class="bar">
@@ -67,7 +74,7 @@
     </tr></thead>
     <tbody id="qrows"></tbody>
   </table>
-  <div id="qempty" hidden>暂无任务。通过 <code>doc2md convert &lt;路径&gt; --async</code> 或
+  <div id="qempty" hidden>暂无任务。通过 <code>doc2md work --enqueue &lt;路径&gt;</code> 或
     <code>POST /jobs</code> 入队后，这里显示进度与失败原因（只含元数据，不含正文，NFR-20）。</div>
 </section>
 
@@ -280,7 +287,9 @@ function renderBlocks(list) {
       (b.immutable ? "<span>immutable</span>" : "") + "</div>" +
       `<textarea ${b.immutable ? "disabled" : ""}>${esc(b.text || "")}</textarea>` +
       `<div class="meta"><button data-act="save">保存</button>` +
-      `<button data-act="refresh">重取</button><button data-act="audit">审计</button></div>`;
+      `<button data-act="refresh">重取</button><button data-act="audit">审计</button>` +
+      `<button data-act="history">历史</button></div>` +
+      `<div class="hist" data-hist hidden></div>`;
     $("blocks").appendChild(div);
   });
 }
@@ -333,7 +342,11 @@ async function refetch(bid, rev) {
 }
 
 async function showAudit(bid) {
-  const j = await api(`/docs/${encodeURIComponent(VIEW.doc)}/audit?block_id=${encodeURIComponent(bid)}&limit=20`);
+  // CH-495（R14-GUI-4）：api() 抛错（401/403/网络）时原实现是未捕获 rejection——
+  // 用户点了「审计」毫无反馈。与 load()/save() 同口径：错误进 log 条。
+  let j;
+  try { j = await api(`/docs/${encodeURIComponent(VIEW.doc)}/audit?block_id=${encodeURIComponent(bid)}&limit=20`); }
+  catch (e) { return log(`审计载入失败：${e.message}`, true); }
   $("log").textContent =
     j.audit.map(a =>
       `${a.ts} ${a.actor} rev ${a.from_revision}→${a.to_revision} reason=${a.reason || "-"}` +
@@ -341,11 +354,94 @@ async function showAudit(bid) {
     `\n（最近 ${j.audit.length}/${j.total} 条）\n` + $("log").textContent;
 }
 
+// --- G4'（FR-211）：块历史 / 回滚 -------------------------------------------
+// 数据面：GET /docs/<id>/audit?block_id=<bid>&limit=50。审计行 before/from_revision
+// 与 edits.rollback 的取文口径一致：回滚到 N = 取 from_revision==N 那次的 before。
+function historyRows(audit) {
+  const seen = new Set();
+  const out = [];
+  (audit || []).forEach(a => {           // 服务端 rowid 升序（最旧在前）
+    const rev = Number(a.from_revision);
+    if (!Number.isInteger(rev) || rev < 1 || seen.has(rev)) return;
+    seen.add(rev);
+    out.push({ revision: rev, text: a.before || "", ts: a.ts || "",
+               actor: a.actor || "", reason: a.reason || "" });
+  });
+  return out.reverse();                  // 最新可回滚版本在前
+}
+
+// 审计正文 / actor / reason 均可能来自源文档（不可信输入）：这里全程
+// createElement + textContent 构造，不拼 innerHTML（G4' XSS 红线）。
+async function showHistory(bid) {
+  const el = blkEl(bid);
+  if (!el) return log(`${bid} 不在已加载窗口内`, true);
+  const box = el.querySelector("[data-hist]");
+  if (!box) return;
+  let j;
+  try { j = await api(`/docs/${encodeURIComponent(VIEW.doc)}/audit?block_id=${encodeURIComponent(bid)}&limit=50`); }
+  catch (e) { return log(`历史载入失败：${e.message}`, true); }
+  const rows = historyRows(j.audit);
+  box.textContent = "";
+  const head = document.createElement("div");
+  head.className = "meta";
+  head.textContent = `可回滚版本 ${rows.length} 个（审计最近 ${j.audit.length}/${j.total} 条）`;
+  box.appendChild(head);
+  if (!rows.length) {
+    const empty = document.createElement("div");
+    empty.textContent = "暂无历史版本：该块尚未编辑过。";
+    box.appendChild(empty);
+  }
+  rows.forEach(r => {
+    const row = document.createElement("div");
+    row.className = "histrow";
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    const rev = document.createElement("b");
+    rev.textContent = `rev ${r.revision}`;
+    const info = document.createElement("span");
+    info.textContent = `${r.ts} ${r.actor || "-"} reason=${r.reason || "-"}`;
+    meta.appendChild(rev);
+    meta.appendChild(info);
+    const prev = document.createElement("div");
+    prev.className = "histprev";
+    prev.textContent = r.text.slice(0, 120) + (r.text.length > 120 ? "…" : "");
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = "回滚到此版本";
+    btn.onclick = () => rollbackTo(bid, r.revision, btn);
+    row.appendChild(meta);
+    row.appendChild(prev);
+    row.appendChild(btn);
+    box.appendChild(row);
+  });
+  box.hidden = false;
+}
+
+async function rollbackTo(bid, rev, btn) {
+  btn.disabled = true;
+  try {
+    const r = await api(`/docs/${encodeURIComponent(VIEW.doc)}/blocks/${encodeURIComponent(bid)}/rollback`, {
+      method: "POST",
+      body: JSON.stringify({ to_revision: rev })
+    });
+    locked.set(bid, r.revision);
+    log(`${bid} 已回滚到 rev ${rev} → 新 rev ${r.revision}（审计留痕 rollback_to_${rev}）`);
+    await refetch(bid);
+    await showHistory(bid);
+  } catch (e) {
+    log(`${bid} 回滚失败：${e.message}`, true);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 async function doSearch() {
   const q = $("q").value.trim();
   document.querySelectorAll(".hit").forEach(e => e.classList.remove("hit"));
   if (!q) return;
-  const j = await api(`/search?q=${encodeURIComponent(q)}`);
+  let j;
+  try { j = await api(`/search?q=${encodeURIComponent(q)}`); }
+  catch (e) { return log(`检索失败：${e.message}`, true); }
   log(`检索「${q}」→ ${j.total} 命中（mode=${j.mode}）`);
   let off = 0;
   (j.hits || []).forEach(h => {
@@ -360,7 +456,8 @@ $("blocks").addEventListener("click", (ev) => {
   const btn = ev.target.closest("button[data-act]");
   if (!btn) return;
   const bid = btn.closest(".blk").dataset.bid;
-  ({ save: () => save(bid), refresh: () => refetch(bid), audit: () => showAudit(bid) })[btn.dataset.act]();
+  ({ save: () => save(bid), refresh: () => refetch(bid), audit: () => showAudit(bid),
+     history: () => showHistory(bid) })[btn.dataset.act]();
 });
 $("load").onclick = load;
 $("more").onclick = loadMore;

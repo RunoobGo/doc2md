@@ -366,7 +366,12 @@ def sqlite_backup(src: str | Path, dst: str | Path) -> Path:
     try:
         src_c = sqlite3.connect(str(src))
         dst_c = sqlite3.connect(str(dst))
-        src_c.backup(dst_c)
+        # CH-495（R14-PERF-4）：分步拷贝（每步 1000 页）。单次 backup() 对大库
+        # 会长时间持有共享读锁——serve 写者被 checkpoint 阻塞的窗口与库大小成正比。
+        # 分步之间锁被释放，在线写入可穿插；源库若在步间被改写，backup API 自动
+        # 重拷脏页，正确性由 API 保证（与单步语义一致）。
+        while src_c.backup(dst_c, pages=1000):
+            time.sleep(0.01)
         # 目标连接以 WAL 打开时可能留下 dst-wal/dst-shm；close 前 checkpoint，
         # 避免备份数据只存在于即将被删除的 WAL 里。
         dst_c.execute("PRAGMA wal_checkpoint(TRUNCATE)")

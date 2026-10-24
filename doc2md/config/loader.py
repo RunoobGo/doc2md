@@ -17,6 +17,11 @@ from typing import Any
 
 from .default_toml import DEFAULT_TOML, TOML_BASENAME
 
+# 转换档位的唯一来源（CH-496 / F11）：API 入参校验、CLI `--mode` choices 与
+# 配置文件 `s2.mode` 枚举三处同集合。此前三处各自硬编码，加档位时漏改一处
+# 就会出现「CLI 能传、API 拒绝」或「配置拒绝、代码接受」的口径分裂。
+MODES: tuple[str, ...] = ("auto", "single", "two_phase")
+
 # 运行 profile 三档（方案 1.2 冻结契约 + 第七章低配机口径）。
 # 覆盖发生在「默认值之后、用户显式配置之后」：显式键永远赢过 profile。
 PROFILES: dict[str, dict[str, Any]] = {
@@ -106,7 +111,7 @@ SPEC: dict[str, tuple[str, Any]] = {
     "s1_5.reject_on_any_bad_page": BOOL,
     "s1_5.page_detail_in_report": BOOL,
     # [s2]
-    "s2.mode": _enum("auto", "single", "two_phase"),
+    "s2.mode": _enum(*MODES),
     "s2.max_pages_per_shard": _int(1, 100_000),
     "s2.shard_overlap_pages": _int(0, 1_000),
     "s2.dedupe_overlap": BOOL,
@@ -299,7 +304,7 @@ def validate(cfg: dict) -> None:
                 raise ConfigError(
                     f"{dotted}={v!r} 非本机回环：默认只允许 loopback 绑定，"
                     f"如需对外暴露请显式设 api.allow_remote_bind = true")
-    # CH-489：`sweep_tmp` 会删除 `paths.tmp` 下超过保护窗的全部条目。若 tmp
+    # CH-489：`ops.tmpclean.sweep_tmp` 会删除 `paths.tmp` 下超过保护窗的全部条目。若 tmp
     # 配成工作根（`work` / `.`）或其祖先，cron/serve 启动一次就会清掉 state.sqlite、
     # out/logs 等正文数据。这里按解析后的真实路径判包含关系，拒绝这种配置。
     root_path = root_setting(cfg).resolve()

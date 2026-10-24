@@ -28,7 +28,15 @@ from pathlib import Path
 
 from . import config
 from .artifacts import drop_orphan_artifact, read_ir, rebuild_artifact
-from .errors import E4041_NotFound, E4091_DocOverwrite, E4092_SourceSuperseded
+from .errors import (
+    Doc2mdError,
+    E4001_BadRequest,
+    E4041_NotFound,
+    E4091_DocOverwrite,
+    E4092_SourceSuperseded,
+    E4221_GateReject,
+    E5031_StorageError,
+)
 from .events import emit
 from .pipeline.batch import default_workers, run_batch
 from .scheduler import Scheduler
@@ -99,10 +107,15 @@ def reclaim_stale(store: Store, cfg: dict) -> int:
             " AND started_at IS NOT NULL AND datetime(started_at) < datetime('now', ?)"
             " AND source_path IS NOT NULL",
             (f"-{minutes} minutes",)).fetchall()
+        reclaimed = 0
         for r in rows:
             tx.execute("UPDATE tasks SET status='queued', started_at=NULL, error_code=''"
                        " WHERE job_id=? AND status='running'", (r["job_id"],))
-    return len(rows)
+            # CH-496：并发下另一进程可能已抢先回收同一行；返回值必须是**实际**
+            # 改到的行数，不能把「选中但没改到」也算进来（会虚报 reclaim 计数）。
+            if tx.execute("SELECT changes()").fetchone()[0]:
+                reclaimed += 1
+    return reclaimed
 
 
 def _startup_reconcile(store: Store) -> dict:
@@ -186,10 +199,11 @@ def drain_once(store: Store, cfg: dict, root, *, workers: int | None = None,
                          ir_cache=ir_cache, saved_docs=saved_docs)
             elif res["status"] == "rejected":
                 _handle_reject(store, sched, rep, job, res, writer,
-                               code=res.get("code", "E4221"),
+                               code=res.get("code", E4221_GateReject.code),
                                detail={"reason": res.get("message", "")})
             else:
-                sched.mark(job["job_id"], "failed", res.get("code", "E5000"),
+                sched.mark(job["job_id"], "failed",
+                           res.get("code", Doc2mdError.code),
                            {"reason": res.get("message", "")[:200]})
                 rep.failed += 1
                 _event(store, job, res, "job_failed", writer)
@@ -198,7 +212,7 @@ def drain_once(store: Store, cfg: dict, root, *, workers: int | None = None,
 
 def _claim_batch(store: Store, cfg: dict, root, n: int,
                  rep: WorkReport) -> tuple[dict[str, list[dict]], list[dict]] | None:
-    """领取一批 queued 作业并按 (mode, force) 分组跑进程池（CH-492 Q-3 提取）。
+    """领取一批 queued 作业并按逐路径计划跑一个进程池（CH-492 Q-3 提取）。
 
     队列空返回 None（调用方以 drained=0 收尾）。`rep` 记入 drained 与
     「无路径作业」的 failed/notes——入队时未带路径（历史行 / 只给了
@@ -212,7 +226,7 @@ def _claim_batch(store: Store, cfg: dict, root, n: int,
     for j in jobs:
         if not j.get("path"):
             # 入队时未带路径（历史行 / 只给了 doc_id）→ 明确失败，不静默挂起
-            Scheduler(store).mark(j["job_id"], "failed", "E4001",
+            Scheduler(store).mark(j["job_id"], "failed", E4001_BadRequest.code,
                                   {"reason": "queued task has no source path"})
             rep.failed += 1
             rep.notes.append(f"{j['job_id']}: no path")
@@ -220,16 +234,23 @@ def _claim_batch(store: Store, cfg: dict, root, n: int,
         by_path.setdefault(j["path"], []).append(j)
 
     results: list[dict] = []
-    # 同批内可能有不同转换档位（mode 为 per-job），按 mode 分组跑池，
-    # 每组仍是同一批进程，不多开进程数上限。
-    by_plan: dict[tuple[str | None, bool], list[str]] = {}
+    # CH-497 / B1：逐路径一条计划，整批只调一次 run_batch（一个进程池）。
+    # 档位口径仍是「最早已认领作业的 mode」，force 仍是组内 any()。
+    plans: list[tuple[str, str | None, bool]] = []
     for path in by_path:
+        modes = {j.get("mode") for j in by_path[path] if j.get("mode")}
         mode = next((j.get("mode") for j in by_path[path] if j.get("mode")), None)
+        if len(modes) > 1:
+            # CH-496：同一路径的多份在途作业档位不一致（同 doc 被唯一索引挡住，
+            # 但内容变更后 doc_id 不同）。口径钉死为「最早已认领作业的 mode」，
+            # 并留一条 note，避免静默挑一个让运维无从解释。
+            rep.notes.append(
+                f"{path}: mixed modes {sorted(modes)}; using {mode}")
         force = any(bool(j.get("force")) for j in by_path[path])
-        by_plan.setdefault((mode, force), []).append(path)
-    for (mode, force), group in by_plan.items():
-        results.extend(run_batch(group, cfg=cfg, out_dir=_out_dir(cfg, root),
-                                 workers=n, mode=mode, force=force))
+        plans.append((path, mode, force))
+    if plans:
+        results.extend(run_batch(cfg=cfg, out_dir=_out_dir(cfg, root),
+                                 workers=n, plans=plans))
     return by_path, results
 
 
@@ -255,7 +276,7 @@ def _run_one(store: Store, sched: Scheduler, cfg: dict, root, rep: WorkReport,
         # IR 版本不符）时，原实现跳过入库却仍标 done + 发 job_done——
         # 队列说「完成」、`GET /docs/<id>` 却 404，正文只剩一个不可寻址的
         # zip，既骗过监控又断掉重试线索。改为明确失败（可安全重投）。
-        sched.mark(job["job_id"], "failed", "E5031",
+        sched.mark(job["job_id"], "failed", E5031_StorageError.code,
                    {"reason": "artifact_ir_unreadable",
                     "zip": str(res.get("zip", ""))[-64:]})
         rep.failed += 1
@@ -274,7 +295,7 @@ def _run_one(store: Store, sched: Scheduler, cfg: dict, root, rep: WorkReport,
         # 级联收走，_finish_ok 已回滚（docs/blocks/search 未写回）。
         # 记 rejected 并补一条留痕事件（events 无 FK，行本身可达；
         # 正文不复活是主目标，可观测性是次目标）。
-        sched.mark(job["job_id"], "rejected", "E4041",
+        sched.mark(job["job_id"], "rejected", E4041_NotFound.code,
                    {"reason": "doc_deleted_during_conversion"})
         _event(store, job, res, "job_rejected", writer)
         drop_orphan_artifact(store, root, cfg, res.get("doc_id") or "")
@@ -308,7 +329,7 @@ def _run_one(store: Store, sched: Scheduler, cfg: dict, root, rep: WorkReport,
         detail = {"reason": "finish_failed",
                   "exc": type(exc).__name__}
         try:
-            sched.mark(job["job_id"], "failed", "E5031", detail)
+            sched.mark(job["job_id"], "failed", E5031_StorageError.code, detail)
         except sqlite3.Error:
             pass
         try:
@@ -535,6 +556,9 @@ def run_work(cfg: dict, root, *, once: bool = False, max_jobs: int = 0,
              workers: int | None = None, idle_seconds: float = 5.0,
              reclaim_seconds: float | None = None, on_report=None) -> WorkReport:
     """消费循环：once=True 排空当前队列即退出；max_jobs>0 达量退出；否则轮询常驻。"""
+    # CH-496 / G8：负数在 CLI 已拒（exit 2）；直接调用方也不得因 `-1` 真值
+    # 命中「finished >= -1」而在第一批后静默退出——按 0（不设上限）处理。
+    max_jobs = max(0, int(max_jobs or 0))
     from .ops.logging import RotatingJsonlWriter
     store = Store(root / "state.sqlite")
     total = WorkReport()

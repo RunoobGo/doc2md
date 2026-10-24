@@ -424,6 +424,21 @@ def package(ir: IR, md: str, meta: dict, out_dir: Path, cfg: dict,
             fh.flush()
             os.fsync(fh.fileno())
         os.replace(part, zp)
+        # CH-495（R14-PIPE-3）：rename 后补目录项 fsync（与 ops/backup._fsync_dir
+        # 同口径）——只 fsync 文件内容时，掉电可能让 rename 回退：库面已 done
+        # 而 out/{doc_id}.zip 消失。非 POSIX / 无权限打开目录则静默降级
+        # （内容已单独落盘，绝不让打包翻车）。
+        try:
+            dfd = os.open(str(out_dir), os.O_RDONLY)
+        except OSError:
+            dfd = -1
+        if dfd >= 0:
+            try:
+                os.fsync(dfd)
+            except OSError:
+                pass
+            finally:
+                os.close(dfd)
     except Exception:
         part.unlink(missing_ok=True)
         raise

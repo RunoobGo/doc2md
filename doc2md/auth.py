@@ -4,7 +4,8 @@
   admin  —— 全部写操作 + token 管理 + settings
   editor —— 提交作业 + 编辑 / 回滚 + 重跑
   reader —— 只读查询与导出
-吊销即时生效：≤ revoke_window_seconds（默认 5s）内新请求 401。
+吊销即时生效：写 `revoked_at` 后下次 `check` 即拒（CH-473 / R5-SVC-9 澄清，
+无传播窗口；`api.revoke_effective_seconds` 仅为对外承诺值的展示键）。
 
 CH-456（T9）：删除三个零调用符号——`require`（api 统一走 `check`）、
 `timing_safe_equal`（token 比对走参数化 SQL 索引查找，无逐字节比对面）、
@@ -72,7 +73,13 @@ def revoke(store: Store, token: str) -> bool:
     CH-471 SVC-9：调用方传明文（CLI --revoke 手输），入库按键哈希匹配。
     """
     with store.tx() as tx:
-        tx.execute("UPDATE tokens SET revoked_at=? WHERE token=?",
+        # CH-495（R14-API-4）：未吊销态过滤——原 UPDATE 对已吊销行 rowcount 仍为
+        # 1，重复 DELETE 报「吊销成功」，与附录 C「404 未知**或已吊销**」的登记
+        # 口径相悖（CH-491 补登的就是这条语义）。同时保留首次吊销时间不被覆盖。
+        # 未吊销态是 `''` 或 NULL（DDL 默认空串，存量迁移可能留 NULL），与
+        # `check` 的真值判定同口径。
+        tx.execute("UPDATE tokens SET revoked_at=? WHERE token=?"
+                   " AND (revoked_at IS NULL OR revoked_at='')",
                    (now_iso(), token_hash(token)))
         return tx.rowcount > 0
 

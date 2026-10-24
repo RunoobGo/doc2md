@@ -7,6 +7,8 @@
                 [--skip-existing] [--force]
     doc2md watch <dir> [--once]                         # FR-111 稳定性判定 + 入队
     doc2md work [--once|--max-jobs N|--enqueue PATH|--status]   # CH-449 队列消费
+    doc2md backup drill [--keep]                        # 备份恢复演练（DoD 第 11 条，CH-456）
+    doc2md backup restore <src> [--to PATH --force]     # 从快照/.enc 容器恢复 state.sqlite（CH-483）
     doc2md search QUERY [--full] [--limit N]    # 检索已入库文档（API /search 的 CLI 等价物，CH-491）
     doc2md docs list [--limit N --offset N --status S]   # 库内文档清单（O-07）
     doc2md docs show <doc_id> [--limit N --offset N]     # 单篇元数据 + 块窗口（API /docs/<id> 等价物）
@@ -28,7 +30,13 @@ import sys
 from pathlib import Path
 
 from . import PIPELINE_VERSION, config
-from .errors import Doc2mdError, E4041_NotFound, E4221_GateReject, E5031_StorageError
+from .errors import (
+    Doc2mdError,
+    E4001_BadRequest,
+    E4041_NotFound,
+    E4221_GateReject,
+    E5031_StorageError,
+)
 
 EXIT_OK, EXIT_USAGE, EXIT_GATE, EXIT_BIZ, EXIT_SYS = 0, 2, 3, 4, 5
 
@@ -81,10 +89,11 @@ def _err_payload(exc, message: str, **extra) -> dict:
 
 
 # CH-441：doctor 自检的依赖清单 = pyproject 运行时依赖的导入名（单一口径，防漂移）。
-# 实装只用 pdfplumber / python-docx / cryptography / Flask；
+# 实装只用 pdfplumber / python-docx / cryptography / Flask / werkzeug
+# （CH-496：serve 用 werkzeug.serving.make_server 先绑定再报真实端口）；
 # pypdf、Jinja2、PyYAML、watchdog 从未被 doc2md 包导入（S1 走 pdfplumber，
 # 审阅页与日报是内置 f-string 渲染，watch 走内置轮询 StabilityTracker）。
-DEPENDENCY_MODULES = ("pdfplumber", "docx", "flask", "cryptography")
+DEPENDENCY_MODULES = ("pdfplumber", "docx", "flask", "cryptography", "werkzeug")
 
 
 def _add_common(p: argparse.ArgumentParser) -> None:
@@ -108,6 +117,17 @@ def _ensure_private_root(root: Path) -> None:
     from .security.perms import ensure_private
     for warning in ensure_private(root, 0o700):
         print(f"warning: {warning}", file=sys.stderr)
+
+
+def _nonneg_int(raw: str) -> int:
+    """argparse 计数参数：负数是用例错误（退出码 2），不是「取默认值」。"""
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+    if value < 0:
+        raise argparse.ArgumentTypeError("must be >= 0")
+    return value
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -154,7 +174,7 @@ def build_parser() -> argparse.ArgumentParser:
     cv = sub.add_parser("convert", help="转换文件 / 目录")
     _add_common(cv)
     cv.add_argument("path")
-    cv.add_argument("--mode", choices=("auto", "single", "two_phase"))
+    cv.add_argument("--mode", choices=config.MODES)
     cv.add_argument("--out", help="产物 zip 输出目录（默认 [paths].out）")
     cv.add_argument("--json", action="store_true", help="只打印 JSON 摘要（脚本/CI 用）")
     cv.add_argument("--follow-symlinks", action="store_true")
@@ -178,7 +198,8 @@ def build_parser() -> argparse.ArgumentParser:
     wk = sub.add_parser("work", help="消费 tasks 队列（CH-449，低配机异步转换）")
     _add_common(wk)
     wk.add_argument("--once", action="store_true", help="排空当前队列即退出")
-    wk.add_argument("--max-jobs", type=int, default=0, help="处理 N 个作业后退出")
+    wk.add_argument("--max-jobs", type=_nonneg_int, default=0,
+                    help="处理 N 个作业后退出（0 = 不设上限）")
     wk.add_argument("--workers", type=int, help="并发进程数（覆盖 [perf].workers）")
     wk.add_argument("--idle", type=float, default=5.0, help="队列空时轮询间隔秒")
     wk.add_argument("--enqueue", metavar="PATH",
@@ -298,14 +319,25 @@ def cmd_serve(args: argparse.Namespace) -> int:
         print(f"serve refused: host {host!r} 非本机回环（NFR-1 离线单机姿态）；"
               f"确需对外暴露请设 api.allow_remote_bind = true 后重试", file=sys.stderr)
         return EXIT_USAGE
-    port = args.port or int(config.get(cfg, "api.port", 8090))
-    print(f"doc2md serve http://{host}:{port} root={root} pipeline={PIPELINE_VERSION}",
-          file=sys.stderr)
+    # CH-495（R14-CLI-7）：`--port 0`（OS 分配临时端口，测试面常用）是显式意图，
+    # 原 `args.port or ...` 把 0 当假值吞掉、静默回落到配置端口。
+    port = (args.port if args.port is not None
+            else int(config.get(cfg, "api.port", 8090)))
+    # CH-496（B-11 走查发现）：`app.run()` 阻塞到退出，启动行只能打印用户请求的
+    # 端口——`--port 0` 时打印 `:0`，与 Flask 实际绑定端口不一致（下一步要读
+    # 第二行才知道真实地址）。改用 make_server 先绑定、再按实际端口报告。
+    from werkzeug.serving import make_server
     try:
-        app.run(host=host, port=port, threaded=True)   # 不启常驻线程跑定时任务（ADR-30）
+        server = make_server(host, port, app, threaded=True)
     except OSError as exc:
         print(f"serve failed: {exc}", file=sys.stderr)
         return EXIT_SYS
+    print(f"doc2md serve http://{host}:{server.server_port} root={root}"
+          f" pipeline={PIPELINE_VERSION}", file=sys.stderr)
+    try:
+        server.serve_forever()                 # 不启常驻线程跑定时任务（ADR-30）
+    finally:
+        server.server_close()
     return EXIT_OK
 
 
@@ -337,7 +369,7 @@ def _token_body(args, cfg, store, auth) -> int:
         # CH-469（V-13）：`auth.revoke` 现在回报是否命中。原实现在这里同样
         # 无条件打印 revoked=true——吊销一个不存在的 token 也被报成成功。
         if not auth.revoke(store, args.revoke):
-            print(_jline({"revoked": False, "code": "E4041",
+            print(_jline({"revoked": False, "code": E4041_NotFound.code,
                           "message": "unknown token"}), file=sys.stderr)
             return EXIT_BIZ
         print(_jline({"revoked": True, "effective_within_s": int(config.get(
@@ -347,7 +379,7 @@ def _token_body(args, cfg, store, auth) -> int:
     if args.role not in tuple(allowed):
         # CH-469（V-7）：argparse 的 choices 挡不住「配置里收窄了可签发角色」这一路，
         # 直送 auth.issue 会抛 ValueError 崩栈。同 API 面收敛为参数错（退出码 2）。
-        print(_jline({"code": "E4001",
+        print(_jline({"code": E4001_BadRequest.code,
                       "message": f"role {args.role} not in api.token_roles"}),
               file=sys.stderr)
         return EXIT_USAGE
@@ -405,14 +437,15 @@ def cmd_backup_restore(args: argparse.Namespace) -> int:
             plan.restore_safe(Path(args.src).expanduser(), dst, phrase,
                               force=bool(args.force))
     except FileExistsError as exc:
-        print(_jline({"code": "E4001", "message": str(exc)}), file=sys.stderr)
+        print(_jline({"code": E4001_BadRequest.code, "message": str(exc)}),
+              file=sys.stderr)
         return EXIT_USAGE
     except BackupBusy:
-        print(_jline({"code": "E4001",
+        print(_jline({"code": E4001_BadRequest.code,
                       "message": "backup/restore already running"}), file=sys.stderr)
         return EXIT_USAGE
     except Exception as exc:                    # noqa: BLE001 — CLI 统一退出码 4
-        print(_jline({"code": "E5031",
+        print(_jline({"code": E5031_StorageError.code,
                       "message": f"restore failed: {type(exc).__name__}"}),
               file=sys.stderr)
         return EXIT_BIZ
@@ -522,7 +555,7 @@ def _apply_format(res: dict, out: Path, fmt: str) -> str:
         # D1（QA-R2）：md 是用户显式要求的产物，落盘失败不能仍报 status=ok/rc=0。
         # 结果行翻成 error + E5031，zip 保留供调用方降级取件；退出码归业务失败。
         res["status"] = "error"
-        res["code"] = "E5031"
+        res["code"] = E5031_StorageError.code
         res["message"] = f"markdown emit failed: {type(exc).__name__}"
         return ""
     if fmt == "md":
@@ -745,6 +778,59 @@ def _dir_files(src: Path, cfg: dict, follow: bool) -> list[Path]:
             if Path(f).suffix.lower() in (".pdf", ".docx", ".doc")]
 
 
+def _watch_commit(store, sched, res, j, since: int, p: Path, cfg: dict,
+                  root: Path) -> dict:
+    """CH-495（R14-ARCH-1）：watch 同步路径的落库提交——与 api._finish_one 同契约。
+
+    单事务：墓碑检查 → mark(done)（mark-before-save，R7-SVC-1/D6 同序）→
+    save_ir → job_done 事件。E4041（删除竞态）记 rejected 终态并清孤儿产物
+    （CH-484 同口径，仅在 doc 确已出 docs 时）；E4091（库内已有编辑）记
+    conflict 并从库面重建产物（R9-SVC-2 同口径，恢复「导出 == 库面」）。
+    返回 watch 的机器可读行（成功行键集与旧实现一致：watched/doc_id/job_id）。
+    """
+    from .artifacts import drop_orphan_artifact, rebuild_artifact
+    from .errors import E4091_DocOverwrite
+    from .events import emit
+    from .storage.repo import prepare_ir_rows, save_ir
+    prepared = prepare_ir_rows(res.ir)
+    try:
+        with store.tx() as tx:
+            dead = tx.execute(
+                "SELECT 1 FROM deletions WHERE (doc_id=? OR doc_id=?)"
+                " AND id>? LIMIT 1",
+                (res.doc_id, f"source:{res.source_key}", since)).fetchone()
+            if dead is not None:
+                raise E4041_NotFound("doc deleted during conversion")
+            if not sched.mark(j.job_id, "done", tx=tx):
+                raise E4041_NotFound(f"task row gone: {j.job_id}")
+            save_ir(store, res.ir, tx=tx, meta=res.meta, gate=res.gate,
+                    prepared=prepared)
+            emit(store, "job_done", res.doc_id, j.job_id,
+                 {"blocks": len(res.ir.blocks), "source": "watch"}, None, tx=tx)
+    except E4041_NotFound:
+        if sched.mark(j.job_id, "rejected", E4041_NotFound.code,
+                      {"reason": "doc_deleted_during_conversion"}):
+            emit(store, "job_rejected", res.doc_id, j.job_id,
+                 {"code": E4041_NotFound.code, "source": "watch"}, None)
+        drop_orphan_artifact(store, root, cfg, res.doc_id)
+        return {"watched": p.name, "doc_id": res.doc_id, "job_id": j.job_id,
+                "status": "rejected", "code": E4041_NotFound.code,
+                "reason": "doc_deleted_during_conversion"}
+    except E4091_DocOverwrite as e:
+        sched.mark(j.job_id, "rejected", e.code,
+                   {"reason": "edited_blocks_present",
+                    "edited_blocks": e.detail.get("edited_blocks")})
+        emit(store, "job_rejected", res.doc_id, j.job_id,
+             {"code": e.code, "source": "watch"}, None)
+        try:
+            rebuild_artifact(store, res.doc_id, cfg, root)
+        except Exception:  # noqa: BLE001 — 重建是补偿动作，失败不改已判定的 conflict
+            pass
+        return {"watched": p.name, "doc_id": res.doc_id, "job_id": j.job_id,
+                "status": "conflict", "code": e.code}
+    return {"watched": p.name, "doc_id": res.doc_id, "job_id": j.job_id}
+
+
 def cmd_watch(args: argparse.Namespace) -> int:
     from . import worker
     from .pipeline.convert import convert
@@ -752,11 +838,13 @@ def cmd_watch(args: argparse.Namespace) -> int:
     from .security.dirguard import walk_limits
     from .security.watcher import StabilityTracker
     from .storage.db import Store
-    from .storage.repo import save_ir
     cfg = _cfg(args)
     root = _root(cfg)
     _ensure_private_root(root)
     store = Store(root / "state.sqlite")
+    # CH-495（R14-CLI-7）：watch 是唯一不做 expanduser 的路径参数入口——
+    # `watch ~/docs` 会把字面 `~` 目录当不存在（E4041），与 convert/--enqueue 口径统一。
+    watch_dir = Path(args.dir).expanduser()
 
     def loop() -> int:
         sched = Scheduler(store)
@@ -769,7 +857,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
         rc = EXIT_OK
         while True:
             try:
-                ready = tracker.poll_all(args.dir, lim)
+                ready = tracker.poll_all(watch_dir, lim)
             except Doc2mdError as exc:
                 print(_jline(_err_payload(exc, str(exc))), file=sys.stderr)
                 if args.once:
@@ -805,19 +893,30 @@ def cmd_watch(args: argparse.Namespace) -> int:
                               file=sys.stderr)
                         rc = max(rc, EXIT_BIZ)
                     continue
+                # CH-495（R14-ARCH-1）：删除守护基准在转换**前**冻结（与 api
+                # since_seq 同口径）；提交改走 _watch_commit 单事务（墓碑检查 →
+                # mark-before-save → save_ir → 事件），原 save_ir→submit→mark
+                # 三段独立事务在删除竞态下会半复活（docs 有行、无事件、无墓碑拦截）。
+                since = store.q1(
+                    "SELECT COALESCE(MAX(id),0) AS m FROM deletions")["m"]
                 try:
                     res = convert(p, cfg=cfg, out_dir=_out(cfg), precheck_edits=True)
-                    save_ir(store, res.ir, meta=res.meta, gate=res.gate)
                     j = sched.submit(res.doc_id, res.source_key,
-                                     source_path=str(p))
+                                     source_path=str(p), del_seq=since)
                     # CH-489：`submit` 可能附着到已有的 queued/running 作业
-                    # （同 doc_id 的去重路径）。此时该作业的终态由它的消费者
-                    # 决定，watch 不能替对端提前写 done（会把仍在跑的作业伪装
-                    # 成已完成，并让后续消费者面对一个已终态的行）。
-                    if not (j.attached or j.idem_hit):
-                        sched.mark(j.job_id, "done")
-                    print(_jline({"watched": p.name, "doc_id": res.doc_id,
-                                  "job_id": j.job_id}))
+                    # （同 doc_id 的去重路径）。此时该作业的落库与终态由它的
+                    # 消费者负责，watch 不能替对端提前写 done，也不再重跑
+                    # save_ir（R6-SVC-3 同口径：附着/幂等命中即复用既有作业）。
+                    if j.attached or j.idem_hit:
+                        print(_jline({"watched": p.name, "doc_id": res.doc_id,
+                                      "job_id": j.job_id, "attached": True}))
+                        continue
+                    line = _watch_commit(store, sched, res, j, since, p, cfg, root)
+                    if line.get("status") == "conflict":
+                        print(_jline(line), file=sys.stderr)
+                        rc = max(rc, EXIT_BIZ)
+                    else:
+                        print(_jline(line))
                 except E4221_GateReject as exc:
                     j = sched.submit_rejected(p.name, exc.code, exc.detail)
                     print(_jline({"watched": p.name, "status": "rejected",
@@ -911,7 +1010,8 @@ def _nonneg(args: argparse.Namespace, name: str, default: int) -> int | None:
     if raw is None:
         return default
     if raw < 0:
-        print(_jline({"code": "E4001", "message": f"{name} must be >= 0"}),
+        print(_jline({"code": E4001_BadRequest.code,
+                      "message": f"{name} must be >= 0"}),
               file=sys.stderr)
         return None
     return min(raw, DOCS_MAX_ROWS)
@@ -1044,12 +1144,12 @@ def _cmd_docs_export(args: argparse.Namespace) -> int:
     root = _root(cfg)
     out_dir = Path(args.out).expanduser() if args.out else _out(cfg)
     if args.all and args.doc_ids:
-        print(_jline({"code": "E4001",
+        print(_jline({"code": E4001_BadRequest.code,
                       "message": "doc_ids and --all are mutually exclusive"}),
               file=sys.stderr)
         return EXIT_USAGE
     if not args.all and not args.doc_ids:
-        print(_jline({"code": "E4001",
+        print(_jline({"code": E4001_BadRequest.code,
                       "message": "give doc_ids or --all"}), file=sys.stderr)
         return EXIT_USAGE
     rc = EXIT_OK
@@ -1222,16 +1322,18 @@ def main(argv: list[str] | None = None) -> int:
         return fn(args)
     except Doc2mdError as exc:
         print(_jline(exc.to_body()), file=sys.stderr)
-        return EXIT_GATE if exc.code == "E4221" else EXIT_BIZ
+        return EXIT_GATE if exc.code == E4221_GateReject.code else EXIT_BIZ
     except config.ConfigError as exc:   # CH-469（O-15）：配置错 = 用法错误，不是系统故障
         # 原实现落进兜底 `except Exception` → E5000 / EXIT_SYS，脚本按码分流时
         # 「doc2md.toml 写错了」和「解析栈炸了」混在同一个退出码里。
-        print(_jline({"code": "E4001", "message": f"config error: {exc}"}), file=sys.stderr)
+        print(_jline({"code": E4001_BadRequest.code,
+                      "message": f"config error: {exc}"}), file=sys.stderr)
         return EXIT_USAGE
     except KeyboardInterrupt:
         return EXIT_SYS
     except OSError as exc:             # ENOSPC / EACCES / ELOOP：低配机常见，栈回溯不是契约输出
-        print(_jline({"code": "E5031", "message": f"{type(exc).__name__}: {exc}"}),
+        print(_jline({"code": E5031_StorageError.code,
+                      "message": f"{type(exc).__name__}: {exc}"}),
               file=sys.stderr)
         return EXIT_SYS
     except Exception as exc:           # noqa: BLE001 — CH-469（V-12）：兜底收口
@@ -1239,7 +1341,8 @@ def main(argv: list[str] | None = None) -> int:
         # Python 回显栈回溯并退出码 1——1 不在本 CLI 的退出码契约里，脚本按码分流会
         # 落进「未知」分支。这里统一收口为 EXIT_SYS；消息只带异常类名，
         # 不带 str(exc)（解析类异常的消息常夹带页正文，NFR-20）。
-        print(_jline({"code": "E5000", "message": f"unexpected: {type(exc).__name__}"}),
+        print(_jline({"code": Doc2mdError.code,
+                      "message": f"unexpected: {type(exc).__name__}"}),
               file=sys.stderr)
         return EXIT_SYS
 

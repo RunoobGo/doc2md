@@ -17,7 +17,7 @@ import pytest
 from doc2md import PIPELINE_VERSION
 from doc2md.cli import main as cli_main
 from doc2md.edits import patch_block
-from doc2md.ir import Block, IR
+from doc2md.ir import IR, Block
 from doc2md.pipeline.convert import convert
 from doc2md.pipeline.s3_structure import _gfm_table
 from doc2md.pipeline.s4_render import assert_render_contract

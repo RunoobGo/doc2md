@@ -185,7 +185,7 @@ def test_drain_fails_when_artifact_ir_unreadable(tmp_cfg, tmp_path, monkeypatch)
     sched = Scheduler(store)
     job = sched.submit("d1", "s1", source_path=str(src), mode=None)
 
-    monkeypatch.setattr(worker, "run_batch", lambda files, **kw: [
+    monkeypatch.setattr(worker, "run_batch", lambda *args, **kw: [
         {"file": str(src), "status": "ok", "zip": str(root / "missing.zip"),
          "blocks": 3, "doc_id": "d1", "code": "", "message": ""}])
     rep = worker.drain_once(store, tmp_cfg, root, workers=1)
@@ -218,7 +218,7 @@ def test_drain_finishes_ok_when_ir_readable(tmp_cfg, tmp_path, monkeypatch):
     zp = root / "ok.zip"
     with zipfile.ZipFile(zp, "w") as z:
         z.writestr("ir.json", json.dumps(ir.to_dict()))
-    monkeypatch.setattr(worker, "run_batch", lambda files, **kw: [
+    monkeypatch.setattr(worker, "run_batch", lambda *args, **kw: [
         {"file": str(src), "status": "ok", "zip": str(zp),
          "blocks": 1, "doc_id": "d1", "code": "", "message": ""}])
     rep = worker.drain_once(store, tmp_cfg, root, workers=1)
@@ -412,12 +412,12 @@ def test_revoke_real_token_then_401(api_client, headers):
     r = client.delete(f"/tokens/{tok}", headers=headers(tokens))
     assert r.status_code == 200 and r.get_json()["revoked"] is True
     assert client.get("/search?q=例外", headers=h).status_code == 401
-    # 二次吊销同一 token：revoked_at 已置但行仍在 → rowcount=1，仍报成功（幂等）；
-    # 只有「库里根本没有」才 404（见 test_revoke_unknown_token_is_404）。
-    # CH-473（TEST-2，LOW）：原实现在此重复了两遍完全相同的 status 断言——
-    # 改为断言响应体契约（revoked 恒 true），使每次重复调用都有独立信息量。
+    # 二次吊销同一 token：CH-495（R14-API-4）起报 404——附录 C（CH-491 补登）
+    # 的契约是「404 未知**或已吊销**」，原实现 UPDATE 无未吊销态过滤，已吊销行
+    # rowcount 仍为 1，「没吊销任何东西」被再次报成「吊销成功」（与 V-13 根除的
+    # 未知 token 假成功同类）。revoked_at 保留首次吊销时间，不被覆盖。
     again = client.delete(f"/tokens/{tok}", headers=headers(tokens))
-    assert again.status_code == 200 and again.get_json()["revoked"] is True
+    assert again.status_code == 404 and again.get_json()["code"] == "E4041"
 
 
 # --- V-8：乐观锁入参 ------------------------------------------------------------

@@ -551,7 +551,7 @@ def _sweep_cfg(tmp_path, minutes=30):
 
 def test_stor4_sweep_tmp_skips_in_flight_entries(tmp_path):
     """在途保护窗：mtime 在 stale_job_minutes（默认 30）内的条目跳过。"""
-    from doc2md.cron import sweep_tmp
+    from doc2md.ops.tmpclean import sweep_tmp
     tmp = tmp_path / "tmp"
     tmp.mkdir()
     (tmp / "busy.zip").write_bytes(b"x")
@@ -561,7 +561,7 @@ def test_stor4_sweep_tmp_skips_in_flight_entries(tmp_path):
 
 def test_stor4_sweep_tmp_removes_stale_entries(tmp_path):
     """超出保护窗的残留照清（在途件随写入持续更新 mtime，不会误判为陈旧）。"""
-    from doc2md.cron import sweep_tmp
+    from doc2md.ops.tmpclean import sweep_tmp
     tmp = tmp_path / "tmp"
     tmp.mkdir()
     stale = tmp / "old"
@@ -575,7 +575,7 @@ def test_stor4_sweep_tmp_removes_stale_entries(tmp_path):
 
 def test_stor4_sweep_tmp_zero_disables_protection(tmp_path):
     """stale_job_minutes <= 0 = 关闭保护，维持旧行为全清。"""
-    from doc2md.cron import sweep_tmp
+    from doc2md.ops.tmpclean import sweep_tmp
     tmp = tmp_path / "tmp"
     tmp.mkdir()
     f = tmp / "old"
@@ -635,16 +635,33 @@ def test_sec2_serve_rejects_nonloopback_host_flag(tmp_path, capsys, monkeypatch)
     assert "非本机回环" in capsys.readouterr().err
 
 
+def _stub_make_server(monkeypatch, seen):
+    """CH-496：`cmd_serve` 改用 `werkzeug.serving.make_server` 先绑定再报告真实端口，
+    原 `Flask.run` 打桩不再拦住启动，此处改为拦 `make_server` 并返回不阻塞的桩。"""
+    class _Srv:
+        def __init__(self, port):
+            self.server_port = port
+
+        def serve_forever(self):
+            pass
+
+        def server_close(self):
+            pass
+
+    def _make(host, port, app, **kw):
+        seen.update(host=host, port=port)
+        return _Srv(port)
+
+    monkeypatch.setattr("werkzeug.serving.make_server", _make)
+
+
 def test_sec2_serve_allows_remote_with_explicit_opt_in(tmp_path, monkeypatch):
     """显式 opt-in（配置文件 api.allow_remote_bind = true）后放行并真正绑定。"""
-    import flask
-
     from doc2md import cli
     toml = tmp_path / "doc2md.toml"
     toml.write_text("[api]\nallow_remote_bind = true\n", encoding="utf-8")
     seen = {}
-    monkeypatch.setattr(flask.Flask, "run",
-                        lambda self, *a, **kw: seen.update(kw))
+    _stub_make_server(monkeypatch, seen)
     rc = cli.main(["serve", "--host", "0.0.0.0", "--port", "8123",
                    "--root", str(tmp_path / "work"), "--config", str(toml)])
     assert rc == cli.EXIT_OK
@@ -653,12 +670,9 @@ def test_sec2_serve_allows_remote_with_explicit_opt_in(tmp_path, monkeypatch):
 
 def test_sec2_serve_loopback_host_needs_no_opt_in(tmp_path, monkeypatch):
     """回环 host 无需 opt-in（默认姿态不被打扰）。"""
-    import flask
-
     from doc2md import cli
     seen = {}
-    monkeypatch.setattr(flask.Flask, "run",
-                        lambda self, *a, **kw: seen.update(kw))
+    _stub_make_server(monkeypatch, seen)
     monkeypatch.chdir(tmp_path)
     rc = cli.main(["serve", "--host", "127.0.0.1", "--root", str(tmp_path / "work")])
     assert rc == cli.EXIT_OK

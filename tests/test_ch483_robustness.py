@@ -60,7 +60,7 @@ def test_stale_same_path_job_is_rejected(tmp_cfg, tmp_path, monkeypatch):
     ir = IR(doc_id="doc-new", source_key="sk", source_name="same.pdf", format="pdf",
             pages=1, blocks=[Block(id="b1", type="paragraph", text="新正文。", page=0)])
 
-    def fake_batch(paths, **kw):
+    def fake_batch(*args, **kw):
         return [{"file": str(src), "status": "ok", "zip": "fake.zip",
                  "doc_id": "doc-new", "blocks": 1}]
 

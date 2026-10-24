@@ -113,7 +113,7 @@ def test_drain_rejects_when_doc_deleted_mid_conversion(tmp_cfg, tmp_path, monkey
     sched = Scheduler(store)
     job = sched.submit("d1", "s1", source_path=str(src), mode=None)
 
-    def racing_batch(files, **kw):
+    def racing_batch(*args, **kw):
         # 消费事务之外：真实 delete_doc 级联（含 tasks 行）整包收走
         repo.delete_doc(store, "d1", "tester", root)
         return [{"file": str(src), "status": "ok", "zip": str(zp),
@@ -148,7 +148,7 @@ def test_drain_done_path_still_persists_detail(tmp_cfg, tmp_path, monkeypatch):
 
     sched = Scheduler(store)
     job = sched.submit("d2", "s1", source_path=str(src), mode=None)
-    monkeypatch.setattr(worker, "run_batch", lambda files, **kw: [
+    monkeypatch.setattr(worker, "run_batch", lambda *a, **kw: [
         {"file": str(src), "status": "ok", "zip": str(zp),
          "blocks": 1, "doc_id": "d2", "code": "", "message": ""}])
     rep = worker.drain_once(store, tmp_cfg, root, workers=1)
@@ -456,8 +456,9 @@ def test_drain_round_claims_batch_beyond_pool(tmp_cfg, tmp_path, monkeypatch,
 
     calls: list[tuple[int, int]] = []
 
-    def spy_batch(files, *, cfg=None, out_dir=None, workers=None, mode=None, **kw):
-        calls.append((len(files), int(workers or 0)))
+    def spy_batch(*args, **kw):
+        files = [p for p, _m, _f in kw["plans"]]
+        calls.append((len(files), int(kw.get("workers") or 0)))
         return [{"file": f, "status": "ok", "zip": str(zp), "blocks": 1,
                  "doc_id": f"db5-{Path(f).stem}", "code": "", "message": ""}
                 for f in files]
@@ -499,7 +500,8 @@ def test_same_path_jobs_merge_without_widening_pool(tmp_cfg, tmp_path, monkeypat
 
     files_seen: list[int] = []
 
-    def spy_batch(files, *, workers=None, **kw):
+    def spy_batch(*args, **kw):
+        files = [p for p, _m, _f in kw["plans"]]
         files_seen.append(len(files))
         return [{"file": f, "status": "ok", "zip": str(zp), "blocks": 1,
                  "doc_id": "db6", "code": "", "message": ""} for f in files]
@@ -561,7 +563,7 @@ def test_drift_uses_consumed_hash_without_parent_rehash(tmp_cfg, tmp_path, monke
         z.writestr("ir.json", json.dumps(_ir("cons", "b1", "改写后的正文").to_dict()))
 
     job = Scheduler(store).submit("enq", "s1", source_path=str(src), mode=None)
-    monkeypatch.setattr(worker, "run_batch", lambda files, **kw: [
+    monkeypatch.setattr(worker, "run_batch", lambda *a, **kw: [
         _ok_result(src, zp, "cons")])
 
     ir_mod = importlib.import_module("doc2md.ir")
@@ -600,7 +602,7 @@ def test_no_drift_when_content_matches_even_if_source_vanishes(tmp_cfg, tmp_path
     with zipfile.ZipFile(zp, "w") as z:
         z.writestr("ir.json", json.dumps(_ir("d3", "b1", "正文").to_dict()))
 
-    def batch(files, **kw):
+    def batch(*args, **kw):
         src.unlink()                        # 转换完成后源文件被移走（watch 目录常见）
         return [_ok_result(src, zp, "d3")]
 
@@ -967,7 +969,7 @@ def _root_of(cfg) -> Path:
 @pytest.mark.gate
 def test_ops1_sweep_tmp_exempts_kept_drill_dir(tmp_cfg):
     """修复断言：`drill-*` 取证目录不随 tmp 清扫消失，普通残留照旧清理。"""
-    from doc2md import cron
+    from doc2md.ops.tmpclean import sweep_tmp
     root = _root_of(tmp_cfg)
     tmp = root / "tmp"
     drill = tmp / "drill-20261017T000000Z"
@@ -981,7 +983,7 @@ def test_ops1_sweep_tmp_exempts_kept_drill_dir(tmp_cfg):
     old = time.time() - 3600          # 全部落在 stale_job_minutes 保护窗之外
     for d in (drill, scratch, stale):
         os.utime(d, (old, old))
-    removed = cron.sweep_tmp(tmp_cfg, root)
+    removed = sweep_tmp(tmp_cfg, root)
     assert drill.is_dir(), "--keep 的取证沙箱被下一次清扫 rmtree，承诺失效"
     assert (drill / "evidence.txt").is_file()
     assert not scratch.exists() and not stale.exists()
