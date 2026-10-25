@@ -362,8 +362,8 @@ CH-501 把这五问收进一条命令（完整口径见方案 **§8.7**，方案
 各 **542 passed / 769 deselected**、`full-suite` 1308 passed / 3 skipped（黄金逐字节 7 项全过、
 `doctor` 打 2.17.0）、`windows-suite` 门禁层 **542 passed / 0 skipped**——跨卷权限那条走 `icacls`
 分支，不是跳过，三口径互证 542+769 = 1308+3 = 1304+7 = **1311**。
-本轮远端复证待办：**599 项**红线在 CI 三档与 Windows 腿的复跑（含上一轮 580 项尚未推送的部分，B-12 / B-16 / B-27-remote）+
-真实 SMB / 网络卷（B-40）需本机以外环境。本轮另登记三项：B-47 需人工裁定「CID 无 `/ToUnicode` 的乱码文本层」的产物口径
+本轮远端复证**已闭合** = run `40177650472`（push `fca6b25`，六作业全绿）：三档 merge-gate 各 **599 passed / 833 deselected**（pytest 步骤墙钟 88.80 / 85.23 / 57.78s，只作历史）、`full-suite`（3.12）**1415 passed / 11 skipped / 6 xfailed** 干净退出（覆盖 TOTAL 7797 stmt / 90%、`tests/test_golden_repro.py` 的逐字节复现 **7 项全 PASSED**（Linux 与 Windows 两条全量腿各 7 项）、`doctor` 打 `pipeline 2.18.0` 且该腿 `legacy_doc_backend: unavailable`）、`windows-suite` 门禁层 **599 passed / 0 skipped** + 全量 **1411 / 15 / 6**——三口径互证 599+833 = **1432** = 本机 1416+10+6；CH-500/501 新增的 57 项红线在 Windows 门禁层是真跑而非跳过，B-16 / B-17 的「门禁层零跳过」口径由此延续到 599 项。远端全绿不降档任何 B 项：B-43 / B-44 在远端同样只表现为 xfail，人工逐页真值仍缺，发布判定不变。
+仍受本机以外环境限制的复证项：真实 SMB / 网络卷（B-40）需本机以外环境。本轮另登记三项：B-47 需人工裁定「CID 无 `/ToUnicode` 的乱码文本层」的产物口径
 （按 E4221 类拒收 / 新增 W 码并保留占位 / 保持现状并在文档写明），B-48 需人工裁定「DOCX 目录域缓存结果」的产物口径
 （整体丢弃 / 保留但不进标题 / 保留并按文本去重），B-49 需人工放入 ≥5 篇真实样本并标注标题真值——本机
 `work/real_samples/` 为空 ⇒ 真实样本腿恒 `not_run`，这是诚实状态而非缺陷。B-46（难度腿入 gate）以 B-43 / B-44 为前置，
