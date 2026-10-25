@@ -47,7 +47,7 @@ from .events import emit
 from .pipeline.batch import default_workers, run_batch
 from .scheduler import Scheduler
 from .storage.db import Store, now_iso
-from .storage.repo import prepare_ir_rows, save_ir
+from .storage.repo import prepare_ir_rows, save_ir, task_status_counts
 
 
 @dataclass
@@ -611,8 +611,8 @@ def _event(store: Store, job: dict, res: dict, code: str, writer,
 
 
 def queue_stats(store: Store) -> dict:
-    return {r["status"]: r["c"] for r in store.q(
-        "SELECT status, COUNT(*) c FROM tasks GROUP BY status")}
+    """队列按状态计数——单一 SQL 来源见 `repo.task_status_counts`（CH-500 / R17-SQL-1）。"""
+    return task_status_counts(store)
 
 
 def _enqueue_hash_threads(cfg: dict | None) -> int:
@@ -705,31 +705,38 @@ def run_work(cfg: dict, root, *, once: bool = False, max_jobs: int = 0,
     max_jobs = max(0, int(max_jobs or 0))
     from .ops.logging import RotatingJsonlWriter
     store = Store(root / "state.sqlite")
-    total = WorkReport()
-    reclaimed = reclaim_stale(store, cfg)
-    if reclaimed:
-        total.notes.append(f"reclaimed_stale={reclaimed}")
-    if reclaim_seconds is None:
-        try:
-            reclaim_seconds = float(config.get(cfg, "perf.stale_check_seconds", 60) or 0)
-        except (TypeError, ValueError):
-            reclaim_seconds = 60.0
-    logs = config.path_setting(cfg, "paths.logs", root, str(root / "logs"))
-    writer = RotatingJsonlWriter(
-        logs, stem="work",
-        rotate_mb=float(config.get(cfg, "logs.rotate_mb", 50)),
-        rotate_keep=int(config.get(cfg, "logs.rotate_keep", 5)))
-    writer.write({"code": "WORK_START", "root": str(root),
-                  "once": bool(once), "max_jobs": int(max_jobs or 0),
-                  "reclaimed_stale": reclaimed,
-                  # CH-473（R5-STOR-2 / STOR-3 的 work 对账半）：与 create_app 同口径，
-                  # 启动时先修一次 FTS 一致性（迁移中途崩溃 / 历史缺陷的空索引无告警），
-                  # 只回传统计、不读正文（NFR-20）；失败不阻断启动，类名进日志。
-                  "search_reconcile": _startup_reconcile(store),
-                  "workers": workers if workers is not None else default_workers(cfg)})
-    writer.flush()
-    last_reclaim = time.monotonic()
+    # CH-500（R17-SVC-2）：`try` 从 Store 建成那一刻就开始。原 `try` 起点在下面
+    # 主循环之前，于是启动段（`reclaim_stale` / 配置读 / `RotatingJsonlWriter`
+    # 构造 / WORK_START 写盘）全部在保护之外——B-17 那类「新库启动即锁冲突」
+    # 抛出时 `store.close()` 不会执行（连接与 WAL 句柄悬着），也没有 WORK_STOP
+    # 记录：常驻进程的死法在日志里只剩一个 WORK_START，`drained` 无从判定。
+    writer: RotatingJsonlWriter | None = None
+    total: WorkReport | None = None
     try:
+        total = WorkReport()
+        reclaimed = reclaim_stale(store, cfg)
+        if reclaimed:
+            total.notes.append(f"reclaimed_stale={reclaimed}")
+        if reclaim_seconds is None:
+            try:
+                reclaim_seconds = float(config.get(cfg, "perf.stale_check_seconds", 60) or 0)
+            except (TypeError, ValueError):
+                reclaim_seconds = 60.0
+        logs = config.path_setting(cfg, "paths.logs", root, str(root / "logs"))
+        writer = RotatingJsonlWriter(
+            logs, stem="work",
+            rotate_mb=float(config.get(cfg, "logs.rotate_mb", 50)),
+            rotate_keep=int(config.get(cfg, "logs.rotate_keep", 5)))
+        writer.write({"code": "WORK_START", "root": str(root),
+                      "once": bool(once), "max_jobs": int(max_jobs or 0),
+                      "reclaimed_stale": reclaimed,
+                      # CH-473（R5-STOR-2 / STOR-3 的 work 对账半）：与 create_app 同口径，
+                      # 启动时先修一次 FTS 一致性（迁移中途崩溃 / 历史缺陷的空索引无告警），
+                      # 只回传统计、不读正文（NFR-20）；失败不阻断启动，类名进日志。
+                      "search_reconcile": _startup_reconcile(store),
+                      "workers": workers if workers is not None else default_workers(cfg)})
+        writer.flush()
+        last_reclaim = time.monotonic()
         while True:
             # CH-469：遗骸回收原只在进程启动时跑一次。常驻 work 进程跑几天后，
             # 期间被 OOM 干掉的**同行**进程留下的 running 行永不回收——那正是
@@ -776,6 +783,10 @@ def run_work(cfg: dict, root, *, once: bool = False, max_jobs: int = 0,
                     return total              # 队列排空即退出（cron 式批量）
                 time.sleep(idle_seconds)
     finally:
-        writer.write({"code": "WORK_STOP", **total.to_dict()})
-        writer.close()
+        # CH-500（R17-SVC-2）：启动段现在也在 try 内，`writer` / `total` 都可能
+        # 还没建成就抛异常——收尾必须容错，否则清理本身会变成第二次故障。
+        if writer is not None:
+            writer.write({"code": "WORK_STOP",
+                          **(total.to_dict() if total is not None else {})})
+            writer.close()
         store.close()

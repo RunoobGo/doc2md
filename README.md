@@ -1,6 +1,6 @@
 # Doc2md
 
-文本型 PDF / DOCX / 旧版 DOC → Markdown 的**离线**转换管线（v2.17.0）。
+文本型 PDF / DOCX / 旧版 DOC → Markdown 的**离线**转换管线（v2.18.0）。
 单机、无出站网络、无云端依赖；LLM 修补助手同样只连本地 `127.0.0.1`。
 
 ## 安装
@@ -39,7 +39,7 @@ doc2md doctor
 
 `--format`（CH-491）：`zip`（默认，行为不变）= `content.md` + `ir.json` + `report.html`；`md` = 只写 Markdown 直出文件（与 zip 内 `content.md` 逐字节相同，提取后移除 zip）；`both` = 两者都写。文件名取消毒后的源文件名。
 
-`doc2md search`（CH-491）：不启 serve 也能检索已入库文档，与 `GET /search` 同一实现、同一默认口径（`limit` 默认 20、上限 500 截断不报错），结果集逐条相同；`--full` 走 `blocks.text` 全表 LIKE，覆盖 FTS 索引窗口外的块尾部；库不存在时明确 `E4041` / 退出码 4。
+`doc2md search`（CH-491）：不启 serve 也能检索已入库文档，与 `GET /search` 同一实现、同一默认口径（`limit` 默认 20、上限 500 截断不报错），结果集逐条相同；`--full` 走 `blocks.text` 全表 LIKE，覆盖 FTS 索引窗口外的块尾部；`--offset N`（CH-500 / R17-API-7）与 API `?offset=` 同一游标，用于取回 `has_more=true` 之后被截断的命中；库不存在时明确 `E4041` / 退出码 4。
 
 
 `doc2md convert --skip-existing`（O-08 + N-1）：内容寻址增量跳过——优先查库（源文件 sha256 与库内已有文档命中即跳）；库未命中时回退查产物（`out/<doc_id>.zip` 存在**且** front-matter `pipeline_version` 与当前管线一致才跳，陈旧产物/字段缺失/产物损坏一律照常重转）。跳过报告 `status=skipped`、退出码 0，既有产物逐字节不触碰；源文件内容变过（含追加字节）则照常重转，不会误跳。watch 重启「只转新文件」与它共用同一实现。
@@ -212,7 +212,7 @@ Windows 任务计划不捕获标准输出，日志目录里没有 `launchd-*` �
 
 ## 文档地图
 
-`docs/` 现有 **24 份 / 14,340 行**（顶层 `.md`，`wc -l` 实测，CH-499；CH-498 时为 24 份 / 14,333 行、CH-497 时 14,327 行，增量都是 `dev-plan` 自身的登记与口径同步）。另有 **`docs/qa/` 子树（QA 优化轮 2.13–2.15 新增，10 份 / 3,520 行**：两轮 `test-plan` / `deviation-analysis` / `comparison` / `optimization-plan` / `optimization-report` / `fix-verification`，O-01~O-12 / N-1~N-8 / D1~D13 的过程产物，不计入顶层 24 份）。此前本文只索引 `docs/` 里的 2 份（`dev-plan.md` 与 `plan-delta-v1.1.md`），其余无任何入口——查规格的人无从判断「`review-round8-CH-483.md` 是权威还是历史」。下表按两个角度给出完整地图；**地位列是判读依据，不是推荐阅读顺序**。
+`docs/` 现有 **26 份 / 15,323 行**（顶层 `.md`，`wc -l` 实测，CH-502 收口终测；+723 行 = 新增 `technical-reference.md` 720 行 + `dev-plan.md` 本轮 +3 行（CH-502 登记行与 v3.36 历史行 + §12.1 一处）；CH-501 时为 25 份 / 14,600 行、CH-500 时为 25 份 / 14,526 行、CH-499 时 24 份 / 14,340 行、CH-498 时 24 份 / 14,333 行、CH-497 时 14,327 行，增量除 `dev-plan` 自身的登记与口径同步外，CH-500 另有 `review-round17-CH-500.md` 151 行、CH-501 只增 `dev-plan` 自身 74 行）。另有 **`docs/qa/` 子树 18 份 / 6,595 行**（`find docs/qa -name '*.md'` 实测，CH-501 收口终测），分三层：**顶层 8 份 / 2,577 行**（QA 优化轮 2.13–2.15 的 `casebook` / `eval-report-v2` / `automated-test-plan-v2` 与两轮 `optimization-plan` / `optimization-report` 等，O-01~O-12 / N-1~N-8 的过程产物；**CH-501 的实机自动测试体系方案与用例卡就在这里**：`automated-test-plan-v2.md` 318 行 + `casebook.md` 331 行 / 15 张十字段用例卡）、**`docs/qa/round2/` 5 份 / 1,793 行**（第二轮 80 例 / 13 偏差 D1–D13 的 `test-plan` / `comparison` / `deviation-analysis` / `optimization-plan` / `fix-verification`）、**`docs/qa/round3/` 5 份 / 2,225 行**（第三轮 102 例 = 核心 95 + 难度腿 7：`test-plan` 1,360 / `comparison` 110 / `deviation-analysis` 230 / `optimization-plan` 368 / `fix-verification` 157；后两者含 O-h 覆盖率改判与收口终轮复跑取证）。**判读地位**：三轮 QA 文档是「过程存档」，不是规格——规格仍以 `docs/dev-plan.md` 主题篇 + 附录 A–G 为唯一权威，实机测试体系的权威口径是 **§8.7**；但 round3 的 **B-43 / B-44 两项是发布阻断项**，`docs/dev-plan.md` §12.7 有对应登记行，两处必须同读。QA 产物不计入顶层 25 份。此前本文只索引 `docs/` 里的 2 份（`dev-plan.md` 与 `plan-delta-v1.1.md`），其余无任何入口——查规格的人无从判断「`review-round8-CH-483.md` 是权威还是历史」。下表按两个角度给出完整地图；**地位列是判读依据，不是推荐阅读顺序**。
 
 ### 表一：按问题找权威
 
@@ -225,15 +225,19 @@ Windows 任务计划不捕获标准输出，日志目录里没有 `launchd-*` �
 | 这个错误码意味着什么、我该怎么办 | `docs/dev-plan.md` 附录 D（段位与触发口径）；「下一步动作」类指引见各失败面的 `detail` |
 | 本工具支持什么、不支持什么 | `docs/dev-plan.md` §1.2 目标与非目标（图片 / 公式 / 扫描件 OCR 均为非目标） |
 | 低配机内存与吞吐怎么调 | 本文「低配机器」小节的**三档驻留序列** + `docs/dev-plan.md` §第七章与 **12.3**（完整三档与测量方法） |
+| 实机自动测试怎么跑、六层口径与用例卡 | `docs/dev-plan.md` **§8.7**（六层体系 + 三条不可让口径 + 优先级口径）；方案与用例卡在 `docs/qa/automated-test-plan-v2.md` / `docs/qa/casebook.md`；一条命令见本文「实机自动测试」小节 |
+| 想一次读懂项目全貌（设计需求 / 架构 / 技术选型 / 实现方案 / 难点与解法 / 开发史） | `docs/technical-reference.md`（综述层，按「理解一个系统」的顺序重排；**不新增规格条款**，冲突以 `docs/dev-plan.md` 为准） |
 
-### 表二：`docs/` 全清单与地位（24 份）
+### 表二：`docs/` 全清单与地位（26 份）
 
 | 文件 | 行数 | 地位 | 什么时候读 |
 | --- | --- | --- | --- |
-| **`docs/dev-plan.md`** | 2,079 | **唯一权威** | 任何时候要查规格。主题篇为当前有效规格（正文不含变更编号），登记篇记录变更与证据 |
+| **`docs/dev-plan.md`** | 2,198 | **唯一权威** | 任何时候要查规格。主题篇为当前有效规格（正文不含变更编号），登记篇记录变更与证据 |
+| **`docs/technical-reference.md`** | 720 | 综述（**非规格权威**，CH-502 新增） | 要一次读懂「设计需求 → 架构 → 技术选型 → 实现方案 → 难点与解法」，或要查某个难点当时的根因、落点与取证形态时；含 117 提交 / 十七轮审查的开发史一览 |
 | `docs/spec-ch492-p1-a1.md` | 1,000 | 过程存档（CH-492 实施规格） | 要查 P-1 单趟字号直方图 / A-1 api↔worker 解耦的原始论证与等价性实测时（**代码已落地**，勿据以重复实施） |
 | `docs/spec-ch492-q2-deferred.md` | 274 | 过程存档 · **受限待办** | 要查 CH-492 主动搁置项与其受限原因时（同样勿据以实施） |
 | `docs/pm-review-CH-491.md` | 258 | 过程存档（产品审查） | 要查「功能缺口 F-01…F-14 / 文档失真 D-01…D-20」的清单与验收口径时 |
+| `docs/review-round17-CH-500.md` | 151 | 过程存档（第十七轮全面审查） | 要查本轮 50 项编号发现（架构 AR-1…12 / GUI·API R17-API-1…8 + AG-1…3 / 管线 R17-PIPE-1…6 + PERF-1…4 / SQL·服务·打包 R17-SQL-1 + R17-SVC-1…2 + R17-PKG-1 / 文档漂移 13 处）与 18 项独立实施、17 项 B 类登记（B-30…B-46，含 B-43/B-44 两条发布阻断；其中 7 项不占 50 编号，对账恒等式见报告处置段）、5 项撤销的原始论证及「发布判定＝阻断」的分档依据时 |
 | `docs/review-round14-CH-495.md` | 126 | 过程存档（第十四轮全面审查） | 要查本轮 46 项发现（架构 F1–F12 / API·GUI G1–G8 / 管线·性能 A1–A7·B1–B7 / 文档 #1–#11）的原始论证与 A 类实施 / B 类登记分类时 |
 | `docs/review-round13-CH-491.md` | 322 | 过程存档（第十三轮技术审查） | 要查本轮架构 / 性能 / 死代码类发现的原始论证时 |
 | `docs/review-round12-CH-490.md` | 44 | 过程存档 | 追某轮审查的原始论证时（勿据以实施） |
@@ -259,7 +263,7 @@ Windows 任务计划不捕获标准输出，日志目录里没有 `launchd-*` �
 
 运维侧另有两份细则，不在 `docs/` 下：**`ops/backup.md`**（备份介质与恢复演练细则，94 行）、**`ops/llm.md`**（本地 LLM 模型接入实操：选型 / 下载 GGUF / llama-server / 故障排查，206 行）；Windows 任务计划的安装 / 校验 / 卸载见 `ops/windows/install-doc2md-tasks.ps1`（280 行）。
 
-跟踪约定：契约变更、缺陷、更优做法一律按登记流写入方案 第十一章（当前编号至 `CH-499`，下一条自 `CH-500`），实测数字进第十二章并标注语料与测量方法；规格发生变化时同步主题篇章节与本文相应小节，并递增 `doc2md.PLAN_VERSION`（管线契约变化另递增 `PIPELINE_VERSION`；状态库结构变化另递增 `DB_VERSION`，CH-476 起为 `6`、CH-483 起为 `7`、CH-485 起为 `8`、CH-486 起为 `9`、CH-499 起为 `10`）。
+跟踪约定：契约变更、缺陷、更优做法一律按登记流写入方案 第十一章（当前编号至 `CH-502`，下一条自 `CH-503`），实测数字进第十二章并标注语料与测量方法；规格发生变化时同步主题篇章节与本文相应小节，并递增 `doc2md.PLAN_VERSION`（管线契约变化另递增 `PIPELINE_VERSION`；状态库结构变化另递增 `DB_VERSION`，CH-476 起为 `6`、CH-483 起为 `7`、CH-485 起为 `8`、CH-486 起为 `9`、CH-499 起为 `10`）。
 
 ## 验收与测试
 
@@ -288,9 +292,9 @@ push 面 `full-suite` 必须保持无矩阵且钉死 `3.12`、每个作业必须
 > 也成立，需为 `main` 打开「Require a pull request before merging」，那是改变日常工作流的决策项。
 
 ```bash
-pytest -m gate            # 红线层：六条 merge-gate + 低配机专项 + CH-469 两批安全/契约专项 + CH-473 第五轮 12 项 + CH-474 补入 X-17 1 项 + CH-475 第六轮 7 项 + CH-476 第七轮 91 项 + CH-477 版本对账 4 项 + CH-478 批次① 有序列表端到端 4 项 + 批次② 等价门缩进敏感度 4 项 + CH-479 CI 版本矩阵口径 4 项 + CH-480 常驻资产同构 7 项 + CH-481 捕获档截断 8 项 + CH-482 代码块缩进重建 10 项 + CH-483 结构修复 23 项 + CH-484 并发夹具 3 项 + CH-485 第九轮 28 项 + CH-486 第十轮 5 项 + CH-487 结构修复 24 项 + CH-488 复杂语料 12 项 + CH-489 第十一轮 15 项 + CH-490 本机收口 7 项 + CH-491 静态对账 2 项 + CH-494 X-18 回归 15 项 + QA 轮（2.13–2.15）41 项（LLM P0 契约 16 / N-04 家具扩展 11 / v2.4 门禁扩容 10 / 既有门禁补强 4）+ CH-495 第十四轮 37 项（pipeline 13 / round2 14 / service 7 / watch 3）+ CH-496 本机收口 11 项 + CH-497 B1/B-12 5 项 + CH-498 竞态/缝线/定档 8 项 + CH-499 租约/归因/跨卷 18 项与文档内部对账 3 项（全绿方可合并）
-                          # 当前 542 项（CH-499；构成与完整耗时历史见 docs/dev-plan.md 附录 F / 12.1。项数是硬口径，耗时只作历史）
-                          # 耗时历史记录：Linux 沙箱轮次 72–110s、T8 优化后 53.0s、CH-469 本机（macOS arm64 / Py 3.15）28.7s、CH-473 62.7s、CH-475 30.0s、CH-476 33.9s、CH-477 33.25s / 31.98s、CH-478 批次① 31.54s、批次② 31.16s、CH-479 38.55s / 收口复跑 33.74s、CH-480 36.13s / 收口复跑 35.43s（新七条红线只做 plistlib 解析与 XML 读 DOM，差值属同机负载抖动）、CH-481 36.14s / 34.92s / 35.91s、CH-482 35.71s（`--junitxml` 35.36s）、QA 轮 + CH-495 本机复跑（macOS arm64 / Py 3.15，497 项全绿）`--junitxml` 33.58s、CH-497 `--junitxml` 38.30s、CH-498 `--junitxml` 41.979s（per-case 求和 41.31s，54.6% 压在两条 320 页真实转换上——见 dev-plan §9.1 门禁分层复核）、CH-499 `--junitxml` 41.934s（542 项 / 0 skipped，新增 21 项均为纯静态或纯单元断言，慢项清单未扩容）——项数是硬口径，耗时只作历史
+pytest -m gate            # 红线层：六条 merge-gate + 低配机专项 + CH-469 两批安全/契约专项 + CH-473 第五轮 12 项 + CH-474 补入 X-17 1 项 + CH-475 第六轮 7 项 + CH-476 第七轮 91 项 + CH-477 版本对账 4 项 + CH-478 批次① 有序列表端到端 4 项 + 批次② 等价门缩进敏感度 4 项 + CH-479 CI 版本矩阵口径 4 项 + CH-480 常驻资产同构 7 项 + CH-481 捕获档截断 8 项 + CH-482 代码块缩进重建 10 项 + CH-483 结构修复 23 项 + CH-484 并发夹具 3 项 + CH-485 第九轮 28 项 + CH-486 第十轮 5 项 + CH-487 结构修复 24 项 + CH-488 复杂语料 12 项 + CH-489 第十一轮 15 项 + CH-490 本机收口 7 项 + CH-491 静态对账 2 项 + CH-494 X-18 回归 15 项 + QA 轮（2.13–2.15）41 项（LLM P0 契约 16 / N-04 家具扩展 11 / v2.4 门禁扩容 10 / 既有门禁补强 4）+ CH-495 第十四轮 37 项（pipeline 13 / round2 14 / service 7 / watch 3）+ CH-496 本机收口 11 项 + CH-497 B1/B-12 5 项 + CH-498 竞态/缝线/定档 8 项 + CH-499 租约/归因/跨卷 18 项与文档内部对账 3 项 + CH-500 第十七轮 38 项（API 19 / 管线 13 / 服务与运维 3 / 状态库谓词 2 / 包入口 1）+ CH-501 实机自动测试 19 项（判定层红线：难度真值只取自声明侧、TCOLC 键与产品同名、归因恒等式、9 条缺陷规则非空转、优先级分档精确且修复成本不降档、口径派生自 §12.7、真实样本隐私边界、`not_run` 不报 `pass`、junit 计数只认 XML、用例卡十字段且发布阻断缺口必有 P0 卡，全绿方可合并）
+                          # 当前 599 项（CH-501 出口；构成与完整耗时历史见 docs/dev-plan.md 附录 F / 12.1。项数是硬口径，耗时只作历史）
+                          # 耗时历史记录：Linux 沙箱轮次 72–110s、T8 优化后 53.0s、CH-469 本机（macOS arm64 / Py 3.15）28.7s、CH-473 62.7s、CH-475 30.0s、CH-476 33.9s、CH-477 33.25s / 31.98s、CH-478 批次① 31.54s、批次② 31.16s、CH-479 38.55s / 收口复跑 33.74s、CH-480 36.13s / 收口复跑 35.43s（新七条红线只做 plistlib 解析与 XML 读 DOM，差值属同机负载抖动）、CH-481 36.14s / 34.92s / 35.91s、CH-482 35.71s（`--junitxml` 35.36s）、QA 轮 + CH-495 本机复跑（macOS arm64 / Py 3.15，497 项全绿）`--junitxml` 33.58s、CH-497 `--junitxml` 38.30s、CH-498 `--junitxml` 41.979s（per-case 求和 41.31s，54.6% 压在两条 320 页真实转换上——见 dev-plan §9.1 门禁分层复核）、CH-499 `--junitxml` 41.934s（542 项 / 0 skipped，新增 21 项均为纯静态或纯单元断言，慢项清单未扩容）、CH-500 收口复跑 `--junitxml` **44.627s（580 项 / 0 skipped，542→572→580 的新增项同为纯单元/静态断言，未拉 320 页夹具，故慢项清单 `HEAVY_GATE_ITEMS` 与 `HEAVY_FIXTURES` 均未扩容；per-case 求和 44.144s，与套件墙钟差 0.483s 属收集与收尾；同轮另三次 580 项采样为 40.636s / 40.658s / 40.802s，±4s 散布是同机并发与 `pytest-randomly` 用例次序所致——项数与通过态才是硬口径）、CH-500 文档改完后终轮 38.155s / 末两轮 37.716s / 38.137s、**CH-501 文档全改完后终轮 `--junitxml` 同轮三点（per-case 求和 / 套件墙钟）43.776s / 44.429s、45.252s / 45.917s、41.958s / 42.454s：599 项 / 0 skipped / 0 failed 恒等，后两点是本段数字同源刷新后的复跑，同轮另一次 `--durations` 复跑 44.27s、编排器 `L1_gate` 腿墙钟 46.58s；本段散文自身是 gate 读取对象，改一次须重跑一次，故终值只认项数与通过态，八个墙钟采样同落 42.0–46.6s 带，收口后两次复跑 52.42s / 54.22s 是同机并发抬升的活例（项数仍 599 / 0 / 0 / 0）——这正是「耗时不入断言」的理由；按 12.1 的测量止句，此后不再追加墙钟引用，闭合判据只有项数与通过态；收口复跑 47.601s / 47.9s 与轮中 55.85s 属文档改动前的中途快照，按 O-h 第三形态作废——本轮 19 项新红线同为纯静态 / AST / 纯函数断言，最慢一项 `test_trace_anchors_resolve` 0.298s，`--durations` top-12 里没有任何一项来自 `test_ch501_qa_auto.py`，慢项清单 `HEAVY_GATE_ITEMS` 第三次保持未扩容**——项数是硬口径，耗时只作历史
 pytest tests/             # 全量（marker 实际取值：M0+M2 / M3 / M5 / M6c / M8 / M9a / DoD / PERF，见 pytest.ini）
 python3 tests/make_golden.py            # 重建黄金样本（输出目录随脚本位置，--golden 可覆盖）
 python3 tests/make_golden.py --force    # 强制重生成
@@ -326,16 +330,44 @@ python tests/corpus/run_corpus.py --write-baseline  # 审阅后更新目标
 `edit_optimistic_lock`、`delete_cascade`、`log_rotation`；另含本实现补强的 CJK 检索、渲染分级、
 目录递归防护与低配机专项断言（完整清单见方案 附录 F）。
 
-本机最新收口取证（CH-499，macOS arm64 / Python 3.15）：`pytest -m gate` **542 项全绿 / 0
-skipped**（`--junitxml` 41.934s），全量 **1311 项 = 1309 passed / 2 skipped / 0 failed**（97.972s，
-2 条 skip 是既有的 Windows junction 平台门控，非新增）；`ruff check doc2md tests config ops`
-全绿、`doc2md doctor` 退 0；黄金逐字节可复现 7 项与产物面 63 项全绿——本轮三项改动（租约
-回收、注入归因、跨卷权限告警）都不落在产物路径上，产物字节未变，故 `PIPELINE_VERSION` 停在
-**2.17.0**，bump 的是状态库结构版本 `DB_VERSION` **9→10**。逐轮数字与构成见方案 12.1 / 附录 F。
-远端确认 = run `40090700532`（push `6d01dd1`）六作业全绿：三档 merge-gate 各 **542 passed / 769
-deselected**、`full-suite` 1308 passed / 3 skipped（黄金逐字节 7 项全过、`doctor` 打 2.17.0）、
-`windows-suite` 门禁层 **542 passed / 0 skipped**——本轮 21 项新红线在 Windows 上真跑（跨卷权限
-那条走 `icacls` 分支，不是跳过），三口径互证 542+769 = 1308+3 = 1304+7 = **1311**。
+### 实机自动测试（CH-501，六层一条命令）
+
+上面几条腿各自回答「代码坏没坏」，但不回答「转化效果离目标还差多少、差在哪个阶段、下一步该修什么」。
+CH-501 把这五问收进一条命令（完整口径见方案 **§8.7**，方案书 `docs/qa/automated-test-plan-v2.md`，逐例卡片 `docs/qa/casebook.md`）：
+
+```bash
+.venv/bin/python tests/qa/realtest.py                                   # 六层全跑 → work/qa/realtest.{json,md}
+.venv/bin/python tests/qa/realtest.py --only L0,L1                      # 只跑静态 + 门禁（无法匹配的层名当场退出，不静默选空）
+.venv/bin/python tests/qa/gen_cases.py --selfcheck                      # 生成器自检：我画的东西确实在源文件里
+.venv/bin/python tests/qa/gen_cases.py --casebook --fill-results work/qa --out docs/qa/casebook.md
+```
+
+六层 = **L0 静态**（ruff）/ **L1 门禁**（`pytest -m gate`，`skipped>0` 即不算通过）/ **L2 全量**（可选 `coverage run`）/
+**L3 资产**（22 篇语料逐字节）/ **L4 安装与探针**（`doctor`、CLI 出包、API 探针、worker drain）/
+**L5 效果**（评测 → 归因 → 缺陷扫描 → 可追溯 → 优先级 → 难度腿 → 真实样本腿，信息层、不阻断总判）。
+三条不可让的口径由红线钉住（`tests/test_ch501_qa_auto.py`，19 项全部 `gate`）：**计数只认 `--junitxml` 的 `tests=`**，
+文件缺失返回 `None` 而不是 0（0 会被读成「全绿」）；**`xfail` 从 `skipped` 拆出**，永久红不是通过；
+**没跑的腿一律记 `not_run`，永不报 `pass`**，总判只由阻断层决定。真值来源同一条纪律：期望只来自声明侧
+（`tests/corpus/hard/expectations.json` 的 `judge`/`expect` 与 `tests/corpus/manifest.json`），
+卡片的实际结果只来自同轮 `work/qa/*.json` 的 `generated_at`——**从产物里取期望，就永远看不见结构性损失**。
+真实文档一律放 `work/real_samples/`（gitignored），不进 `tests/`；本机没有真实样本时该腿恒 `not_run`（B-49）。
+
+本机最新收口取证（CH-501，macOS arm64 / Python 3.15，六层编排器同轮取证）：`pytest -m gate` **599 项全绿 / 0 skipped**（终轮 `--junitxml` 同轮三点：per-case 求和 / 套件墙钟 43.776s / 44.429s、45.252s / 45.917s、41.958s / 42.454s——**本段散文自身是 gate 读取对象，改一次就要重跑一次，故终值取「599 / 0 / 0 / 0 恒等」而非某一串墙钟**；同轮另一次 `--durations` 复跑 44.27s；编排器 `L1_gate` 腿墙钟 46.58s；收口复跑 47.601s / 47.9s 与轮中一次 55.85s 都是文档改动前的中途快照，按 O-h 第三形态作废、不作终值——同机并发与 `pytest-randomly` 的用例次序本就造成 ±4s 级散布，**项数与通过态才是硬口径**），全量 **1432 项 = 1416 passed / 16 skipped / 0 failed**（终轮 `--junitxml` per-case 求和 97.045s / 套件墙钟 97.804s / 进程墙钟 98.26s，编排器 `L2_full` 腿墙钟 106.15s，同轮覆盖率腿 `coverage run -m pytest tests/` 进程墙钟 96.50s（与 CH-500 的 95.600s 同口径可比）；收口复跑的 105.682s / 106.46s / 103.78s 与带 `--coverage` 的 134.75s 均属文档改动前的中途快照，只作历史；84 个 classname 求和 = 1432 与 `tests=` 一致；**16 条 skip 拆两栏写：真 skip 10**（2 条既有 Windows junction 平台门 + 8 条 `tests/qa/test_hard_corpus.py` 的「TODO 未填断言」骨架 skip）**+ xfail 6**（`tests/qa/test_hard_gate.py` 的 5 条 strict xfail 钉住 B-43 / B-44 / B-45 / B-47 / B-48，加骨架 1 条 D05 已知缺陷）——junitxml 把 xfail 折进 `skipped` 属性，**xfail 不是 pass**）；
+语句覆盖率 **91%**（`coverage report --include="doc2md/*"` 的 TOTAL **7,797 stmts / 738 miss**，打出值 91%、精确 90.51%）、`doc2md/security/perms.py` **40%**（75/45）；`ruff check doc2md tests config ops` 全绿、`doc2md doctor` 退 0、语料回归 **22/22 逐字节一致**；难度语料对账 **6/10**（`tests/corpus/run_hard.py` 退 1：D01 / D03 / D04 / D06 / D07 / D09 达成，D02→B-43、D05→B-44 记失败，D08→B-45、D10→B-47 记缺口（真值侧口径须人工定档）。D09 本器显示达成、门禁腿却记 xfail 不是矛盾：「目录域缓存被当正文重复输出」的判据写在 `test_hard_gate.py::extra_checks()` 里，`run_hard.py` 不认那个键）。本轮的六层一条命令给出 `REALTEST overall=pass`，其中一条 GAP 是 `clean_venv_install`（空 venv 安装属发布前动作，本编排器只覆盖本机可重复子集），一条 NOT_RUN 是真实样本腿（`work/real_samples/` 无样本，B-49）——两者都显式登记，不冒充通过。**发布判定仍为「阻断」**：B-43 / B-44 在 §12.7 标着发布阻断，其用例卡 **TC-005 / TC-011**（D02）与 **TC-008**（D05）按同一派生口径自动记 **P0**；须由人工逐页对照真实 PDF 修复，或复核后出具书面豁免。
+本轮产品字节零改动（全部落在 `tests/qa/`、`tests/corpus/` 与文档面）⇒ `PIPELINE_VERSION` 保持 **2.18.0**、`SCHEMA_VERSION` **14** 与 `DB_VERSION` **10** 不动，只有方案文档版本 **v3.34→v3.35**（`doc2md.PLAN_VERSION` 同步）。逐轮数字与构成见方案 12.1 / 附录 F；实机测试体系的方案与 15 张十字段用例卡见 `docs/qa/automated-test-plan-v2.md` / `docs/qa/casebook.md`。
+上一轮（CH-500，第十七轮全面审查 + QA 第三轮）取证：gate **580 项全绿 / 0 skipped**（收口复跑 `--junitxml` 44.627s，终轮复跑 38.155s、末两轮 37.716s / 38.137s，同轮六点采样项数与通过态一致），全量 **1390 项 = 1382 passed / 8 skipped / 0 failed**（95.600s，81 个 classname 求和一致；8 条 skip = 2 条 Windows junction 平台门 + 6 条难度骨架 TODO-skip/xfail）；语句覆盖率 **91%**（45 个模块 / 7797 stmts / 740 miss，精确 90.51%）、`perms.py` **40%**（75/45）；三轮 QA 探针 **49/49 · 32/32 · 30/30** 全绿；难度语料对账当时 **4 通过 / 2 失败 / 1 缺口**（D03 尚无样本，故只有 7 份——该空洞由 CH-501 的三个生成器补齐）。该轮三项产物字节改动（交付 meta 摘掉片级内部锚 `shard`、外链链接文字补转义、DOCX 行字号改按字符数加权众数）触发 `PIPELINE_VERSION` **2.17.0→2.18.0**；B-43 / B-44 的发布阻断判定即出自该轮 QA 第三轮，且值得单独记一句：**这两项缺陷在门禁 580 项、全量 1390 项、语料 22/22 三条既有腿上全部为绿**，只有第一次运行的独立真值腿给出红——覆盖数与发现能力并不相关，差别只在期望值是否独立于被测实现。
+上一轮（CH-499）取证：gate **542 项全绿 / 0 skipped**（41.934s），全量 **1311 项 = 1309 passed /
+2 skipped / 0 failed**（97.972s），黄金逐字节 7 项与产物面 63 项全绿，bump 的是状态库结构版本
+`DB_VERSION` **9→10**；远端确认 = run `40090700532`（push `6d01dd1`）六作业全绿：三档 merge-gate
+各 **542 passed / 769 deselected**、`full-suite` 1308 passed / 3 skipped（黄金逐字节 7 项全过、
+`doctor` 打 2.17.0）、`windows-suite` 门禁层 **542 passed / 0 skipped**——跨卷权限那条走 `icacls`
+分支，不是跳过，三口径互证 542+769 = 1308+3 = 1304+7 = **1311**。
+本轮远端复证待办：**599 项**红线在 CI 三档与 Windows 腿的复跑（含上一轮 580 项尚未推送的部分，B-12 / B-16 / B-27-remote）+
+真实 SMB / 网络卷（B-40）需本机以外环境。本轮另登记三项：B-47 需人工裁定「CID 无 `/ToUnicode` 的乱码文本层」的产物口径
+（按 E4221 类拒收 / 新增 W 码并保留占位 / 保持现状并在文档写明），B-48 需人工裁定「DOCX 目录域缓存结果」的产物口径
+（整体丢弃 / 保留但不进标题 / 保留并按文本去重），B-49 需人工放入 ≥5 篇真实样本并标注标题真值——本机
+`work/real_samples/` 为空 ⇒ 真实样本腿恒 `not_run`，这是诚实状态而非缺陷。B-46（难度腿入 gate）以 B-43 / B-44 为前置，
+切换点只有 `tests/qa/test_hard_gate.py` 的 `GATE_READY` 一处；B-42 仍需起停外部 LLM 服务的双环境取证。
 
 正文里出现的 `CH-xxx` 只是索引，条目原文与实测证据统一收录在
 `docs/dev-plan.md` 第十一、十二章。

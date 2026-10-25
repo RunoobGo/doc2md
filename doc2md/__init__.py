@@ -10,8 +10,9 @@
 - PLAN_VERSION：开发方案文档版本（主题篇规格变化时递增）。
 """
 
-PIPELINE_VERSION = "2.17.0"   # CH-496：A5 跨页列表/续句并回改变受影响文档的产物字节 → minor
+PIPELINE_VERSION = "2.18.0"   # CH-500：交付 meta 摘掉片级内部锚 `shard`、外链链接文字
+                              # 补转义、DOCX 行字号改加权众数——三项均改变产物字节 → minor
 SCHEMA_VERSION = 14          # IR 约定 14（文件名与内容的边界）落地
-PLAN_VERSION = "3.33"         # 开发方案文档版本（docs/dev-plan.md，文件名不带版本号）
+PLAN_VERSION = "3.36"         # 开发方案文档版本（docs/dev-plan.md，文件名不带版本号）
 
 __all__ = ["PIPELINE_VERSION", "SCHEMA_VERSION", "PLAN_VERSION"]

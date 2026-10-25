@@ -150,14 +150,33 @@ def sniff(path: str | Path) -> str:
     if head.startswith(MAGIC_PDF):
         return "pdf"
     if head.startswith(MAGIC_ZIP):
+        # CH-500（R17-PIPE-3）：ZIP 容器分三种结局，过去两种都折进同一句
+        # 「unsupported magic」——截断/损坏的 .docx（下载不完整最常见）与
+        # 「其实是别的 ZIP 改名成 .docx」（xlsx/epub/odt）对用户是完全不同的
+        # 处置，却拿到一模一样的报错（实测逐字节同文，detail 还回显 PK magic，
+        # 于是「类型不支持」把「文件坏了」彻底盖住）。原 `except Exception: pass`
+        # 把 BadZipFile 直接吞掉，是这条误诊的根因。
+        import zipfile
         try:
-            import zipfile
             with zipfile.ZipFile(p) as z:
                 names = set(z.namelist())
-            if DOCX_REQUIRED_PART.decode() in names:
-                return "docx"
-        except Exception:
-            pass
+        except zipfile.BadZipFile as exc:
+            raise E4151_UnsupportedType(
+                f"{p.name} is a damaged ZIP container, not a readable .docx: "
+                f"{type(exc).__name__}",
+                detail={"file": p.name, "magic": head.hex(),
+                        "reason": "corrupt_zip"}) from None
+        except OSError as exc:
+            raise E4151_UnsupportedType(
+                f"cannot read {p.name}: {type(exc).__name__}",
+                detail={"file": p.name, "magic": head.hex(),
+                        "reason": "zip_unreadable"}) from None
+        if DOCX_REQUIRED_PART.decode() in names:
+            return "docx"
+        raise E4151_UnsupportedType(
+            f"{p.name} is a ZIP container but has no word/document.xml "
+            "(not a .docx — xlsx/epub/odt are not supported)",
+            detail={"file": p.name, "magic": head.hex(), "reason": "not_a_docx"})
     if head.startswith(MAGIC_OLE) and p.suffix.lower() == ".doc":
         # Legacy Word binary. Parsing needs an external converter (S1
         # `read_legacy_doc`); magic is checked here so unsupported OLE files
@@ -879,13 +898,26 @@ def _docx_para_line(p, d, rels=None, ctx: _DocxCtx | None = None) -> Line | None
         return None
     size = 0.0
     bold = italic = strike = mono = False
+    # CH-500（R17-PIPE-6）：字号取**可见字符加权的众数**，不再是「最后一个带显式
+    # 字号的 run」。原循环逐 run 覆写 `size`，于是段内 run 的**排列顺序**决定
+    # 结果（实测同一对 run 换序：22pt 在前记 10.0、10pt 在前记 22.0，短 pair 里
+    # 后者直接被判成 `heading level 1`）。字号往下游喂给 `_heading_level` /
+    # `modal_size`，「这行正文有多大」应当只由正文内容量决定。众数口径与 PDF 侧
+    # `_line_flags` 的 `max(sizes.items(), key=kv[1])` 同构（并列取先出现的 run，
+    # 与 dict 插入序一致），无显式字号的 run 不投票（保持 0 = 继承，行为不变）。
+    sizes: dict[float, int] = {}
     for r in runs:
         if r.font.size is not None:
-            size = float(r.font.size.pt)
+            pt = float(r.font.size.pt)
+            size = pt
+            n = len((r.text or "").strip())
+            sizes[pt] = sizes.get(pt, 0) + max(1, n)
         bold = bold or bool(r.bold)
         italic = italic or bool(r.italic)
         strike = strike or bool(r.font.strike)
         mono = mono or _name_is_mono(r.font.name)
+    if sizes:
+        size = max(sizes.items(), key=lambda kv: kv[1])[0]
     nonempty = [r for r in runs if (r.text or "").strip()]
     uniform_bold = bool(nonempty) and all(bool(r.bold) for r in nonempty)
     uniform_italic = bool(nonempty) and all(bool(r.italic) for r in nonempty)

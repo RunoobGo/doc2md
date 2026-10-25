@@ -45,10 +45,12 @@ from .storage.repo import (
     delete_source,
     get_doc,
     list_blocks,
+    list_docs,
     prepare_ir_rows,
     reconcile_search,
     save_ir,
     search,
+    task_status_counts,
 )
 from .worker import enqueue_many
 
@@ -71,6 +73,10 @@ _MD_CHUNK = 64 * 1024
 
 # CH-495（R14-API-1）：请求体硬上限（Flask MAX_CONTENT_LENGTH）；超限 → 413/E4131。
 _MAX_BODY_BYTES = 32 * 1024 * 1024
+
+# CH-500（R17-API-2）：整数查询参数的合法域 = SQLite INTEGER（int64）。
+# Python int 无上界，越界值进绑定参数即抛 OverflowError → 未归类 500。
+_INT64_MAX = 2 ** 63 - 1
 
 # CH-476（R7-SVC-3）：同步池的排队上界与超时提示。闸门原为无超时 `acquire()`——
 # 小时级大批量占池期间，后续 `POST /jobs` 的请求线程无限期挂起（连接与线程一直被
@@ -144,7 +150,11 @@ def _batch_bytes(paths) -> int:
 
 def create_app(cfg: dict | None = None, root: Path | None = None,
                config_path: str | None = None, reload_from_files: bool = False):
+    # CH-500（R17-API-3）：`@app.errorhandler` 需要异常**类**做注册键。原实现用
+    # duck-typing（int `.code`）判 HTTPException 以免引 werkzeug；CH-496 起
+    # werkzeug 已是直接依赖（`make_server`），显式注册比透传 HTML 更可维护。
     from flask import Flask, Response, jsonify, request
+    from werkzeug.exceptions import HTTPException as WerkzeugHTTPException
 
     cfg = cfg or config.load(config_path)
     root = Path(root) if root else config.path_setting(cfg, "paths.root", ".")
@@ -244,6 +254,18 @@ def create_app(cfg: dict | None = None, root: Path | None = None,
         # CH-495（R14-API-2）：「非法 JSON / 错误 Content-Type」不再与「空体」
         # 同形折叠成 {}——前者会让 PUT /settings 空转重写 override 回 200、
         # POST /tokens 静默签出 reader token（明确失败优先于看似成功）。
+        # CH-500（R17-API-1）：R14-API-2 的判据是 `request.data`，而 Werkzeug 对
+        # **表单型 Content-Type** 已把正文消费进 `request.form`，`request.data`
+        # 恒为空 → `application/x-www-form-urlencoded` 带真实载荷仍然折叠成 {}，
+        # 上述两个「看似成功」的形态原样复活（实测 PUT /settings 回 200 且落盘
+        # `{}`、POST /tokens 把 role=admin 静默降级成 reader）。改为先认 Content-Type：
+        # 有正文就必须是 JSON；无正文（真·空体）才按缺省 {} 处理。
+        if not request.is_json:
+            if request.content_length or request.get_data(parse_form_data=False):
+                raise E4001_BadRequest(
+                    "Content-Type must be application/json "
+                    f"(got {request.mimetype or 'unset'})")
+            return {}
         data = request.get_json(silent=True)
         if data is None:
             if request.data:
@@ -271,14 +293,23 @@ def create_app(cfg: dict | None = None, root: Path | None = None,
         return offset, min(limit, _MAX_ROWS)
 
     def _int_arg(name: str, default: int) -> int:
-        """查询参数整数解析：非数字走 400/E4001（CH-464，原裸 int() 逃逸 500 HTML）。"""
+        """查询参数整数解析：非数字走 400/E4001（CH-464，原裸 int() 逃逸 500 HTML）。
+
+        CH-500（R17-API-2）：Python 的 int 无上界，`?since=1e20` 会原样进
+        SQLite 绑定并抛 `OverflowError`（int 太大转不出 SQLite INTEGER）→ 500/E5000。
+        实测 `/events?since=`、`/audit/deletions?offset=`、`/docs/<id>/audit?offset=`
+        三处同一形态。整数参数一律钉在 SQLite 的 INTEGER 域内，越界即 400。
+        """
         raw = request.args.get(name)
         if raw is None:
             return default
         try:
-            return int(raw)
+            val = int(raw)
         except ValueError:
             raise E4001_BadRequest(f"{name} must be an integer") from None
+        if not -_INT64_MAX <= val <= _INT64_MAX:
+            raise E4001_BadRequest(f"{name} out of range (|value| <= {_INT64_MAX})")
+        return val
 
     @app.errorhandler(ApiError)
     def _api_err(e):
@@ -300,6 +331,32 @@ def create_app(cfg: dict | None = None, root: Path | None = None,
         return err(E4131_TooLarge("request body too large",
                                   {"max_bytes": _MAX_BODY_BYTES}))
 
+    @app.errorhandler(WerkzeugHTTPException)
+    def _http_exc(e):
+        """CH-500（R17-API-3）：路由级 HTTPException 一律走 {code,message,detail} 契约。
+
+        附录 C 写「响应错误一律走该契约，5xx 同样」，但 `_unhandled` 一直**刻意透传**
+        带 int `.code` 的 HTTPException，于是 405 / 415（Werkzeug 自带）仍回 HTML 页——
+        实测 `PUT /healthz` 得 `405 text/html`。前端 `api()` 对非 2xx 读 `j.code`，
+        HTML 里取不到 → 只能显示「请求失败」。现在状态码原样保留，正文换成契约。
+        不新增错误码（附录 D 段位冻结，CODE_INDEX 是 QA 覆盖率分母）：沿用 CH-495
+        F5 的先例——复用既有码 + `detail.reason` 精确化，HTTP 状态在 `detail.status`
+        里带上。404/413 由更具体的处理器优先命中，不进这里。
+        """
+        status = int(e.code or 500)
+        reason = {405: "method_not_allowed", 415: "unsupported_media_type",
+                  400: "bad_request", 408: "timeout", 409: "conflict",
+                  429: "too_many_requests"}.get(status, "http_error")
+        detail = {"reason": reason, "status": status,
+                  "method": request.method, "path": request.path}
+        if getattr(e, "valid_methods", None):
+            # Werkzeug 的 405 把允许方法放在 `valid_methods`（不是 `allowed`），
+            # 并由它生成 `Allow` 头；契约里带上，调用方不必再猜。
+            detail["allowed"] = sorted(e.valid_methods)
+        return jsonify({"code": E4001_BadRequest.code,
+                        "message": e.description or "request error",
+                        "detail": detail}), status
+
     @app.errorhandler(Exception)
     def _unhandled(e):
         """SVC-2（CH-471）：未归类异常一律走 {code,message,detail} JSON 契约。
@@ -307,15 +364,17 @@ def create_app(cfg: dict | None = None, root: Path | None = None,
         原实现只注册 ApiError/Doc2mdError/404 三个处理器；任何其它异常
         （BadZipFile / IndexError / 存储抖动）逃逸成 Werkzeug 默认 **HTML 500**，
         违反附录 C「响应错误一律走该契约，5xx 同样」。路由级 HTTPException
-        （405/415…）原样透传保持 Flask 默认；其余转 E5000。
-        以 int `.code`（HTTP 状态）判别 HTTPException，避免为一次 isinstance
-        引入 werkzeug 依赖（本包 code 恒为字符串 "E4001" 式，不冲突）。
+        （405/415…）改由 `_http_exc` 处理（CH-500 R17-API-3，不再透传 HTML）；
+        其余转 E5000。
         NFR-20：日志只记异常类名，不落消息正文/请求体。
         """
-        code = getattr(e, "code", None)
-        if isinstance(code, int) and 100 <= code < 600 and hasattr(e, "get_response"):
-            return e
         logw().write({"code": "E_UNHANDLED", "exc": type(e).__name__})
+        # CH-500（R17-API-4）：写完立即 flush。`RotatingJsonlWriter.write()` 不
+        # flush（只在阈值轮转时随 `check()` 落盘），而 500 是低频事件——实测连续
+        # 三次 500 后 `logs/app.jsonl` 字节数不变，三行 E_UNHANDLED 直到**下一个
+        # 无关请求**触发 flush 才落盘。排障时「刚才那个 500」在日志里不存在，
+        # 等于把最需要的证据丢掉；同文件的 `events.py` 走法就是 write+flush。
+        logw().flush()
         return err(Doc2mdError("internal error"))
 
     # --- 作业 ---------------------------------------------------------------
@@ -660,28 +719,53 @@ def create_app(cfg: dict | None = None, root: Path | None = None,
         # CH-471（SVC-8）：与 `_window` 同口径——非数字走 400/E4001，负值拒绝。
         # 原裸 `int()` 无负值保护 → `?limit=-1` 拼进 SQL 得 `LIMIT -1`（SQLite 语义
         # 是「全部」），既绕过队列分页可观测上限，又与 `_window` 的拒负不一致。
-        limit = _int_arg("limit", 50)
-        if limit < 0:
-            raise E4001_BadRequest("limit must be >= 0")
-        limit = min(limit, _MAX_ROWS)      # CH-476（R7-PERF-j）：无界上限硬顶
+        # CH-500（R17-API-8）：改走 `_window(default_limit=50)` 并接上 `?offset=`。
+        # `/jobs` 此前只有 `limit`：`has_more=true` 报了「还有更多」却没有游标可取，
+        # GUI 队列面板（`editor.html` 固定 `limit=50`）在长队列下永远看不到第 51 条。
+        # 排序补 `job_id` 作同刻 tiebreak——`created_at` 同秒批量入队时翻页不重不漏。
+        offset, limit = _window(default_limit=50)
         sql = ("SELECT job_id, doc_id, source_key, status, created_at, started_at,"
                " finished_at, error_code, detail_json, source_path, mode FROM tasks")
         args: tuple = ()
         if status:
             sql += " WHERE status=?"
             args = (status,)
-        sql += " ORDER BY created_at DESC LIMIT ?"
-        rows = [dict(r) for r in store.q(sql, args + (limit,))]
+        sql += " ORDER BY created_at DESC, job_id LIMIT ? OFFSET ?"
+        rows = [dict(r) for r in store.q(sql, args + (limit, offset))]
         for r in rows:
             try:
                 r["detail"] = json.loads(r.pop("detail_json") or "{}")
             except (TypeError, ValueError):
                 r["detail"] = {}
-        counts = {r["status"]: r["c"] for r in store.q(
-            "SELECT status, COUNT(*) c FROM tasks GROUP BY status")}
-        return jsonify({"tasks": rows, "counts": counts})
+        counts = task_status_counts(store)
+        # CH-500（R17-API-5）：`/jobs` 只回 `tasks`（已被 limit 截断）+ `counts`，
+        # 调用方无法判定「还有没有下一页」——GUI 的队列面板因此把截断当全集显示。
+        # 与 `/docs`、`/docs/<id>/audit` 同族补 `total`（过滤后全集条数）与
+        # `has_more`；`counts` 口径不变（全表按状态计数），旧调用方不受影响。
+        # D9 同口径：显式 `limit=0` 是「取空集」，不存在下一页，不得反报 True。
+        total = counts.get(status, 0) if status else sum(counts.values())
+        return jsonify({"tasks": rows, "counts": counts, "total": total,
+                        "offset": offset, "limit": limit,
+                        "has_more": False if limit == 0 else offset + len(rows) < total})
 
     # --- 文档 ---------------------------------------------------------------
+    @app.get("/docs")
+    def docs_list():
+        """文档清单（CH-500 / R17-API-6）：`repo.list_docs` 的 HTTP 出口。
+
+        附录 C 与 12.x 一直把 `GET /docs` 写成契约面（QA 第二轮 D9 的收口就是按
+        `/docs` 的 `has_more` 口径做的），实测 URL 表里**根本没有这条路由**：
+        `repo.list_docs`（带 `total/offset/limit/has_more` 分页信封、每行 blocks
+        计数、`created_at DESC, doc_id` 稳定排序）只有 CLI 一个消费者，HTTP 面
+        缺位，GUI 只能退而用 `GET /jobs?limit=50` 猜「有哪些文档」。此处把既有
+        被测函数挂上出口，不新增查询、不新增 SQL、不改 GUI。
+        窗口口径与全 API 一致：`_window` 硬顶 `_MAX_ROWS`，显式 `limit=0` 取空集。
+        """
+        need("read")
+        offset, limit = _window(default_limit=_MAX_ROWS)
+        status = request.args.get("status")
+        return jsonify(list_docs(store, offset=offset, limit=limit, status=status))
+
     @app.get("/docs/<doc_id>")
     def get_document(doc_id):
         need("read")
@@ -691,7 +775,9 @@ def create_app(cfg: dict | None = None, root: Path | None = None,
         # 只读派生字段，不加列、不改既有键。
         d["warnings"] = list((d.get("meta") or {}).get("warnings") or [])
         # CH-469（V-5）：分片文档可达数千块，原实现无条件全量物化 + 序列化，
-        # 首个响应就能到 MB 级。`?offset=&limit=` 走 SQL 窗口；不带参数仍取全部。
+        # 首个响应就能到 MB 级。`?offset=&limit=` 走 SQL 窗口；不带参数取默认
+        # 窗口并受 `_MAX_ROWS` 硬顶（CH-495 / R14-API-10 起 `limit=0` 为空前，
+        # 「不带参数仍取全部」那句是失效口径，CH-500 顺手改正）。
         offset, limit = _window(default_limit=_MAX_ROWS)
         blocks = list_blocks(store, doc_id, offset=offset, limit=limit)
         d["blocks"] = [b.to_dict() for b in blocks]
@@ -839,8 +925,13 @@ def create_app(cfg: dict | None = None, root: Path | None = None,
                f" FROM edit_audit WHERE {cond} ORDER BY rowid LIMIT ? OFFSET ?")
         args += (limit, offset)
         rows = store.q(sql, args)
+        # CH-500（R17-API-5）：补 `has_more`。排序保持 `rowid` 升序（最旧在前）不动——
+        # GUI 的历史面板依赖这个方向（editor.html 明示「服务端 rowid 升序」并据此挑
+        # 可回滚版本），翻成 DESC 是把可视契约改坏。缺的只是「本页之后还有多少行」。
         return jsonify({"doc_id": doc_id, "audit": [dict(r) for r in rows],
-                        "total": total, "offset": offset, "limit": limit})
+                        "total": total, "offset": offset, "limit": limit,
+                        "has_more": False if limit == 0
+                        else offset + len(rows) < total})
 
     @app.get("/audit/deletions")
     def deletion_audit():
@@ -859,7 +950,12 @@ def create_app(cfg: dict | None = None, root: Path | None = None,
             d["cascade"] = json.loads(d.pop("cascade_json") or "{}")
             out.append(d)
         return jsonify({"deletions": out, "total": total, "offset": offset,
-                        "limit": limit})
+                        "limit": limit,
+                        # CH-500（R17-API-5）：与 `/jobs`、`/docs`、`/docs/<id>/audit`
+                        # 同一个 D9 口径——四个列表端点只有一处缺 `has_more`，
+                        # 调用方就得为它单独记一套「自己比 total」的规则。
+                        "has_more": False if limit == 0
+                        else offset + len(out) < total})
 
     # --- 搜索 / 事件 --------------------------------------------------------
     @app.get("/search")
@@ -868,13 +964,15 @@ def create_app(cfg: dict | None = None, root: Path | None = None,
         # CH-473（R5-SVC-3）：负值 limit 拼进 SQL 得 `LIMIT -1`（SQLite 语义 = 无界），
         # reader 单请求即可拉全库检索结果（每条带 snippet）——SVC-8 只修了 /jobs，
         # 这里补同口径拒负。
-        limit = _int_arg("limit", 20)
-        if limit < 0:
-            raise E4001_BadRequest("limit must be >= 0")
+        # CH-500（R17-API-7）：改走 `_window`，与 /docs、/jobs、/audit 同一分页口径
+        # （默认 20、硬顶 _MAX_ROWS、非数字/负值/超 int64 一律 400/E4001），
+        # 并把 `?offset=` 接进 `search()`——原先 `has_more=True` 无处翻页，是死胡同。
+        offset, limit = _window(default_limit=20)
         return jsonify(search(
-            store, request.args.get("q", ""), min(limit, _MAX_ROWS),
+            store, request.args.get("q", ""), limit,
             full=(request.args.get("mode") == "full"
-                  or request.args.get("full") in ("1", "true"))))
+                  or request.args.get("full") in ("1", "true")),
+            offset=offset))
 
     @app.get("/events")
     def events():

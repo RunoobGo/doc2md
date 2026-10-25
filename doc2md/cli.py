@@ -235,6 +235,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="走 blocks.text 全表 LIKE，覆盖 FTS 索引窗口外的块尾部")
     se.add_argument("--limit", type=int,
                     help="返回条数上限（默认 20，上限 500；超限截到 500 而非报错）")
+    se.add_argument("--offset", type=_nonneg_int, default=None,
+                    help="跳过前 N 条（默认 0；配合 --limit 翻页取回 has_more=true 的剩余命中）")
 
     # O-07（C-26 / F-01）：docs 只读三件套——不起 serve 即可查/导已转内容，
     # 与 search 合成完整 CLI 读取面。三个子命令全部只读（零 DB 写入）。
@@ -977,9 +979,12 @@ def cmd_search(args: argparse.Namespace) -> int:
     limit = _nonneg(args, "limit", 20)
     if limit is None:
         return EXIT_USAGE
+    # CH-500（R17-API-7）：offset 与 API `?offset=` 同能力。不走 `_nonneg` 的 500 硬顶
+    # ——翻页游标天然可以大于单页上限，负值已由 `type=_nonneg_int` 在用例层挡回。
+    offset = getattr(args, "offset", None) or 0
     store = _open_store(cfg)
     try:
-        result = search(store, args.query, limit, full=bool(args.full))
+        result = search(store, args.query, limit, full=bool(args.full), offset=offset)
     finally:
         store.close()
     print(_jline(result, indent=2))

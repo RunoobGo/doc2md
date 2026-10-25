@@ -84,6 +84,7 @@
   <button id="load">载入</button>
   <label>搜索 <input type="text" id="q" size="16"></label>
   <button id="go">检索</button>
+  <button id="goMore" disabled>更多命中</button>
   <label><input type="checkbox" id="onlyEdge">只看分片边界块</label>
 </div>
 
@@ -123,7 +124,7 @@ async function api(path, opt) {
 const QSTAGES = { queued: "排队中", running: "转换中", done: "完成",
                   failed: "失败", rejected: "拒绝" };
 const QORDER = ["queued", "running", "failed", "rejected", "done"];
-const QSTATE = { filter: "", tasks: [], seenBad: new Set(), timer: null };
+const QSTATE = { filter: "", tasks: [], seenBad: new Set(), timer: null, truncNoted: false };
 
 function fmtDur(ms) {
   if (ms == null || !isFinite(ms) || ms < 0) return "-";
@@ -219,6 +220,14 @@ async function loadQueue() {
   QSTATE.tasks = j.tasks || [];
   renderCounts(j.counts || {});
   renderQueue(QSTATE.tasks);
+  // CH-500（R17-API-8）：`/jobs` 现在回 `total`/`has_more`——面板不得再把「最新 50 条」
+  // 显示成全部。提示只做一次（5s 自刷不能刷屏），恢复未截断时重新武装。
+  if (j.has_more && !QSTATE.truncNoted) {
+    QSTATE.truncNoted = true;
+    log(`队列仅显示最新 ${(j.tasks || []).length} / ${j.total} 条` +
+        "（服务端按 created_at DESC 截断；点状态 chip 走服务端过滤，或 doc2md work 清队列）", true);
+  }
+  if (!j.has_more) QSTATE.truncNoted = false;
   QSTATE.tasks.forEach(t => {
     if ((t.status === "failed" || t.status === "rejected") && !QSTATE.seenBad.has(t.job_id)) {
       QSTATE.seenBad.add(t.job_id);
@@ -236,6 +245,7 @@ function qAutoToggle() {
 
 const PAGE = 200;                  // 首屏块窗口（CH-469 / V-5：数千块文档不再一次拉全量）
 const VIEW = { doc: "", next: 0, total: 0 };
+const SRCH = { q: "", offset: 0, limit: 0 };   // CH-500 / R17-API-7：检索翻页游标
 
 const fetchWindow = (d, offset, limit = PAGE) =>
   api(`/docs/${encodeURIComponent(d)}?offset=${offset}&limit=${limit}`);
@@ -442,17 +452,25 @@ async function rollbackTo(bid, rev, btn) {
   }
 }
 
-async function doSearch() {
+async function doSearch(page) {
   const q = $("q").value.trim();
   document.querySelectorAll(".hit").forEach(e => e.classList.remove("hit"));
   if (!q) return;
+  // CH-500（R17-API-7）：`/search` 现在收 `?offset=`。原先 `has_more=true` 只是
+  // 一句「结果已截断」的死胡同——服务端不给翻页参数，GUI 只能让用户收窄查询。
+  // 「更多命中」按上一页的 limit 前进；换了查询词或游标不明则回到第 0 页。
+  const offset = (page === "more" && SRCH.q === q && SRCH.limit)
+    ? SRCH.offset + SRCH.limit : 0;
   let j;
-  try { j = await api(`/search?q=${encodeURIComponent(q)}`); }
+  try { j = await api(`/search?q=${encodeURIComponent(q)}&offset=${offset}`); }
   catch (e) { return log(`检索失败：${e.message}`, true); }
+  SRCH = { q, offset: Number.isInteger(j.offset) ? j.offset : offset,
+           limit: Number.isInteger(j.limit) ? j.limit : 0 };
+  $("goMore").disabled = !j.has_more;
   // CH-498 / B-11 走查：`total` 是**本页**命中数（服务端截断时 has_more=true），
   // 原实现只报总数，用户看到「20 命中」会以为是全部。
-  log(`检索「${q}」→ ${j.total} 命中（mode=${j.mode}）` +
-      (j.has_more ? "，结果已截断（命中多于本页，请收窄查询或用 doc2md search --limit）" : ""));
+  log(`检索「${q}」→ 本页 ${j.total} 命中（mode=${j.mode}，自第 ${SRCH.offset + 1} 条起）` +
+      (j.has_more ? "，结果已截断（点「更多命中」取下一页，或收窄查询 / doc2md search --limit）" : ""));
   let off = 0, other = 0;
   (j.hits || []).forEach(h => {
     // /search 是跨文档的：其他文档的命中永远不会落在当前块窗口里，
@@ -462,7 +480,7 @@ async function doSearch() {
     if (el) el.querySelector("textarea").classList.add("hit");
     else off++;
   });
-  if (off) log(`${off} 条命中在未载入的块窗口内（点「加载更多」后重新检索）`, true);
+  if (off) log(`${off} 条命中在未载入的块窗口内（点「加载更多块」后重新检索）`, true);
   if (other) log(`${other} 条命中在其他文档（本页只高亮当前文档；doc2md search 可看全量）`, true);
 }
 
@@ -476,6 +494,7 @@ $("blocks").addEventListener("click", (ev) => {
 $("load").onclick = load;
 $("more").onclick = loadMore;
 $("go").onclick = doSearch;
+$("goMore").onclick = () => doSearch("more");
 $("q").addEventListener("keydown", e => { if (e.key === "Enter") doSearch(); });
 $("onlyEdge").addEventListener("change", e => {
   document.querySelectorAll(".blk").forEach(el => {

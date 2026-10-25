@@ -15,6 +15,11 @@ from .storage.db import Store, now_iso
 
 ACTIVE = ("queued", "running")
 TERMINAL = ("done", "failed", "rejected")
+# CH-500（R17-SQL-1）：`status IN {ACTIVE}` 原样把 Python 元组的 repr 拼进 SQL
+# （SQLite 恰好认 `('queued','running')`）。今天没有注入面（元组是模块常量、
+# 不含引号），但一旦有人把状态名改成带引号/空格的值，拼出来的就是语法错误甚至
+# 半条语句。占位符个数与 ACTIVE 严格同步，值走绑定参数。
+ACTIVE_SQL = "(" + ", ".join("?" for _ in ACTIVE) + ")"
 
 
 @dataclass
@@ -85,8 +90,8 @@ class Scheduler:
                 return Job(row["job_id"], row["doc_id"], row["status"],
                            attached=True, idem_hit=True)
         row = tx.execute(
-            f"SELECT job_id FROM tasks WHERE doc_id=? AND status IN {ACTIVE} LIMIT 1",
-            (doc_id,)).fetchone()
+            f"SELECT job_id FROM tasks WHERE doc_id=? AND status IN {ACTIVE_SQL} LIMIT 1",
+            (doc_id, *ACTIVE)).fetchone()
         if row:
             return Job(row["job_id"], doc_id, "queued", attached=True)
         job_id = "job-" + uuid.uuid4().hex[:12]
@@ -106,8 +111,8 @@ class Scheduler:
         except sqlite3.IntegrityError:
             # 并发窗口：唯一索引挡住第二份进行中作业 → 附着
             row = tx.execute(
-                f"SELECT job_id FROM tasks WHERE doc_id=? AND status IN {ACTIVE} LIMIT 1",
-                (doc_id,)).fetchone()
+                f"SELECT job_id FROM tasks WHERE doc_id=? AND status IN {ACTIVE_SQL} LIMIT 1",
+                (doc_id, *ACTIVE)).fetchone()
             return Job(row["job_id"], doc_id, "queued", attached=True)
         return Job(job_id, doc_id, "queued")
 

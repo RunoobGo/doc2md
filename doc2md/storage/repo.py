@@ -271,6 +271,18 @@ def get_doc(store: Store, doc_id: str) -> dict:
     return d
 
 
+def task_status_counts(store: Store) -> dict[str, int]:
+    """队列按状态计数（CH-500 / R17-SQL-1）。
+
+    同一条 `GROUP BY status` 原来在 `api.py`（GET /jobs）、`worker.py`（WorkReport）、
+    `cron.py`（日报）各写一遍——三处口径一旦漂移（例如将来加 `cancelling` 状态），
+    API 所见、worker 所报、日报所计会互相对不上，而这三份数字是要放一起核对的。
+    收成一个函数，SQL 只留一处。
+    """
+    return {r["status"]: int(r["c"]) for r in store.q(
+        "SELECT status, COUNT(*) c FROM tasks GROUP BY status")}
+
+
 def list_docs(store: Store, *, offset: int = 0, limit: int | None = None,
               status: str | None = None) -> dict:
     """文档清单（O-07 / C-26 / F-01）：CLI `docs list` 的只读面。
@@ -343,7 +355,7 @@ def count_blocks(store: Store, doc_id: str) -> int:
 
 
 def search(store: Store, query: str, limit: int = 20, *,
-           full: bool = False) -> dict:
+           full: bool = False, offset: int = 0) -> dict:
     """全文检索（CH-435：CJK 走 aux n-gram 列命中，text 列 LIKE 复核连续性）。
 
     两段式：FTS5 负责「快速缩小候选集」，`text LIKE` 负责「字组确实连续出现」，
@@ -355,41 +367,54 @@ def search(store: Store, query: str, limit: int = 20, *,
     - 取消每次检索的第二遍全表 `COUNT(*)`：主查询多取一行（`LIMIT limit+1`）探测
       `has_more`。`total` 保留向后兼容——未截断时即精确命中数，截断时为「本页可见数」
       并以 `has_more=True` 表明还有更多。
+
+    CH-500（R17-API-7，D9 收口）：`has_more=True` 原本是个**死胡同**——响应明说
+    「还有更多」，却没有任何参数能把剩下的取回来（GUI 只能提示「结果被截断」）。
+    现在补 `?offset=`：三条查询统一 `LIMIT ? OFFSET ?`，FTS 侧在 bm25 之后加
+    `doc_id, block_id` 稳定 tiebreak（同分命中翻页不会重影/漏行），LIKE/full 侧
+    显式 `ORDER BY rowid` 让翻页有确定次序。同时 `limit=0` 归入全项目分页口径
+    （`has_more = False if limit == 0 else …`，与 `/docs`、`/jobs`、`/audit` 一致），
+    信封补回显 `offset`/`limit`。
     """
     from .fts import build_match, like_escape, query_terms
 
     terms = query_terms(query)
+    window = {"offset": offset, "limit": limit}
     if not terms:
-        return {"total": 0, "hits": [], "has_more": False, "mode": "empty"}
+        return {"total": 0, "hits": [], "has_more": False, "mode": "empty", **window}
     like_sql = " AND ".join(["text LIKE ? ESCAPE '\\'"] * len(terms))
     like_args = tuple(f"%{like_escape(t)}%" for t in terms)
     expr = build_match(query)
     fts_error = ""
+    # limit=0 取空集：探测行也要跟着归零，否则 `LIMIT 1` 会给出 has_more=True。
+    probe = limit + 1 if limit else 0
 
     # CH-485（R9-SVC-4）：显式 full 模式直接扫 blocks.text，覆盖 FTS 8000 字
     # 窗口外的尾部；正常查询不触发全表 LIKE（原实现每次零命中都要扫一遍 FTS 正文）。
     if full:
         rows = store.q(
             "SELECT doc_id, block_id, substr(text, 1, 48) AS snip FROM blocks"
-            f" WHERE {like_sql} LIMIT ?", (*like_args, limit + 1))
-        has_more = len(rows) > limit
+            f" WHERE {like_sql} ORDER BY rowid LIMIT ? OFFSET ?",
+            (*like_args, probe, offset))
+        has_more = bool(limit) and len(rows) > limit
         hits = [dict(r) for r in rows[:limit]]
         return {"total": len(hits), "has_more": has_more, "hits": hits,
-                "match": like_args[0], "mode": "full"}
+                "match": like_args[0], "mode": "full", **window}
     if expr:
         try:
             rows = store.q(
                 "SELECT doc_id, block_id, snippet(search_blocks, 2, '[', ']', '…', 24) AS snip"
                 f" FROM search_blocks WHERE search_blocks MATCH ? AND {like_sql}"
-                " ORDER BY bm25(search_blocks) LIMIT ?", (expr, *like_args, limit + 1))
+                " ORDER BY bm25(search_blocks), doc_id, block_id LIMIT ? OFFSET ?",
+                (expr, *like_args, probe, offset))
             if rows:
-                has_more = len(rows) > limit
+                has_more = bool(limit) and len(rows) > limit
                 hits = [dict(r) for r in rows[:limit]]
                 return {"total": len(hits), "has_more": has_more, "hits": hits,
-                        "match": expr, "mode": "fts"}
+                        "match": expr, "mode": "fts", **window}
             # 健康 FTS 零命中就是零命中；不再为“没搜到”付出全表 LIKE。
             return {"total": 0, "has_more": False, "hits": [],
-                    "match": expr, "mode": "fts"}
+                    "match": expr, "mode": "fts", **window}
         except sqlite3.OperationalError as exc:
             # CH-469（V-9）：MATCH 表达式不被接受 → 可以降级 LIKE，但**原因必须留痕**
             # （响应带 fts_error），否则「索引面坏了」与「n-gram 没命中」不可区分。
@@ -404,11 +429,12 @@ def search(store: Store, query: str, limit: int = 20, *,
     # 这是错误路径，不是每次零命中的常规路径。
     rows = store.q(
         f"SELECT doc_id, block_id, substr(text, 1, 48) AS snip FROM blocks"
-        f" WHERE {like_sql} LIMIT ?", (*like_args, limit + 1))
-    has_more = len(rows) > limit
+        f" WHERE {like_sql} ORDER BY rowid LIMIT ? OFFSET ?",
+        (*like_args, probe, offset))
+    has_more = bool(limit) and len(rows) > limit
     hits = [dict(r) for r in rows[:limit]]
     out = {"total": len(hits), "has_more": has_more, "hits": hits,
-           "match": expr or like_args[0], "mode": "like"}
+           "match": expr or like_args[0], "mode": "like", **window}
     if fts_error:
         out["fts_error"] = fts_error
     return out

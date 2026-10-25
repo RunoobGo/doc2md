@@ -348,7 +348,15 @@ def _strip_page_furniture(pages: list[RawPage], base_size: float) -> list[RawPag
                 k = round(ln.size, 1)
                 hist[k] = hist.get(k, 0) + max(1, len(t))
         out.append(RawPage(index=page.index, lines=kept, height=page.height,
-                           size_hist=hist))
+                           size_hist=hist,
+                           # CH-500（R17-PIPE-5）：版式探测字段随页携带。原重建
+                           # 只搬 index/lines/height/size_hist，`rotation` /
+                           # `rtl_ratio` 静默归零——当前唯一的读取方
+                           # （`convert.py` 的 W1046）用的是**剔除前**的 `pages_all`，
+                           # 所以线上没露馅（实测旋转页/RTL 页的 W1046 仍正常交付）；
+                           # 但任何在本函数之后读这两项的调用方都会拿到 0，
+                           # 与 CH-493（P-2）修 `size_hist` 前的是同一个失效形态。
+                           rotation=page.rotation, rtl_ratio=page.rtl_ratio))
     return out
 
 

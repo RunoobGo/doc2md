@@ -12,6 +12,7 @@ from __future__ import annotations
 import re
 import urllib.parse
 
+from ..errors import E5031_StorageError
 from ..ir import IR, Block
 from .s3_structure import ORDERED_ITEM
 
@@ -48,9 +49,17 @@ def is_external(url: str) -> bool:
 
 
 def _link_label(text: str) -> str:
-    """链接文字转义：`]` / `[` / `\\` 会提前结束或改写链接范围，换行会破坏语法。"""
-    return (str(text).replace("\\", "\\\\").replace("[", "\\[")
-            .replace("]", "\\]").replace("\r", " ").replace("\n", " "))
+    """链接文字转义：换行先压成空格，再按**行内字面量**口径全量转义。
+
+    CH-500（R17-PIPE-1）：原实现只处理 `\\ [ ] \\r \\n` 五个字符，`<script>` /
+    `<img onerror=…>` / `*` / `~` / 反引号原样进 `[...]`——外部链接分支在
+    `_inline` 里 **early return**（早于 `_escape_text`），是本文件唯一一条绕开
+    D3 转义层的产出路径（实测：`<b>x</b>` 作链接文字时产物里就是裸 `<b>`，
+    而 `assert_render_contract` 会判它违规——只是这条红线过去在生产路径上从不执行）。
+    `[` `]` `\\` 仍在 `_INLINE_ESCAPE` 表内，故旧行为是被包含的，不是并列的。
+    """
+    t = str(text).replace("\r", " ").replace("\n", " ")
+    return _escape_inline(t)
 
 
 def _link_dest(url: str) -> str:
@@ -97,7 +106,8 @@ def _escape_text(text: str, *, line_start: bool = True) -> str:
                      for ln in text.splitlines())
 
 
-def render(ir: IR, *, preserve_strike: bool = False, link_internal: str = "plain") -> str:
+def render(ir: IR, *, preserve_strike: bool = False, link_internal: str = "plain",
+           contract: bool = True) -> str:
     out: list[str] = []
     prev: Block | None = None
     for b in ir.blocks:
@@ -112,6 +122,19 @@ def render(ir: IR, *, preserve_strike: bool = False, link_internal: str = "plain
         # 压缩（S3 emit_code 特意保留的代码空行被压扁，代码内容失真）。
         if b.type != "code":
             md = re.sub(r"\n{3,}", "\n\n", md)
+            # CH-500（R17-PIPE-2）：渲染红线接进生产路径。`assert_render_contract`
+            # 自 CH-417 起只被测试与 `pipeline/__init__` 导出引用，**没有任何生产
+            # 调用方**——所以 D3 那批转义一旦出现漏网分支（R17-PIPE-1 的链接文字就是），
+            # 产物带着裸 HTML 出门也不会有任何一层报错。逐块判定而不是逐篇：
+            # 代码块正文是**源文本字面量**（`~~`、`<script>`、`](#…` 在示例代码里
+            # 合法且必须原样保留），整篇扫描必然误报——这也正是它当年没被接上的原因。
+            if contract:
+                bad = _contract_violation(md, allow_strike=preserve_strike)
+                if bad:
+                    raise E5031_StorageError(
+                        f"render contract violated: found {bad!r}",
+                        {"reason": "render_contract", "marker": bad,
+                         "block_type": b.type, "block_id": b.id})
         if out:
             # O-04（QA-D2M-2026-10-21 / C-05）：连续 list_item 之间用单换行
             # （tight list）——与手写 Markdown 一致，Obsidian/VS Code 等渲染为
@@ -189,16 +212,40 @@ def _inline(text: str, b: Block, *, preserve_strike: bool, link_internal: str,
     return text
 
 
-def assert_render_contract(md: str) -> None:
-    """默认配置输出的渲染红线（进 shard_two_phase / 渲染分级断言）。"""
-    low = md
+def _contract_violation(md: str, *, allow_strike: bool = False) -> str:
+    """返回第一处违反渲染红线的标记，全部通过则返回空串（判定口径见下）。
+
+    CH-500（R17-PIPE-2）：把「判什么」从「谁来判断」里拆出来，生产路径逐块调用
+    （`render`），测试与整篇断言走 `assert_render_contract`。
+
+    `allow_strike` 对应 `render(preserve_strike=True)` 的显式 opt-in（M-5/M-6c）：
+    那一档**要求**产出 GFM `~~文字~~`，此时删除线是预期语法而非漏网裸标记。
+    """
     for mark in _ANCHOR_MARK:
-        if mark in low:
-            raise AssertionError(f"render contract violated: found {mark!r}")
-    if "~~" in low:
-        raise AssertionError("render contract violated: strikethrough in default output")
+        if mark in md:
+            return mark
+    if "~~" in md and not allow_strike:
+        return "~~"
     # D3：未转义的原始 HTML 标签 / javascript: 链接目标不得直通下游。
-    if re.search(r"(?<!\\)<script", low) or re.search(r"(?<!\\)<img", low):
-        raise AssertionError("render contract violated: raw HTML tag")
-    if re.search(r"(?<!\\)\]\(\s*(?:javascript|data|vbscript):", low, re.I):
-        raise AssertionError("render contract violated: active link scheme")
+    for pat in (r"(?<!\\)<script", r"(?<!\\)<img",
+                r"(?<!\\)\]\(\s*(?:javascript|data|vbscript):"):
+        m = re.search(pat, md, re.I)
+        if m:
+            return m.group(0)
+    return ""
+
+
+def assert_render_contract(md: str) -> None:
+    """默认配置输出的渲染红线（进 shard_two_phase / 渲染分级断言）。
+
+    CH-500 起生产路径按**块**执行同一判定（`render(contract=True)`）；本函数保留
+    整篇口径供测试与直接调用方使用。整篇扫描会命中代码块里的合法字面量，故它
+    只适用于「不含代码块」的断言场景。
+    """
+    bad = _contract_violation(md)
+    if bad:
+        if bad in _ANCHOR_MARK:
+            raise AssertionError(f"render contract violated: found {bad!r}")
+        if bad == "~~":
+            raise AssertionError("render contract violated: strikethrough in default output")
+        raise AssertionError("render contract violated: raw HTML tag or active link scheme")

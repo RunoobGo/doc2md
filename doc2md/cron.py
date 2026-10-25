@@ -267,8 +267,8 @@ class Daily:
 def _daily_report(store: Store, root: Path, cfg: dict) -> Daily:
     """日报（NFR-14）：计数与失败码分布，绝不含正文（NFR-20）。"""
     docs = int(store.q1("SELECT COUNT(*) c FROM docs")["c"])
-    tasks = {r["status"]: r["c"] for r in store.q(
-        "SELECT status, COUNT(*) c FROM tasks GROUP BY status")}
+    from .storage.repo import task_status_counts
+    tasks = task_status_counts(store)      # CH-500 / R17-SQL-1：SQL 口径只留一处
     errs = [dict(r) for r in store.q(
         "SELECT error_code, COUNT(*) c FROM tasks WHERE error_code IS NOT NULL"
         " AND error_code != '' GROUP BY error_code")]

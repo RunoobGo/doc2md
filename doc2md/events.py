@@ -47,5 +47,18 @@ def emit(store: Store, code: str, doc_id: str | None, job_id: str | None,
         with store.tx() as t:
             t.execute(sql, args)
     if writer is not None:
-        writer.write({"code": code, "doc_id": doc_id, "job_id": job_id, **payload})
+        # CH-500（R17-SVC-1）：保留键必须后置。原写法 `{"code": code, ..., **payload}`
+        # 让 payload 里的同名键**覆盖**事件名——`api.py` 四处（E4091/E4092/E5041 等
+        # 拒绝路径）的 payload 本来就带 `"code"`（那是**业务错误码**，进 detail 用），
+        # 于是同一条事件在库里 `code='job_rejected'`、在 `logs/app.jsonl` 里
+        # `"code":"E4091"`（实测一致复现）。按 code 统计的运维面（日志聚合 / 日报核对）
+        # 与 DB 口径系统性错位，而且排障时按事件名 grep 日志会一无所获。
+        # 修法：保留键权威（事件名占 `code`），业务码不丢——换名到 `biz_code` 同行落盘，
+        # 于是「按事件名 grep」和「按错误码 grep」在日志面都成立，DB 侧仍按原 payload 存。
+        line = dict(payload)
+        biz = line.pop("code", None)
+        if biz is not None:
+            line["biz_code"] = biz
+        line.update({"code": code, "doc_id": doc_id, "job_id": job_id})
+        writer.write(line)
         writer.flush()

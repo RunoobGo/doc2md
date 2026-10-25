@@ -212,6 +212,14 @@ def _convert(path: str | Path, *, cfg: dict, mode: str | None,
     effective_shards = 1 if stats.get("fallback") else len(spans)
     ir.sharded = effective_shards > 1
     ir.shard_count = effective_shards
+    # CH-500（R17-PIPE-4）：`extra_meta["shard"]` 是**片级内部锚**（convert 逐片写入
+    # `{"index","start","end"}`，`sharding.stitch_shards` 靠它做片界对齐），而
+    # `IR.meta()` 把 extra_meta **平铺**进交付 meta —— 缝合后的文档带着 0 号片的
+    # 页范围出门，单片文档带着 0..N 出门（实测交付值 `{"index":0,"start":0,"end":1}`）。
+    # 这个键既不完整（只有一片）也不正确（多片时其余三片不可见），却出现在
+    # `ir.json` 与 `/docs/<id>` 响应里供用户解读，等于交付了一个假的页范围。
+    # 缝合已经消费完它（上面），此后一律从交付面摘掉；内部锚的写入侧不动。
+    ir.extra_meta.pop("shard", None)
     if ir.sharded:
         ir.warnings.append(WARN_SHARD_NOT_MERGED)   # W1044：分片转换说明（报告口径）
     # O-05（C-06 / F-11 诚实暴露）：表格合并单元格被拍平成网格空位时留一条
