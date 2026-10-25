@@ -1,6 +1,6 @@
-"""CH-491（B-1 / B-2）+ CH-499：错误码、死代码与附录 F/G 的静态对账红线。
+"""CH-491（B-1 / B-2）+ CH-499 + CH-503：错误码、死代码与文档口径的静态对账红线。
 
-五条断言同属「静态对账」一族，与 `test_ch477_version_sync.py`
+六条断言同属「静态对账」一族，与 `test_ch477_version_sync.py`
 （文档 ↔ 代码）互补：
 
 - **错误码引用**：`errors.CODE_INDEX` 里每个错误码必须在全仓至少有一处
@@ -17,6 +17,10 @@
 - **附录 F 层级引用（CH-499，1 项）**：全文每个「第 N 层」都要在附录 F 有
   同名层标题、层号连续。CH-495 的收口注声称层表「续接……要点表见下」而该
   层从未存在——假承诺的交叉引用同样全绿入库，读者按图索骥必然落空。
+- **覆盖率三写可复算（CH-503，1 项）**：活文档里每处「精确 X%」都要能由紧邻的
+  「分母 / 未覆盖」现场算出来。v3.34 的三写口径只规定「怎么记」，没规定「记得
+  对不对」——本轮实测抓到两处继承错（分母从 740 换成 738、百分比仍抄 90.51%，
+  现场复算是 90.53%），与附录 G 组头是同一个病灶。
 
 断言写法沿用 CH-477 的纪律：**先确认锚点/枚举成功，再比对**——解析不到
 必须红，不能静默跳过。
@@ -244,4 +248,67 @@ def test_appendix_f_layer_references_resolve() -> None:
     assert not dangling, (
         f"附录 F 的层标题止于第 {top} 层，以下「第 N 层」引用悬空（假承诺的交叉引用）："
         + "、".join(dangling))
+
+
+# --- 覆盖率三写可复算（CH-503 / R18-DOC-1）------------------------------------
+#
+# v3.34 立的口径要求「任何会被取整的指标须同时给出分母 + 精确值 + 打出值，
+# 每次收口回读产生它的那份日志」。它管住了形态，没管住算术：本轮实测抓到两处
+# 「分母换了、精确值没跟着换」的继承错——README 与 technical-reference 都把
+# CH-501 的 `7797 stmts / 738 miss` 记成精确 90.51%（那是上一档 740 miss 的值），
+# 现场复算是 90.53%。病灶与附录 G 组头同源：**组合口径必须能由它的加数复算**。
+#
+# 配对窗口取 260 字符：既要容下「TOTAL 7,804 stmts / 738 miss = 精确 90.54%」
+# 这种分母紧跟精确值的写法，也要容下 v3.34 那处双档并列（`7797 stmts / 740 miss`
+# 打出 91%、精确 90.51%；轮中 `7800/743` 打出 90%、精确 90.47%）——两档必须各自
+# 配到自己的分母，所以短形态（反引号里的 A/B）同样进配对集。
+
+TRIO_FULL_RE = re.compile(r"(\d[\d,]*)\s+stmts?\s*/\s*(\d[\d,]*)\s+miss")
+TRIO_SHORT_RE = re.compile(r"`(\d[\d,]*)\s*/\s*(\d[\d,]*)`")
+TRIO_EXACT_RE = re.compile(r"精确\s*\*{0,2}(\d{2}\.\d{2})%")
+TRIO_WINDOW = 260
+
+#: 只钉「当前对外发布的数」。历史存档（`docs/qa/**`、各轮审查报告）保留当时
+#: 时点的记法，按 12.3 的「旧数字并列保留、不因新数字删除旧记录」不改写。
+LIVING_DOCS = ("README.md", "docs/dev-plan.md", "docs/technical-reference.md")
+
+
+def _trio_violations(text: str) -> tuple[list[str], int]:
+    """返回（不可复算的「精确 X%」清单，成功配对并复核的条数）。"""
+    pairs = sorted((m.start(), int(m.group(1).replace(",", "")),
+                    int(m.group(2).replace(",", "")))
+                   for rx in (TRIO_FULL_RE, TRIO_SHORT_RE) for m in rx.finditer(text))
+    out: list[str] = []
+    checked = 0
+    for m in TRIO_EXACT_RE.finditer(text):
+        stated = float(m.group(1))
+        near = [p for p in pairs if p[0] < m.start() <= p[0] + TRIO_WINDOW]
+        if not near:
+            out.append(f"精确 {stated}% 在 {TRIO_WINDOW} 字符内找不到「分母 / 未覆盖」对（三写缺一写）")
+            continue
+        checked += 1
+        _, stmt, miss = near[-1]
+        exact = round((1 - miss / stmt) * 100, 2)
+        if abs(exact - stated) > 0.005:
+            out.append(f"精确 {stated}% 与 {stmt} stmts / {miss} miss 的复算值 {exact}% 不符")
+    return out, checked
+
+
+def test_coverage_trio_is_recomputable() -> None:
+    """活文档里每个「精确 X%」都必须由紧邻的分母 / 未覆盖对现场复算出来。"""
+    violations: list[str] = []
+    total = 0
+    for rel in LIVING_DOCS:
+        found, checked = _trio_violations((REPO_ROOT / rel).read_text(encoding="utf-8"))
+        total += checked
+        violations += [f"{rel}: {v}" for v in found]
+    # 显式前置：扫不到样本就是锚点漂移，不能绿着过（同 R18-QA-1 的纪律）。
+    assert total >= 6, f"三写复核面只剩 {total} 处（<6），正则锚点漂移即视为红线失效"
+    assert not violations, (
+        "覆盖率精确值不可复算（分母换了、百分比没跟着换）：\n  " + "\n  ".join(violations))
+    # 负夹具：助手自己必须报得出红——它不红就是又一个空跑。
+    bad, n = _trio_violations("TOTAL 7,804 stmts / 738 miss，精确 90.51%")
+    assert n == 1 and bad, "三复算助手对已知错值报绿（助手本身失效）"
+    orphan, m = _trio_violations("打出 91%、精确 90.54%")
+    assert m == 0 and orphan, "三写助手对「只有百分比、没有分母」报绿（缺式即漏）"
 

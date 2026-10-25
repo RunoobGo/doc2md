@@ -6,6 +6,8 @@
 - bold/italic 默认开；strikethrough 默认关（preserve_marks_strike=false）
 
 验收红线：默认配置下输出不含 `~~`，且不含 `](#` 或 `#page-` 类自造锚点。
+CH-503（R18-PIPE-1）起，红线的**判据**是「未被反斜杠转义的链接语法位置」而不是裸子串，
+详见 `_ANCHOR_PATTERNS`；验收口径（不得出现自造锚点）不变。
 """
 from __future__ import annotations
 
@@ -17,7 +19,23 @@ from ..ir import IR, Block
 from .s3_structure import ORDERED_ITEM
 
 _EXT_SCHEMES = ("http://", "https://", "mailto:", "ftp://")
-_ANCHOR_MARK = ("](#", "#page-")
+# CH-503（R18-PIPE-1）：红线判据从裸子串改为「未被反斜杠转义的语法位置」。
+# `_INLINE_ESCAPE` 把 `]` 转义成 `\]`，但不转义 `#` 与 `-`，所以旧口径 `"](#" in md`
+# 会命中源文本里的惰性字面量 `\](#锚点)`，`"#page-" in md` 会命中 `#page-3` 这类
+# CSS 选择器 / 说明文字——本机实测一篇讲 Markdown 语法的 DOCX 因此被 E5031 整篇拒收
+# （段落 `写 Markdown 时，形如 ](#anchor) 的自造锚点…` →
+# detail={'reason': 'render_contract', 'marker': '](#', 'block_type': 'paragraph'}）。
+# 两条真实泄漏通道仍然各自被覆盖：渲染器若漏出**生成**的自造锚点必为未转义的 `](#…`
+# （含历史的 `](#page-N)` 形态），漏出裸 HTML 锚标签必为未转义的 `<a `。
+_ANCHOR_PATTERNS: tuple[re.Pattern, ...] = (
+    re.compile(r"(?<!\\)\]\(#"),             # FR-107 不造死链（自造锚点）
+    re.compile(r"(?<!\\)<a[\s>/]"),          # 裸 HTML 锚标签
+)
+_MARKUP_PATTERNS: tuple[re.Pattern, ...] = (
+    re.compile(r"(?<!\\)<script", re.I),     # D3 注入防线
+    re.compile(r"(?<!\\)<img", re.I),
+    re.compile(r"(?<!\\)\]\(\s*(?:javascript|data|vbscript):", re.I),
+)
 _FENCE_RUN = re.compile(r"`+|~+")
 # D2/D3（QA-R2）：源文本是**文本**，不是 Markdown。全角标点与普通英文原样保留，
 # 只转义会被解析器当成语法的 ASCII 元字符；反斜杠必须最先转义，否则后续插入的
@@ -218,18 +236,22 @@ def _contract_violation(md: str, *, allow_strike: bool = False) -> str:
     CH-500（R17-PIPE-2）：把「判什么」从「谁来判断」里拆出来，生产路径逐块调用
     （`render`），测试与整篇断言走 `assert_render_contract`。
 
+    CH-503（R18-PIPE-1）：判据一律带 `(?<!\\)`，锚点只在**链接语法位置**判定——
+    源文本里的惰性 `](#…` / `#page-…` 经 `_escape_text` 后不可能变成活动语法，
+    旧口径把「讲 Markdown 的文档」整篇拒收（E5031），见 `_ANCHOR_PATTERNS` 注释。
+
     `allow_strike` 对应 `render(preserve_strike=True)` 的显式 opt-in（M-5/M-6c）：
     那一档**要求**产出 GFM `~~文字~~`，此时删除线是预期语法而非漏网裸标记。
     """
-    for mark in _ANCHOR_MARK:
-        if mark in md:
-            return mark
+    for pat in _ANCHOR_PATTERNS:
+        m = pat.search(md)
+        if m:
+            return m.group(0)
     if "~~" in md and not allow_strike:
         return "~~"
     # D3：未转义的原始 HTML 标签 / javascript: 链接目标不得直通下游。
-    for pat in (r"(?<!\\)<script", r"(?<!\\)<img",
-                r"(?<!\\)\]\(\s*(?:javascript|data|vbscript):"):
-        m = re.search(pat, md, re.I)
+    for pat in _MARKUP_PATTERNS:
+        m = pat.search(md)
         if m:
             return m.group(0)
     return ""
@@ -244,7 +266,7 @@ def assert_render_contract(md: str) -> None:
     """
     bad = _contract_violation(md)
     if bad:
-        if bad in _ANCHOR_MARK:
+        if bad.startswith(("](#", "<a")):
             raise AssertionError(f"render contract violated: found {bad!r}")
         if bad == "~~":
             raise AssertionError("render contract violated: strikethrough in default output")

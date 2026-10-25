@@ -1,0 +1,629 @@
+{
+  "generated_at": "2026-10-25T10:28:05+00:00",
+  "note": "tests/corpus/run_metrics.py --write-baseline 重烤；改动前请先人工确认每篇的标题命中数变化是有意的。",
+  "rows": [
+    {
+      "stem": "docx_01_simple",
+      "batch": "docx",
+      "kind": "headings",
+      "provenance": "xml_style",
+      "source": "docx_01_simple.docx",
+      "headings": {
+        "pred": 5,
+        "ref": 5,
+        "matched": 5,
+        "p": 1.0,
+        "r": 1.0,
+        "f1": 1.0,
+        "no_truth": false
+      },
+      "tables": {
+        "tables": 0,
+        "rows": 0,
+        "rate": null
+      },
+      "drift": {
+        "p": 1.0,
+        "r": 1.0,
+        "f1": 1.0,
+        "bytes": 215
+      },
+      "warnings": []
+    },
+    {
+      "stem": "docx_02_lists",
+      "batch": "docx",
+      "kind": "headings",
+      "provenance": "xml_style",
+      "source": "docx_02_lists.docx",
+      "headings": {
+        "pred": 1,
+        "ref": 1,
+        "matched": 1,
+        "p": 1.0,
+        "r": 1.0,
+        "f1": 1.0,
+        "no_truth": false
+      },
+      "tables": {
+        "tables": 0,
+        "rows": 0,
+        "rate": null
+      },
+      "drift": {
+        "p": 1.0,
+        "r": 1.0,
+        "f1": 1.0,
+        "bytes": 95
+      },
+      "warnings": []
+    },
+    {
+      "stem": "docx_03_tables",
+      "batch": "docx",
+      "kind": "headings",
+      "provenance": "xml_style",
+      "source": "docx_03_tables.docx",
+      "headings": {
+        "pred": 1,
+        "ref": 1,
+        "matched": 1,
+        "p": 1.0,
+        "r": 1.0,
+        "f1": 1.0,
+        "no_truth": false
+      },
+      "tables": {
+        "tables": 2,
+        "rows": 3,
+        "rate": 1.0
+      },
+      "drift": {
+        "p": 1.0,
+        "r": 1.0,
+        "f1": 1.0,
+        "bytes": 181
+      },
+      "warnings": [
+        "W1045"
+      ]
+    },
+    {
+      "stem": "docx_04_links_notes",
+      "batch": "docx",
+      "kind": "headings",
+      "provenance": "xml_style",
+      "source": "docx_04_links_notes.docx",
+      "headings": {
+        "pred": 1,
+        "ref": 1,
+        "matched": 1,
+        "p": 1.0,
+        "r": 1.0,
+        "f1": 1.0,
+        "no_truth": false
+      },
+      "tables": {
+        "tables": 0,
+        "rows": 0,
+        "rate": null
+      },
+      "drift": {
+        "p": 1.0,
+        "r": 1.0,
+        "f1": 1.0,
+        "bytes": 204
+      },
+      "warnings": []
+    },
+    {
+      "stem": "docx_05_revisions_fields",
+      "batch": "docx",
+      "kind": "headings",
+      "provenance": "xml_style",
+      "source": "docx_05_revisions_fields.docx",
+      "headings": {
+        "pred": 4,
+        "ref": 4,
+        "matched": 4,
+        "p": 1.0,
+        "r": 1.0,
+        "f1": 1.0,
+        "no_truth": false
+      },
+      "tables": {
+        "tables": 0,
+        "rows": 0,
+        "rate": null
+      },
+      "drift": {
+        "p": 1.0,
+        "r": 1.0,
+        "f1": 1.0,
+        "bytes": 207
+      },
+      "warnings": []
+    },
+    {
+      "stem": "docx_06_textbox_image",
+      "batch": "docx",
+      "kind": "headings",
+      "provenance": "xml_style",
+      "source": "docx_06_textbox_image.docx",
+      "headings": {
+        "pred": 1,
+        "ref": 1,
+        "matched": 1,
+        "p": 1.0,
+        "r": 1.0,
+        "f1": 1.0,
+        "no_truth": false
+      },
+      "tables": {
+        "tables": 0,
+        "rows": 0,
+        "rate": null
+      },
+      "drift": {
+        "p": 1.0,
+        "r": 1.0,
+        "f1": 1.0,
+        "bytes": 76
+      },
+      "warnings": []
+    },
+    {
+      "stem": "docx_07_code_quote",
+      "batch": "docx",
+      "kind": "headings",
+      "provenance": "xml_style",
+      "source": "docx_07_code_quote.docx",
+      "headings": {
+        "pred": 1,
+        "ref": 1,
+        "matched": 1,
+        "p": 1.0,
+        "r": 1.0,
+        "f1": 1.0,
+        "no_truth": false
+      },
+      "tables": {
+        "tables": 0,
+        "rows": 0,
+        "rate": null
+      },
+      "drift": {
+        "p": 1.0,
+        "r": 1.0,
+        "f1": 1.0,
+        "bytes": 197
+      },
+      "warnings": []
+    },
+    {
+      "stem": "docx_08_large_30sections",
+      "batch": "docx",
+      "kind": "headings",
+      "provenance": "xml_style",
+      "source": "docx_08_large_30sections.docx",
+      "headings": {
+        "pred": 60,
+        "ref": 60,
+        "matched": 60,
+        "p": 1.0,
+        "r": 1.0,
+        "f1": 1.0,
+        "no_truth": false
+      },
+      "tables": {
+        "tables": 30,
+        "rows": 30,
+        "rate": 1.0
+      },
+      "drift": {
+        "p": 1.0,
+        "r": 1.0,
+        "f1": 1.0,
+        "bytes": 12697
+      },
+      "warnings": []
+    },
+    {
+      "stem": "docx_09_mixed_cn_en",
+      "batch": "docx",
+      "kind": "headings",
+      "provenance": "xml_style",
+      "source": "docx_09_mixed_cn_en.docx",
+      "headings": {
+        "pred": 6,
+        "ref": 6,
+        "matched": 6,
+        "p": 1.0,
+        "r": 1.0,
+        "f1": 1.0,
+        "no_truth": false
+      },
+      "tables": {
+        "tables": 0,
+        "rows": 0,
+        "rate": null
+      },
+      "drift": {
+        "p": 1.0,
+        "r": 1.0,
+        "f1": 1.0,
+        "bytes": 456
+      },
+      "warnings": []
+    },
+    {
+      "stem": "docx_10_complex_long",
+      "batch": "docx",
+      "kind": "headings",
+      "provenance": "xml_style",
+      "source": "docx_10_complex_long.docx",
+      "headings": {
+        "pred": 25,
+        "ref": 25,
+        "matched": 25,
+        "p": 1.0,
+        "r": 1.0,
+        "f1": 1.0,
+        "no_truth": false
+      },
+      "tables": {
+        "tables": 1,
+        "rows": 3,
+        "rate": 1.0
+      },
+      "drift": {
+        "p": 1.0,
+        "r": 1.0,
+        "f1": 1.0,
+        "bytes": 15778
+      },
+      "warnings": [
+        "W1045"
+      ]
+    },
+    {
+      "stem": "docx_11_complex_tables",
+      "batch": "docx",
+      "kind": "headings",
+      "provenance": "xml_style",
+      "source": "docx_11_complex_tables.docx",
+      "headings": {
+        "pred": 6,
+        "ref": 6,
+        "matched": 6,
+        "p": 1.0,
+        "r": 1.0,
+        "f1": 1.0,
+        "no_truth": false
+      },
+      "tables": {
+        "tables": 5,
+        "rows": 15,
+        "rate": 1.0
+      },
+      "drift": {
+        "p": 1.0,
+        "r": 1.0,
+        "f1": 1.0,
+        "bytes": 3626
+      },
+      "warnings": [
+        "W1045"
+      ]
+    },
+    {
+      "stem": "pdf_01_simple_1p",
+      "batch": "pdf",
+      "kind": "headings",
+      "provenance": "font_size",
+      "source": "pdf_01_simple_1p.pdf",
+      "headings": {
+        "pred": 2,
+        "ref": 2,
+        "matched": 2,
+        "p": 1.0,
+        "r": 1.0,
+        "f1": 1.0,
+        "no_truth": false
+      },
+      "tables": {
+        "tables": 0,
+        "rows": 0,
+        "rate": null
+      },
+      "drift": {
+        "p": 1.0,
+        "r": 1.0,
+        "f1": 1.0,
+        "bytes": 157
+      },
+      "warnings": []
+    },
+    {
+      "stem": "pdf_02_lists_2p",
+      "batch": "pdf",
+      "kind": "headings",
+      "provenance": "font_size",
+      "source": "pdf_02_lists_2p.pdf",
+      "headings": {
+        "pred": 3,
+        "ref": 3,
+        "matched": 3,
+        "p": 1.0,
+        "r": 1.0,
+        "f1": 1.0,
+        "no_truth": false
+      },
+      "tables": {
+        "tables": 0,
+        "rows": 0,
+        "rate": null
+      },
+      "drift": {
+        "p": 1.0,
+        "r": 1.0,
+        "f1": 1.0,
+        "bytes": 198
+      },
+      "warnings": []
+    },
+    {
+      "stem": "pdf_03_table_1p",
+      "batch": "pdf",
+      "kind": "headings",
+      "provenance": "font_size",
+      "source": "pdf_03_table_1p.pdf",
+      "headings": {
+        "pred": 1,
+        "ref": 1,
+        "matched": 1,
+        "p": 1.0,
+        "r": 1.0,
+        "f1": 1.0,
+        "no_truth": false
+      },
+      "tables": {
+        "tables": 1,
+        "rows": 2,
+        "rate": 1.0
+      },
+      "drift": {
+        "p": 1.0,
+        "r": 1.0,
+        "f1": 1.0,
+        "bytes": 143
+      },
+      "warnings": []
+    },
+    {
+      "stem": "pdf_04_links_code_2p",
+      "batch": "pdf",
+      "kind": "headings",
+      "provenance": "font_size",
+      "source": "pdf_04_links_code_2p.pdf",
+      "headings": {
+        "pred": 3,
+        "ref": 3,
+        "matched": 3,
+        "p": 1.0,
+        "r": 1.0,
+        "f1": 1.0,
+        "no_truth": false
+      },
+      "tables": {
+        "tables": 0,
+        "rows": 0,
+        "rate": null
+      },
+      "drift": {
+        "p": 1.0,
+        "r": 1.0,
+        "f1": 1.0,
+        "bytes": 244
+      },
+      "warnings": []
+    },
+    {
+      "stem": "pdf_05_cjk_en_3p",
+      "batch": "pdf",
+      "kind": "headings",
+      "provenance": "font_size",
+      "source": "pdf_05_cjk_en_3p.pdf",
+      "headings": {
+        "pred": 3,
+        "ref": 3,
+        "matched": 3,
+        "p": 1.0,
+        "r": 1.0,
+        "f1": 1.0,
+        "no_truth": false
+      },
+      "tables": {
+        "tables": 0,
+        "rows": 0,
+        "rate": null
+      },
+      "drift": {
+        "p": 1.0,
+        "r": 1.0,
+        "f1": 1.0,
+        "bytes": 2032
+      },
+      "warnings": []
+    },
+    {
+      "stem": "pdf_07_numbered_105pt_2p",
+      "batch": "pdf",
+      "kind": "headings",
+      "provenance": "font_size",
+      "source": "pdf_07_numbered_105pt_2p.pdf",
+      "headings": {
+        "pred": 2,
+        "ref": 2,
+        "matched": 2,
+        "p": 1.0,
+        "r": 1.0,
+        "f1": 1.0,
+        "no_truth": false
+      },
+      "tables": {
+        "tables": 0,
+        "rows": 0,
+        "rate": null
+      },
+      "drift": {
+        "p": 1.0,
+        "r": 1.0,
+        "f1": 1.0,
+        "bytes": 219
+      },
+      "warnings": []
+    },
+    {
+      "stem": "pdf_08_large_40p",
+      "batch": "pdf",
+      "kind": "headings",
+      "provenance": "font_size",
+      "source": "pdf_08_large_40p.pdf",
+      "headings": {
+        "pred": 80,
+        "ref": 80,
+        "matched": 80,
+        "p": 1.0,
+        "r": 1.0,
+        "f1": 1.0,
+        "no_truth": false
+      },
+      "tables": {
+        "tables": 0,
+        "rows": 0,
+        "rate": null
+      },
+      "drift": {
+        "p": 1.0,
+        "r": 1.0,
+        "f1": 1.0,
+        "bytes": 38161
+      },
+      "warnings": []
+    },
+    {
+      "stem": "pdf_09_complex_long_8p",
+      "batch": "pdf",
+      "kind": "headings",
+      "provenance": "font_size",
+      "source": "pdf_09_complex_long_8p.pdf",
+      "headings": {
+        "pred": 7,
+        "ref": 7,
+        "matched": 7,
+        "p": 1.0,
+        "r": 1.0,
+        "f1": 1.0,
+        "no_truth": false
+      },
+      "tables": {
+        "tables": 2,
+        "rows": 6,
+        "rate": 1.0
+      },
+      "drift": {
+        "p": 1.0,
+        "r": 1.0,
+        "f1": 1.0,
+        "bytes": 9577
+      },
+      "warnings": []
+    },
+    {
+      "stem": "pdf_10_two_column_6p",
+      "batch": "pdf",
+      "kind": "headings",
+      "provenance": "font_size",
+      "source": "pdf_10_two_column_6p.pdf",
+      "headings": {
+        "pred": 0,
+        "ref": 0,
+        "matched": 0,
+        "p": null,
+        "r": null,
+        "f1": null,
+        "no_truth": true
+      },
+      "tables": {
+        "tables": 0,
+        "rows": 0,
+        "rate": null
+      },
+      "drift": {
+        "p": 1.0,
+        "r": 1.0,
+        "f1": 1.0,
+        "bytes": 7114
+      },
+      "warnings": []
+    },
+    {
+      "stem": "pdf_11_wrap_space_1p",
+      "batch": "pdf",
+      "kind": "headings",
+      "provenance": "font_size",
+      "source": "pdf_11_wrap_space_1p.pdf",
+      "headings": {
+        "pred": 1,
+        "ref": 1,
+        "matched": 1,
+        "p": 1.0,
+        "r": 1.0,
+        "f1": 1.0,
+        "no_truth": false
+      },
+      "tables": {
+        "tables": 0,
+        "rows": 0,
+        "rate": null
+      },
+      "drift": {
+        "p": 1.0,
+        "r": 1.0,
+        "f1": 1.0,
+        "bytes": 479
+      },
+      "warnings": []
+    }
+  ],
+  "summary": {
+    "filter": null,
+    "n_rows": 21,
+    "skipped": [],
+    "docx": {
+      "n": 11,
+      "heading_micro_recall": 1.0,
+      "heading_macro_f1": 1.0,
+      "headings_matched": 111,
+      "headings_ref": 111,
+      "no_truth": [],
+      "table_macro_rate": 1.0,
+      "tables_with_rows": 4,
+      "drift_macro_f1": 1.0
+    },
+    "pdf": {
+      "n": 10,
+      "heading_micro_recall": 1.0,
+      "heading_macro_f1": 1.0,
+      "headings_matched": 102,
+      "headings_ref": 102,
+      "no_truth": [
+        "pdf_10_two_column_6p"
+      ],
+      "table_macro_rate": 1.0,
+      "tables_with_rows": 2,
+      "drift_macro_f1": 1.0
+    }
+  }
+}

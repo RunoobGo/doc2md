@@ -70,6 +70,12 @@ D02 的裂表在 `tests/qa/test_hard_corpus.py` 里是一条 `pytest.skip("TODO 
 3. 入门禁的时机绑定 OPT-15/16 闭合（否则门禁长期红）；在此之前先把 `run_hard.py` 作为**独立的收口必跑项**写入 README/dev-plan 取证清单，红也要显形。
 4. D03 需要人工决定补哪个难度形态——当前序列缺的不是一个样本，是**一个尚未被想到的失效形态**；本册不临时凑数，登记为人工待办。
 
+> **第十八轮对账（CH-503，2026-10-25）**：本项四条里 ① ② ④ 已落地、③ 有意保持未做。
+> - ① ②：`tests/qa/test_hard_gate.py` 按 `expectations.json` 的声明字段逐项断言（`tables` 的 ncol/nrow/header、`headings` 的 level、`behavior`），骨架里已无「TODO 未填断言 → skip」；`pytest.skip` 只余「样本文件不存在」这一种形态，而它由 `gen_cases.py --sources` 与生成器自检堵住。
+> - ④：D03 已由 CH-501 补位为 `hard_03_merged_cells.docx`（DOCX `gridSpan`/`vMerge`），`run_hard` 实测 PASS——本册 6. 表的「D03 覆盖」行随之改写。**「由人工决定形态」这条纪律没有被绕过**：选的形态是 W1045 降维告警口径的正面用例，理由写进 `gen_cases.py` 的 `DIFFICULTIES` 供复核，不是凑数。
+> - ③：入门禁的时机仍绑 OPT-15/16（即 B-43/B-44）。难度腿现在以 `corpus` 标记跑在全量层、缺口按 `KNOWN_GAPS` 逐条 `xfail(strict=True)` 记账，`run_hard.py` 仍是收口必跑的独立信息层（exit 1 显形）；切换点是 `test_hard_gate.py:34` 的 `GATE_READY`，一处改动。
+> - 数字口径：本节的「1390 项全量 + 580 门禁」是**第三轮时点**的取证数，本轮收口数见 `docs/dev-plan.md` 12.1，两数不互相覆盖。
+
 **落地模块**：`tests/qa/gen_cases.py`（骨架模板）、`tests/qa/test_hard_corpus.py`、`tests/corpus/run_hard.py`、`tests/corpus/hard/`。
 
 **预期收益**：把「唯一独立于产物的真值腿」从信息层升为门禁层，使 OPT-15/16 的改动可判定、且改完不会再次静默回归。
@@ -333,8 +339,8 @@ OPT-13 仓储化/拆分 ──────────────> 独立轮次
 | P1 用例通过率 | 核心 47/50 = 94.00%；合并 **48/53 = 90.57%** | **≥95%** | 需 OPT-1/3/4 裁定 + OPT-16 闭合；**不允许靠删用例或改分档达标** |
 | P2 用例通过率 | 11/11 = 100% | 100% | 同上 |
 | 总体通过率 | 核心 92/95 = 96.84%；合并 **96/102 = 94.12%** | **≥98%** | 缺口清零或书面豁免 |
-| **难度语料 harness** | **4/7**（2 失败 + 1 缺口） | **7/7** 或豁免记录在案 | `tests/corpus/run_hard.py` exit 0；OPT-17 后转 pytest 门禁 |
-| D03 覆盖 | 从未生成（编号序列空洞） | 显式补位或显式记录「不做及原因」 | 不临时凑数样本；由人工决定形态 |
+| **难度语料 harness** | **4/7**（2 失败 + 1 缺口）→ **第十八轮对账（CH-503）：10 份样本、`SUMMARY 6/10` 全绿、exit 1**（CH-501 补造 D03/D09/D10 后分母由 7 变 10；四处 FAIL 逐条已登记，非新增损失：D02=B-43、D05=B-44、D08=B-45 真值侧冲突、D10=B-47 待裁定） | **10/10** 或豁免记录在案（B-43/B-44 为发布阻断，须人工逐页真值才能定判据；B-45/B-47 须契约裁定） | `tests/corpus/run_hard.py` exit 0；OPT-17 后转 pytest 门禁（**当前状态**：`tests/qa/test_hard_gate.py` 已有完整结构断言并按 `KNOWN_GAPS` 逐条 `xfail(strict=True)` 记账，但它现在挂的是 `corpus` 标记而非 `gate`——文件里的 `GATE_READY = False` 是切换开关，B-43/B-44 闭合的同批把它改 `True` 即入门禁；xfail ≠ pass，缺口在全量层显形） |
+| D03 覆盖 | 从未生成（编号序列空洞） | **已补位并转绿**：`hard_03_merged_cells.docx`（DOCX `gridSpan`/`vMerge` 合并单元格，CH-501 造样），`run_hard` 实测 PASS | 编号空洞由 CH-501 填上；选这个形态的理由见 `tests/qa/gen_cases.py` 的 `DIFFICULTIES`（合并单元格是 W1045 降维口径的正面用例，产物必须留痕） |
 | 错误码覆盖 | 14/14 | 14/14 | `CODE_INDEX` 全量端到端构造（含 E4151 的 `password_required` 分支） |
 | 告警覆盖 | 4/4 | **6/6**（新增 `W1047` 未采集 + `W1048` 列归属降级） | 逐码夹具；**损失必须入账**是 OPT-15/16 的验收项之一 |
 | 未采集内容可见性 | 无（N1 静默） | **100%** | 含页眉/页脚部件的 DOCX 必须报 `uncollected` |

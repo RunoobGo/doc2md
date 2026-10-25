@@ -49,6 +49,12 @@ def test_editor_serves_queue_panel(api_client, headers):
     # 阶段机（queued/running/done/failed/rejected 五态齐全）
     for st in ("queued", "running", "done", "failed", "rejected"):
         assert st in html
+    # CH-503（B-36 实机走查）：页面必须自带图标声明。浏览器默认会为 /favicon.ico
+    # 发一次请求，没有声明就恒 404——控制台里唯一的错误是噪音，会盖住真问题。
+    assert re.search(r'<link rel="icon" href="data:[^"]*">', html), (
+        "审阅页缺内联图标声明（控制台恒有一条 404 噪音）")
+    assert 'href="/favicon' not in html and 'href="favicon' not in html, (
+        "图标不得指向仓库里不存在的静态路径（仍会 404）")
 
 
 # --- 2) JS 语法 ---------------------------------------------------------------

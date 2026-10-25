@@ -286,6 +286,29 @@ def _furniture_key(text: str) -> str:
     return re.sub(r"\s+", " ", t).strip()
 
 
+def _is_wrap_tail(prev_kept: str, candidate: str) -> bool:
+    """本行是否**上一句未写完正文的折行后半截**——是则不得判家具。
+
+    R18-PIPE-2（320 页金样本实测）：跨页断句把句子折成两半后，落在页顶/页边带里的
+    后半截（「准流程。」「说明。」「标准流程。」「当遵循例外情况。」……）在长文档里
+    会因同一句式反复出现而满足「≥2 页重复」，再叠上 `len(key) <= 24` 这条最松的
+    触发臂，就被当页脚**整行删掉**——删掉的不只是噪声，而是正文的一半，前后两句还
+    会被接成一段（静默丢字 + 错接，且产物里不留任何痕迹）。
+
+    两个条件同时成立才豁免，缺一会走偏（两侧都有实测样本）：
+    ① 上一条保留行未硬句末——句子确实被折断；页序即阅读序，锚点跨页也连续。
+    ② 本行自己以硬句末收尾——它把那句关上了。
+    ② 不是装饰：语料 `pdf_09` 的运行页眉「综合长文档测试 内部测试样本」正好接在一行
+    无标点正文之后，只凭 ① 会被留下——产物里多出三行页眉，跨页续段的两半还被劈成
+    两段（`tests/corpus/run_corpus.py` 逐字节比对当场转红）。金样本上被吃掉的尾巴
+    全部以句号收尾，② 既保住它们，又把不带标点的页眉挡在豁免面之外。
+    宁漏勿误的方向不变，只是换了判据：不带硬句末的真尾巴仍留在剔除面（与修复前
+    一致），不为此引入新的页眉回潮。
+    """
+    return (bool(prev_kept) and not _ends_sentence(prev_kept)
+            and _ends_sentence(candidate))
+
+
 def _strip_page_furniture(pages: list[RawPage], base_size: float) -> list[RawPage]:
     """剔除页码与跨页重复的页眉页脚（仅在页边距带内，宁漏勿误）。
 
@@ -294,6 +317,8 @@ def _strip_page_furniture(pages: list[RawPage], base_size: float) -> list[RawPag
     2. 行内含页码片段（页脚常把标题与页码排在同一行）；
     3. 同一边距行在 ≥2 页重复，且字号不高于正文（页眉/保密声明）。
     第一页居中的大标题只在单页出现，且字号通常更大 → 保留。
+    信号 3 另受 `_is_wrap_tail` 约束（R18-PIPE-2）：接在未硬句末正文之后、且自己
+    以硬句末收尾的残句尾巴不判家具。
     """
     if not pages or not any(p.height > 0 for p in pages):
         return pages
@@ -320,6 +345,8 @@ def _strip_page_furniture(pages: list[RawPage], base_size: float) -> list[RawPag
     body_hint = (max(body_sizes.items(), key=lambda kv: kv[1])[0]
                  if body_sizes else base_size)
     out: list[RawPage] = []
+    # R18-PIPE-2：折行续写锚点——跨页也连续（页序即阅读序）。见 `_is_wrap_tail`。
+    prev_kept = ""
     for page in pages:
         kept: list = []
         # CH-493（P-2）：仅在输入页自带直方图时，按**保留后**的行重算一份
@@ -341,9 +368,11 @@ def _strip_page_furniture(pages: list[RawPage], base_size: float) -> list[RawPag
                 if counts.get(key, 0) >= 2 and (
                         ln.size <= 0
                         or ln.size < body_hint - 0.5
-                        or len(key) <= 24):
+                        or len(key) <= 24) and not _is_wrap_tail(prev_kept, t):
                     continue
             kept.append(ln)
+            if t:
+                prev_kept = t
             if track_hist and ln.size:
                 k = round(ln.size, 1)
                 hist[k] = hist.get(k, 0) + max(1, len(t))

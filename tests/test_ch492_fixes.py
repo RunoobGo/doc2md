@@ -44,8 +44,13 @@ def _make_truncated_pdf(path) -> None:
     path.write_bytes(data[: len(data) // 2])
 
 
+@pytest.mark.gate
 def test_encrypted_pdf_detail_has_password_required(tmp_path):
-    """口令加密 PDF → E4151 + detail.password_required=True（F-05 核心断言）。"""
+    """口令加密 PDF → E4151 + detail.password_required=True（F-05 核心断言）。
+
+    CH-503 升 gate：`eval-report-v2.md` §5 P1-1 的出口判据 ③ 要求「两类样本的 detail
+    键集不同」进红线，而这两项自 CH-492 落地起只在全量层——报告的判据没被满足过。
+    """
     enc = tmp_path / "enc.pdf"
     _make_encrypted_pdf(enc)
     with pytest.raises(E4151_UnsupportedType) as ei:
@@ -53,8 +58,12 @@ def test_encrypted_pdf_detail_has_password_required(tmp_path):
     assert ei.value.detail.get("password_required") is True
 
 
+@pytest.mark.gate
 def test_truncated_pdf_detail_has_no_password_flag(tmp_path):
-    """截断损坏 PDF → E4151，detail 无 password_required（与口令形态可区分）。"""
+    """截断损坏 PDF → E4151，detail 无 password_required（与口令形态可区分）。
+
+    与上一项同批升 gate：两条合起来才是「两类样本的 detail 键集不同」这条判据。
+    """
     trunc = tmp_path / "trunc.pdf"
     _make_truncated_pdf(trunc)
     with pytest.raises(E4151_UnsupportedType) as ei:

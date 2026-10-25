@@ -10,9 +10,10 @@
 - PLAN_VERSION：开发方案文档版本（主题篇规格变化时递增）。
 """
 
-PIPELINE_VERSION = "2.18.0"   # CH-500：交付 meta 摘掉片级内部锚 `shard`、外链链接文字
-                              # 补转义、DOCX 行字号改加权众数——三项均改变产物字节 → minor
+PIPELINE_VERSION = "2.19.0"   # CH-503 两项产物字节级修复：① R18-PIPE-1 渲染红线判据改「未被反斜杠转义的语法位置」，
+                              # 含 `](#…)` / `#page-…` 惰性源文本的文档不再被 E5031 整篇拒收；② R18-PIPE-2 页脚剔除豁免
+                              # 「上一句未写完的折行后半截」，长 PDF 被误删的正文回到产物。两者都改交付字节 → minor
 SCHEMA_VERSION = 14          # IR 约定 14（文件名与内容的边界）落地
-PLAN_VERSION = "3.36"         # 开发方案文档版本（docs/dev-plan.md，文件名不带版本号）
+PLAN_VERSION = "3.37"         # 开发方案文档版本（docs/dev-plan.md，文件名不带版本号）
 
 __all__ = ["PIPELINE_VERSION", "SCHEMA_VERSION", "PLAN_VERSION"]

@@ -47,7 +47,9 @@ from tests.qa import prioritize  # noqa: E402  # 只读它的 LINK_B / RULE_STAG
 # 1. 难度清单（参考资料难度分档 × 本项目非目标边界）
 # ============================================================================
 
-#: 每项：难度星级 / 现有覆盖 / 日常出现频率 / 生成函数
+#: 每项：难度星级 / 常规语料触达旗标 / 日常出现频率 / 生成函数
+#: `covered` **只**回答「常规 22 篇语料是否触达该难点」，供 `gen_sources()` 决定要不要
+#: 造样本；用例表里那一列的判据另由现存资产派生（见 `_coverage_cells`），两者别混用。
 DIFFICULTIES: list[dict] = [
     {"id": "D01", "name": "无线框表格", "star": 5, "covered": False, "freq": "高",
      "why": "PDF 不存『第3行第2列』，只存线条与散落文字；无线框只能靠间隙聚类猜，"
@@ -788,19 +790,58 @@ def gen_cards(ev: dict) -> list[str]:
     return L
 
 
+def _coverage_cells() -> dict[str, str]:
+    """难度清单的「现有覆盖」列，**派生自现存资产**而不是静态旗标。
+
+    原实现直接渲染 `DIFFICULTIES[i]["covered"]`——那是建表期「常规 22 篇语料有没有
+    触达该难点」的判定。CH-501 造出 `hard_01…hard_10` 并落判定腿之后旗标没跟着改，
+    于是同一天 `docs/qa/round3/fix-verification.md` 记「D01 达成」、本表却仍写
+    「❌ 缺口」（第十八轮 A-4 收口的登记矛盾之一）。现由三份资产派生，真相只有一处：
+    `tests/corpus/hard/expectations.json`（样本是否已造）、
+    `test_hard_gate.KNOWN_GAPS`（缺口 ↔ B 号的唯一切换点）、`covered`（常规语料）。
+    """
+    made: set[str] = set()
+    exp_path = HARD / "expectations.json"
+    if exp_path.is_file():
+        made = {e["difficulty"] for e in json.loads(exp_path.read_text(encoding="utf-8"))}
+        try:
+            gaps = _known_gaps()
+        except SystemExit:      # 判定腿模块加载不了时不猜：退化为「有样本」而不报 B 号
+            gaps = {}
+    else:
+        gaps = {}
+    cells: dict[str, str] = {}
+    for d in DIFFICULTIES:
+        did = d["id"]
+        if d["covered"] is True:
+            cell = "✅ 已覆盖（常规语料）"
+        elif did not in made:
+            cell = "❌ **缺口**"
+        elif did in gaps:
+            cell = f"🟡 难度样本已造，判定腿 xfail · {gaps[did]}（待闭合）"
+        else:
+            cell = "✅ 难度样本 + 判定腿（`tests/qa/test_hard_gate.py`）"
+        if d["covered"] == "partial" and did in made:
+            cell += "；常规语料：部分"
+        cells[did] = cell
+    return cells
+
+
 def gen_casebook(*, results_dir: Path | None = None) -> str:
     """生成测试用例文档 Markdown。"""
     L = ["# Doc2md 测试用例集（自动生成）", "",
          "> 由 `tests/qa/gen_cases.py` 生成。**难度清单**来自 PDF 转换的公开难度分档，"
          "**场景清单**来自日常实际使用；两者交叉处即为必须覆盖的用例。",
-         "> 指标口径见 `tests/qa/mdscore.py`，真值口径见 `tests/qa/srcstruct.py`。", "",
+         "> 指标口径见 `tests/qa/mdscore.py`，真值口径见 `tests/qa/srcstruct.py`。",
+         "> 「现有覆盖」列派生自 `expectations.json` 与 `test_hard_gate.KNOWN_GAPS`，"
+         "**不是手填旗标**——生成器里那个 `covered` 只回答「常规语料是否触达」。", "",
          "## 一、难度清单（D-xx）", "",
          "| ID | 难度项 | 星级 | 日常频率 | 现有覆盖 | 为什么难 / 边界 |",
          "|---|---|---|---|---|---|"]
+    cov_cells = _coverage_cells()
     for d in DIFFICULTIES:
-        cov = {True: "✅ 已覆盖", False: "❌ **缺口**"}.get(d["covered"], "🟡 部分")
         L.append(f"| {d['id']} | {d['name']} | {'★' * d['star']} | {d['freq']} | "
-                 f"{cov} | {d['why']} |")
+                 f"{cov_cells[d['id']]} | {d['why']} |")
 
     L += ["", "## 二、使用场景（S-xx）", "",
           "| ID | 场景 | 画像 | 关注点 | 关键指标 |", "|---|---|---|---|---|"]

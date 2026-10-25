@@ -501,17 +501,17 @@ _BARE_FIELD = re.compile(
 
 
 def _inner_html_templates(html: str) -> list[str]:
-    """取出所有赋给 `.innerHTML` 的模板串正文——只有这个汇点需要转义。
-    （`log()` 一类走 textContent，裸插无害，不该被误判。）"""
-    out: list[str] = []
-    for m in re.finditer(r"\.innerHTML\s*=\s*`", html):
-        start = m.end()
-        end = html.find("`", start)
-        while end != -1 and html[end - 1] == "\\":
-            end = html.find("`", end + 1)
-        if end != -1:
-            out.append(html[start:end])
-    return out
+    """取出所有赋给 `.innerHTML` 的**语句右值**——只有这个汇点需要转义。
+    （`log()` 一类走 textContent，裸插无害，不该被误判。）
+
+    R18-GUI-3（CH-503 变异测试）：本函数原口径只取 `=` 后第一个反引号段，
+    而 `renderQueue` / `renderBlocks` 是多段拼接——非首段的 `esc()` 摘掉无人报警。
+    现改由 `tests/qa/static_scan.py` 按语句取全文；覆盖面自证见
+    `tests/test_ch503_docs_panel.py::test_bare_doc_field_interpolation_is_caught_by_the_scan`。
+    """
+    from tests.qa.static_scan import inner_html_statements
+
+    return inner_html_statements(html)
 
 
 def test_editor_escapes_document_derived_fields():
@@ -536,6 +536,37 @@ def test_editor_escapes_document_derived_fields():
     assert 'c-${esc(t.status)}' in html
     # dataset 查询用 bid 变量而不是拼接的选择器
     assert "blkEl = (bid) =>" in html
+
+
+@pytest.mark.gate
+def test_queue_row_sink_interpolations_are_all_escaped():
+    """R18-GUI-3（CH-503）：队列行的**每一处**汇点插值都要么过 esc()，要么是声明过的可信片段。
+
+    上一项按字段名扫（`t.error_code` 一类），变量形态（`${reason}` / `${blocks}` /
+    `${wait}`）不在名单里就无人报警——本轮变异测试实测：把 `${esc(reason)}` 摘成
+    `${reason}` 全绿。reason 来自 `det.reason`（服务端错误文本），是真注入面。
+    纪律：**中间量存纯文本，转义只在 innerHTML 汇点做一次**；`docCell` 是唯一例外，
+    因为它本身就是带 `<button>` 标签的可信片段（片段内部逐字段 esc）。
+    """
+    from tests.qa.static_scan import interpolations
+
+    html = _editor_html()
+    rows = [s for s in _inner_html_templates(html) if 'class="reason"' in s]
+    assert len(rows) == 1, f"队列行 innerHTML 语句应唯一，实测 {len(rows)}"
+    stmt = rows[0]
+    assert stmt.count("`") >= 14, (
+        f"队列行只取到 {stmt.count('`') // 2} 段拼接——首段口径复现")
+    assert len(interpolations(stmt)) == stmt.count("${"), "插值解析漏项，判据覆盖面不足"
+    trusted_html = {"docCell"}                     # 唯一的可信 HTML 片段，须在此声明
+    bare = [b.strip() for b in interpolations(stmt) if "esc(" not in b]
+    assert set(bare) <= trusted_html, f"队列行汇点存在未转义插值：{bare}"
+    # 牙齿：把 esc() 摘掉的三种形态都必须被本项抓到
+    for frag in ("${reason}", "${blocks}", "${wait}"):
+        mutated = stmt.replace("${esc(" + frag[2:-1] + ")}", frag)
+        assert mutated != stmt, f"变异夹具未命中（产品代码漂移）：{frag}"
+        bare_mutated = [b.strip() for b in interpolations(mutated) if "esc(" not in b]
+        assert set(bare_mutated) - trusted_html == {frag[2:-1]}, (
+            f"摘掉 {frag} 的 esc 后本项仍无感——判据是空的")
 
 
 @pytest.mark.gate

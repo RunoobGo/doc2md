@@ -742,28 +742,66 @@ def idempotent_rate(texts: list[str]) -> float:
 # ============================================================================
 
 # 渲染红线：S4 契约明令禁止出现在正文中的形态
+# CH-503（R18-QA-1 / OPT-2 第 3 条）：判据与产品侧同源，两处口径写死在这里——
+# ① 「裸标签 / 自造锚点」一律排除被反斜杠转义的形态。产品 `_escape_text` 会把源文本的
+#    `<`、`]` 转义成 `\<`、`\]`（`doc2md/pipeline/s4_render.py` 的 `_ANCHOR_PATTERNS`
+#    用的就是同一个 `(?<!\\)`），旧口径 `"<script" in md` 会把**已经按红线转义过的产物**
+#    判成违规，`render` 分从 1.0 掉到 0.0、`PROFILES.gates.render == 1.0` 假红。
+# ② 围栏代码块内的字面量豁免。产品按**块**判定且 code 块不判（`s4_render.py` 的
+#    `if b.type != "code"` 分支），本函数收整篇 Markdown，不豁免就必然把代码示例里的
+#    `~~x~~`、`](#a)` 误判成渲染违规。
+# 两处口径由 `tests/test_ch503_qa_face.py` 的红线与产品侧做双向差对账，不许各自漂移。
 RENDER_REDLINES: list[tuple[str, re.Pattern]] = [
     ("strike", re.compile(r"(?<!\S)~~(?!\s)(.+?)(?<!\s)~~(?!\S)")),   # FR-108 默认关
-    ("self_anchor", re.compile(r"\]\(#")),                             # FR-107 不造死链
-    ("raw_script", re.compile(r"<script", re.I)),                      # 注入防线
-    ("raw_iframe", re.compile(r"<iframe", re.I)),
+    ("self_anchor", re.compile(r"(?<!\\)\]\(#")),                     # FR-107 不造死链
+    ("raw_anchor_tag", re.compile(r"(?<!\\)<a[\s>/]")),               # 裸 HTML 锚标签
+    ("raw_script", re.compile(r"(?<!\\)<script", re.I)),              # 注入防线
+    ("raw_img", re.compile(r"(?<!\\)<img", re.I)),
+    ("raw_iframe", re.compile(r"(?<!\\)<iframe", re.I)),
     ("unclosed_fence", re.compile(r"^(```|~~~)", re.M)),               # 由配对检查兜底
 ]
+
+_FENCE_LINE = re.compile(r"^\s{0,3}(```|~~~)")
+
+
+def strip_fenced(body: str) -> str:
+    """把围栏代码块（含围栏行本身）替换为空行，其余行原样保留。
+
+    行号与行数不变——红线命中数要能落回原文定位；未闭合围栏按「到文末」处理
+    （`unclosed_fence` 自有判定，这里不重复报错）。
+    """
+    out: list[str] = []
+    fence: str | None = None
+    for ln in body.split("\n"):
+        m = _FENCE_LINE.match(ln)
+        if fence is None:
+            if m:
+                fence = m.group(1)[0]
+                out.append("")
+                continue
+            out.append(ln)
+        else:
+            if m and m.group(1)[0] == fence:
+                fence = None
+            out.append("")
+    return "\n".join(out)
 
 
 def render_redlines(md: str, *, strike_enabled: bool = False) -> dict:
     """渲染红线命中检查。返回 {违规类型: 命中数} 与 0/1 分。
 
-    `unclosed_fence` 用奇偶配对判定，不靠正则单条计数。
+    `unclosed_fence` 用奇偶配对判定，不靠正则单条计数；其余规则在**剥掉围栏**的
+    正文上计数（见上方两条同源口径）。
     """
     _, body = strip_front_matter(md)
+    scanned = strip_fenced(body)
     hits: dict[str, int] = {}
     for name, pat in RENDER_REDLINES:
         if name == "strike" and strike_enabled:
             continue
         if name == "unclosed_fence":
             continue
-        c = len(pat.findall(body))
+        c = len(pat.findall(scanned))
         if c:
             hits[name] = c
 
