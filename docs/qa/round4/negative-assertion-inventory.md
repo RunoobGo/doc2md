@@ -37,6 +37,7 @@
 | CH-510（首批） | `tests/test_ch469_service.py` | 3（1 条 gate + 2 条非 gate） | 112 |
 | CH-511（第二批） | `tests/test_v24_gates.py` | 4（全为 gate：#79/#80/#81/#82） | 108 |
 | CH-512（第三批） | `tests/test_ch500_round17.py` | 6（全为 gate：#38/#39/#40/#41/#42/#43） | 102 |
+| CH-513（第四批） | `tests/test_ch476_fixes.py` | 6（全为 gate：#9/#10/#11/#12/#13/#15） | 96 |
 
 首批实测出一条**判据本身失真**的形态：#89 原口径 `json.dumps(body)` 用默认
 `ensure_ascii=True`，中文查询被写成 `\uXXXX`，`'例外' not in ...` 对任何中文查询
@@ -52,6 +53,8 @@ sink 类**（`api.py` 用的就是 `RotatingJsonlWriter`）：短字段原样命
 时用 `isgeneratorfunction` 断言兜底——取不到就红，不许静默跳过这段。
 
 第三批（CH-512）的形态与前两批不同：六条判据读的都是**键名/字符是否出现在真实容器里**，而触发它们的缺陷形状在正常样本上压根不产生。于是补位有两个可复用的写法：① **注回真实对象而不是造一个合成 dict**——`IR.meta()` 把 `extra_meta` 平铺进交付面，所以往 `res.ir.extra_meta` 里加一个 `shard` 就能同时验证「否定面为 0」与「平铺通路是活的」（变异把 `**self.extra_meta` 摘掉，注入面立刻归零、判据红）；② **用同域的正常产物做命中基准**——`~~` 走 opt-in 档必须计 2、正文软换行必须计 1、`POST /tokens` 正常签发必须计 1 个 `token` 键，这些 > 0 的数证明判据的分子分母都在同一份产物上可数，剩下的 0 才是观测而不是恒真。
+第四批（CH-513）暴露出**第三种恒真形态**，与前两批都不同：#9 原判据读 `SELECT code FROM events`，而删除竞态路径**刻意不落任何事件**（`mark` 返回 False 即放弃留痕，见 `api.py` 该分支的注释）——空表上「没有 `job_done`」对任何实现都真。这类判据的正例不能靠注入缺陷形状，只能**给同一张表补一条正常完成的作业**：正常作业必须写出 1 条 `job_done`、同一判据在竞态轮必须仍是 0，两个数进同一条消息。同批另外五条用**源产物自身**当命中基准——`w:delText` 在夹具与黄金样本的 `word/document.xml` 里各计 1（正文计 0 才叫「接受口径」，源里压根没有则那个 0 是空话）、`page_break` 判据用一份真分页 DOCX 命中 1 证明检测器是活的、块级 `flags.has_revision` 用「带信号段落数 == 3」证明写痕通路存在。方法论收获：**判据的三个可数面——被检产物、源产物、同域正常产物——任取其一命中 > 0 就足以把「看不见」与「干净」分开**；三者都取不到，才说明这条否定断言没有观测对象。
+
 ## 红线层优先复核（gate 且无同主语正断言）
 
 | 文件::测试 | 行 | 形态 | 被否定表达式 | 控制流内 |
@@ -62,12 +65,12 @@ sink 类**（`api.py` 用的就是 `RotatingJsonlWriter`）：短字段原样命
 | `tests/test_ch473_fixes.py::test_test5_v22_legacy_rebuilds_fts_and_backfills_columns` | 1201 | not-in | `'aux' not in {r[1] for r in con.execute('PRAGMA table_info(search_blocks)')}` |  |
 | `tests/test_ch475_fixes.py::test_idempotent_replay_skips_save_ir_no_conflict` | 95 | not-in | `'status' not in j1` |  |
 | `tests/test_ch475_fixes.py::test_scrub_record_fingerprints_long_bytes` | 175 | not-in | `'正文' not in out` |  |
-| `tests/test_ch476_fixes.py::test_sync_jobs_reject_when_task_row_gone_before_commit` | 222 | not-in | `'job_done' not in codes` |  |
-| `tests/test_ch476_fixes.py::test_no_drift_when_content_matches_even_if_source_vanishes` | 615 | not-in | `'content_drift' not in detail` |  |
-| `tests/test_ch476_fixes.py::test_gap1_inserted_runs_are_extracted_and_deletions_are_not` | 1190 | not-in | `'被删除的旧文本' not in texts` |  |
-| `tests/test_ch476_fixes.py::test_gap1_blocks_carry_has_revision_flag` | 1211 | not-in | `'has_revision' not in plain.flags` |  |
-| `tests/test_ch476_fixes.py::test_gap1_golden_revision_sample_end_to_end` | 1232 | not-in | `must_not not in r.markdown` | 是 |
-| `tests/test_ch476_fixes.py::test_gap2_note_text_survives_and_never_glues_into_body` | 1368 | not-any | `not any((b.type == 'page_break' for b in ir.blocks))` |  |
+| `tests/test_ch476_fixes.py::test_sync_jobs_reject_when_task_row_gone_before_commit` | 238 | not-in | `done_hits = codes.count("job_done")`（**CH-513 已补同主语正断言**：同表补一条正常作业，判据 `(0, 1)`） |  |
+| `tests/test_ch476_fixes.py::test_no_drift_when_content_matches_even_if_source_vanishes` | 651 | not-in | `clean_hits = list(detail).count("content_drift")`（**CH-513 已补同主语正断言**：同函数补一条真漂移作业，判据 `(0, 1)`） |  |
+| `tests/test_ch476_fixes.py::test_gap1_inserted_runs_are_extracted_and_deletions_are_not` | 1231 | not-in | `body_hits = texts.count("被删除的旧文本")`（**CH-513 已补同主语正断言**：夹具 `document.xml` 的 `w:delText` 计 1，判据 `(0, 1)`） |  |
+| `tests/test_ch476_fixes.py::test_gap1_blocks_carry_has_revision_flag` | 1256 | not-in | `plain_hits = list(plain.flags).count("has_revision")`（**CH-513 已补同主语正断言**：同域带信号段落计 3，判据 `(0, 3)`） |  |
+| `tests/test_ch476_fixes.py::test_gap1_golden_revision_sample_end_to_end` | 1282 | not-in | `md_hits = r.markdown.count(must_not)`（**CH-513 已补同主语正断言**：黄金样本 `document.xml` 每条 `w:delText` 计 1，判据 `(0, 1)`） | 是 |
+| `tests/test_ch476_fixes.py::test_gap2_note_text_survives_and_never_glues_into_body` | 1434 | not-in | `note_pb_hits = sum(1 for b in ir.blocks if b.type == "page_break")`（**CH-513 已补同主语正断言**：同函数用真分页 DOCX 走同一判据计 1，`(0, 1)`） |  |
 | `tests/test_ch478_fixes.py::test_same_size_numbered_items_are_list_items_not_headings` | 30 | not-in | `item not in heads` | 是 |
 | `tests/test_ch478_fixes.py::test_markdown_keeps_ordinal_for_numbered_items` | 55 | not-in | `'- 1. 安装依赖' not in md` |  |
 | `tests/test_ch480_resident_assets.py::test_serve_stays_on_loopback_on_both_platforms` | 144 | not-in | `'--port' not in args` | 是 |
@@ -140,13 +143,13 @@ sink 类**（`api.py` 用的就是 `RotatingJsonlWriter`）：短字段原样命
 | 6 | G | `tests/test_ch475_fixes.py::test_idempotent_replay_skips_save_ir_no_conflict` | 95 | not-in | `'status' not in j1` |  |  |
 | 7 | G | `tests/test_ch475_fixes.py::test_patch_audit_actor_is_token_hash_not_plaintext` | 144 | not-in | `editor_tok not in actor` | 143 |  |
 | 8 | G | `tests/test_ch475_fixes.py::test_scrub_record_fingerprints_long_bytes` | 175 | not-in | `'正文' not in out` |  |  |
-| 9 | G | `tests/test_ch476_fixes.py::test_sync_jobs_reject_when_task_row_gone_before_commit` | 222 | not-in | `'job_done' not in codes` |  |  |
-| 10 | G | `tests/test_ch476_fixes.py::test_no_drift_when_content_matches_even_if_source_vanishes` | 615 | not-in | `'content_drift' not in detail` |  |  |
-| 11 | G | `tests/test_ch476_fixes.py::test_gap1_inserted_runs_are_extracted_and_deletions_are_not` | 1190 | not-in | `'被删除的旧文本' not in texts` |  |  |
-| 12 | G | `tests/test_ch476_fixes.py::test_gap1_blocks_carry_has_revision_flag` | 1211 | not-in | `'has_revision' not in plain.flags` |  |  |
-| 13 | G | `tests/test_ch476_fixes.py::test_gap1_golden_revision_sample_end_to_end` | 1232 | not-in | `must_not not in r.markdown` |  | 是 |
+| 9 | G | `tests/test_ch476_fixes.py::test_sync_jobs_reject_when_task_row_gone_before_commit` | 238 | not-in | `done_hits = codes.count("job_done")` → `assert (done_hits, ok_done_hits) == (0, 1)` |  | CH-513 ✓ |
+| 10 | G | `tests/test_ch476_fixes.py::test_no_drift_when_content_matches_even_if_source_vanishes` | 651 | not-in | `clean_hits = list(detail).count("content_drift")` → `assert (clean_hits, drift_hits) == (0, 1)` |  | CH-513 ✓ |
+| 11 | G | `tests/test_ch476_fixes.py::test_gap1_inserted_runs_are_extracted_and_deletions_are_not` | 1231 | not-in | `body_hits = texts.count("被删除的旧文本")` → `assert (body_hits, xml_hits) == (0, 1)` |  | CH-513 ✓ |
+| 12 | G | `tests/test_ch476_fixes.py::test_gap1_blocks_carry_has_revision_flag` | 1256 | not-in | `plain_hits = list(plain.flags).count("has_revision")` → `assert (plain_hits, marked_hits) == (0, 3)` |  | CH-513 ✓ |
+| 13 | G | `tests/test_ch476_fixes.py::test_gap1_golden_revision_sample_end_to_end` | 1282 | not-in | `md_hits = r.markdown.count(must_not)` → `assert (md_hits, xml_hits) == (0, 1)` |  | CH-513 ✓ |
 | 14 | G | `tests/test_ch476_fixes.py::test_gap1_plain_docx_unchanged_by_revision_path` | 1253 | not-any | `not any((ln.has_revision for ln in lines))` | 1252 |  |
-| 15 | G | `tests/test_ch476_fixes.py::test_gap2_note_text_survives_and_never_glues_into_body` | 1368 | not-any | `not any((b.type == 'page_break' for b in ir.blocks))` |  |  |
+| 15 | G | `tests/test_ch476_fixes.py::test_gap2_note_text_survives_and_never_glues_into_body` | 1434 | not-in | `note_pb_hits = sum(1 for b in ir.blocks if b.type == "page_break")` → `assert (note_pb_hits, br_hits) == (0, 1)` |  | CH-513 ✓ |
 | 16 | G | `tests/test_ch476_fixes.py::test_gap2_docx_without_notes_gains_no_lines` | 1438 | not-any | `not any((ln.note_kind for ln in lines))` | 1437 |  |
 | 17 | G | `tests/test_ch478_fixes.py::test_same_size_numbered_items_are_list_items_not_headings` | 30 | not-in | `item not in heads` |  | 是 |
 | 18 | G | `tests/test_ch478_fixes.py::test_markdown_keeps_ordinal_for_numbered_items` | 55 | not-in | `'- 1. 安装依赖' not in md` |  |  |

@@ -219,7 +219,25 @@ def test_sync_jobs_reject_when_task_row_gone_before_commit(api_client, headers,
         "SELECT text FROM blocks WHERE doc_id='d1'")}
     assert texts == {"既有正文"}, texts          # 复活正文没有写回
     codes = [r["code"] for r in store.q("SELECT code FROM events")]
-    assert "job_done" not in codes, codes
+    done_hits = codes.count("job_done")
+    # 同主语对照：删除竞态这一轮 events 表**刻意不写任何事件**（`mark` 返回 False
+    # 即放弃留痕，见 api.py 的注释），所以「没有 job_done」在空表上恒真。补一条
+    # 正常完成的作业——同一张表、同一个计数判据必须命中 1 次 job_done，
+    # 否则前一条否定只是「压根没落事件」的同义反复。
+    state["fired"] = True
+    src2 = root / "ok.pdf"
+    src2.write_bytes(b"%PDF-1.7\n")
+    monkeypatch.setattr(api_mod, "convert", lambda p, **kw: SimpleNamespace(
+        ir=_ir("d2", "b2", "正常正文"), doc_id="d2", source_key="s2"))
+    r2 = client.post("/jobs", json={"path": str(src2)}, headers=headers(tokens, "editor"))
+    assert r2.status_code == 202, r2.get_data(as_text=True)[:300]
+    assert r2.get_json()["jobs"][0]["doc_id"] == "d2", r2.get_json()["jobs"][0]
+    assert store.q1("SELECT COUNT(*) c FROM blocks WHERE doc_id='d2'")["c"] == 1
+    ok_done_hits = [x["code"] for x in store.q(
+        "SELECT code FROM events")].count("job_done") - done_hits
+    assert (done_hits, ok_done_hits) == (0, 1), (
+        f"竞态终态判据无感：删除竞态轮 `job_done` 命中 {done_hits} 处、正常轮命中 {ok_done_hits} 处"
+        f"（应为 0 / 1；正常轮为 0 说明 events 通路是死的，前一条否定恒真）")
 
 
 # --- 批次③：R7-LLM-1 target 参数设防 ---------------------------------------------
@@ -612,8 +630,27 @@ def test_no_drift_when_content_matches_even_if_source_vanishes(tmp_cfg, tmp_path
     assert (rep.done, rep.drift) == (1, 0), rep.to_dict()
     detail = json.loads(store.q1(
         "SELECT detail_json FROM tasks WHERE job_id=?", (job.job_id,))["detail_json"])
-    assert "content_drift" not in detail, detail
+    clean_hits = list(detail).count("content_drift")
     assert store.q1("SELECT COUNT(*) c FROM blocks WHERE doc_id='d3'")["c"] == 1
+
+    # 同主语对照：同一份 `detail_json` 判据必须能在真漂移的作业上命中，
+    # 否则「未改写不留痕」只是「detail 压根没写东西」的另一种说法。
+    src2 = root / "y.pdf"
+    src2.write_bytes(b"%PDF-1.7\n")
+    zp2 = root / "out2.zip"
+    with zipfile.ZipFile(zp2, "w") as z:
+        z.writestr("ir.json", json.dumps(_ir("d5", "b1", "另一份正文").to_dict()))
+    monkeypatch.setattr(worker, "run_batch",
+                        lambda *a, **kw: [_ok_result(src2, zp2, "d5")])
+    job2 = Scheduler(store).submit("d4", "s2", source_path=str(src2), mode=None)
+    rep2 = worker.drain_once(store, tmp_cfg, root, workers=1)
+    assert (rep2.done, rep2.drift) == (1, 1), rep2.to_dict()
+    drift_detail = json.loads(store.q1(
+        "SELECT detail_json FROM tasks WHERE job_id=?", (job2.job_id,))["detail_json"])
+    drift_hits = list(drift_detail).count("content_drift")
+    assert (clean_hits, drift_hits) == (0, 1), (
+        f"漂移留痕判据无感：未改写作业命中 {clean_hits} 处、真漂移作业命中 {drift_hits} 处"
+        f"（应为 0 / 1）")
     store.close()
 
 
@@ -1187,7 +1224,13 @@ def test_gap1_inserted_runs_are_extracted_and_deletions_are_not(tmp_path):
     assert "插入前的文本，插入的修订文本。" in [ln.text for ln in lines], \
         "段内插入 run 仍被 `p.text` 漏掉（原缺陷形态）"
     texts = " ".join(ln.text for ln in lines)
-    assert "被删除的旧文本" not in texts, "删除内容按接受口径不得进正文"
+    path = tmp_path / "r.docx"
+    with zipfile.ZipFile(path) as z:
+        src_xml = z.read("word/document.xml").decode("utf-8")
+    body_hits, xml_hits = texts.count("被删除的旧文本"), src_xml.count("被删除的旧文本")
+    assert (body_hits, xml_hits) == (0, 1), (
+        f"接受口径判据无感：正文命中 {body_hits} 处、源 XML 的 `w:delText` 命中 {xml_hits} 处"
+        f"（应为 0 / 1；XML 为 0 说明夹具压根没删除痕迹，前一条否定恒真）")
     # 整段插入原为 `p.text == ""` → Line 直接不产出（整段蒸发）
     assert "整段由修订插入。" in texts
     rev = {ln.text: ln.has_revision for ln in lines}
@@ -1208,7 +1251,11 @@ def test_gap1_blocks_carry_has_revision_flag(tmp_path):
         by_type.setdefault(b.type, []).append(b)
     paras = by_type["paragraph"]
     plain = next(b for b in paras if b.text == "无修订段落。")
-    assert "has_revision" not in plain.flags, "无修订段落不得被标记"
+    plain_hits = list(plain.flags).count("has_revision")
+    marked_hits = sum(1 for b in paras if b.flags.get("has_revision") is True)
+    assert (plain_hits, marked_hits) == (0, 3), (
+        f"块级修订信号判据无感：无修订段落命中 {plain_hits} 处、带信号段落命中 {marked_hits} 处"
+        f"（应为 0 / 3；marked 为 0 说明 `flags` 压根没写，前一条否定恒真）")
     inline = next(b for b in paras if "插入的修订文本。" in b.text)
     assert inline.flags.get("has_revision") is True
     whole = next(b for b in paras if b.text == "整段由修订插入。")
@@ -1228,8 +1275,14 @@ def test_gap1_golden_revision_sample_end_to_end(golden_dir):
     for must in ("段内插入的修订文本。", "整段由修订插入的段落，用于验证正文不丢。",
                  "修订插入的单元格"):
         assert must in r.markdown, f"修订插入内容丢失：{must}"
+    with zipfile.ZipFile(golden_dir / "docx" / "sample_revisions.docx") as z:
+        src_xml = z.read("word/document.xml").decode("utf-8")
     for must_not in ("段内被删除的旧文本", "这串按接受口径不应出现"):
-        assert must_not not in r.markdown, f"删除内容不应出现在正文：{must_not}"
+        md_hits, xml_hits = r.markdown.count(must_not), src_xml.count(must_not)
+        assert (md_hits, xml_hits) == (0, 1), (
+            f"黄金样本接受口径判据无感：正文命中 {md_hits} 处、源 XML 的 `w:delText` 命中 "
+            f"{xml_hits} 处（应为 0 / 1；XML 为 0 说明样本压根没这条删除痕迹，"
+            f"「正文里没有」只是空话）")
     assert any(b.flags.get("has_revision") for b in r.ir.blocks), "块级留痕缺失"
     assert "这是无修订的原始段落。" in r.markdown
 
@@ -1365,7 +1418,21 @@ def test_gap2_note_text_survives_and_never_glues_into_body(tmp_path):
         "注文被并进了正文块（CH-430 续句启发式不适用于显式 `w:p` 边界）"
     assert by_text[notes[0].text].flags["note_kind"] == "footnote"
     assert by_text["尾注一内容。"].flags["note_kind"] == "endnote"
-    assert not any(b.type == "page_break" for b in ir.blocks)
+    note_pb_hits = sum(1 for b in ir.blocks if b.type == "page_break")
+    # 同主语对照：`page_break` 判据本身必须是活的——分隔符占位注若被抽成正文，
+    # 「命中 0」与「检测器压根不产 page_break」在这条断言里长得一样。
+    import docx
+    from docx.enum.text import WD_BREAK
+
+    br = docx.Document()
+    br.add_paragraph("分页符前的正文。").add_run().add_break(WD_BREAK.PAGE)
+    br.add_paragraph("分页符后的正文。")
+    br_path = tmp_path / "br.docx"
+    br.save(str(br_path))
+    br_hits = sum(1 for b in analyze(read_docx(br_path)).blocks
+                  if b.type == "page_break")
+    assert (note_pb_hits, br_hits) == (0, 1), (
+        f"分页符判据无感：注文档命中 {note_pb_hits} 处、真分页样本命中 {br_hits} 处（应为 0 / 1）")
 
 
 @pytest.mark.gate
