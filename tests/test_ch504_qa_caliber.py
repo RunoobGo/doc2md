@@ -63,7 +63,15 @@ def test_md040_stays_visible_after_reclass():
     """改档不等于不查：命中、dialect 记账、契约集合三处一起钉。"""
     v = mdscore.lint_report(_BARE_FENCE)
     assert v.get("MD040") == 1, v          # 仍然命中（改的是分类，不是探测）
-    assert "MD040" not in mdscore.CONTRACT_RULES
+    # CH-516（B-53 第七批）成对判据：同一次集合扫描跑两面——契约档成员必须数得出，
+    # 否则「MD040 不在契约档」只是空集上的恒真。
+    face = sorted(r for r, c in mdscore.LINT_CLASS.items() if c == "contract")
+    md040_hits = sum(1 for r in mdscore.CONTRACT_RULES if r == "MD040")
+    face_hits = sum(1 for r in mdscore.CONTRACT_RULES if r in set(face))
+    assert (md040_hits, face_hits) == (0, len(face)), (
+        f"契约档集合判据无感：MD040 命中 {md040_hits} 处、契约档成员命中 {face_hits} 处"
+        f"（应为 0 / {len(face)}；成员数为 0 说明 CONTRACT_RULES 是空集或派生已断，"
+        "前一条否定恒真）")
     assert mdscore.LINT_CLASS["MD040"] == "dialect"
     # 契约分不受方言违规影响；方言分必须仍然扣分——否则「只报不计分」退化成「不报」
     n = _BARE_FENCE.count("\n") + 1
@@ -78,8 +86,13 @@ def test_fence_no_lang_rule_still_fires_and_cites_dialect():
     hits = ds.r_fence_no_lang(_BARE_FENCE, mdscore.parse_blocks(_BARE_FENCE), None)
     assert len(hits) == 1 and hits[0].rule == "fence_no_lang"
     ev = hits[0].evidence
-    assert "契约" not in ev, f"证据串仍自称契约类，与 LINT_CLASS 分叉：{ev}"
-    assert "dialect" in ev and mdscore.MD040_DIALECT_REASON in ev, ev
+    # CH-516 成对判据：同一条 `.count()` 跑两面——改档理由必须在证据串里数得出，
+    # 否则「不得自称契约类」在一个不带任何依据的串上同样恒真。
+    assert (ev.count("契约"), ev.count(mdscore.MD040_DIALECT_REASON)) == (0, 1), (
+        f"证据串口径判据无感：契约字样命中 {ev.count('契约')} 处、改档理由命中 "
+        f"{ev.count(mdscore.MD040_DIALECT_REASON)} 处（应为 0 / 1；理由为 0 说明证据串"
+        "压根不引依据，前一条否定恒真）")
+    assert "dialect" in ev, ev
     # 自检对（正向命中 / 干净沉默）是 CH-501 的既有红线，这里只钉干净腿不被本改动打破
     assert ds.r_fence_no_lang("```python\nprint(1)\n```\n",
                               mdscore.parse_blocks("```python\nprint(1)\n```\n"),
@@ -102,7 +115,12 @@ def test_duplicate_anchor_evidence_reports_multiplicity_not_a_retracted_cause():
     f = ds.r_duplicate_anchor("", _heads(40), None)
     assert len(f) == 1 and f[0].rule == "duplicate_anchor"
     ev = f[0].evidence
-    assert "TOC 缓存结果被当正文标题" not in ev, f"已作废的成因被写回证据串：{ev}"
+    # CH-516 成对判据：否定面与「不断言成因」这条定性口径同消息——只写前一条时，
+    # 证据串换成一句不含任何限定的话也同样恒真。
+    assert (ev.count("TOC 缓存结果被当正文标题"), ev.count("不断言成因")) == (0, 1), (
+        f"成因口径判据无感：已作废成因命中 {ev.count('TOC 缓存结果被当正文标题')} 处、"
+        f"「不断言成因」限定命中 {ev.count('不断言成因')} 处（应为 0 / 1；限定为 0 说明"
+        "证据串没有定性口径，前一条否定恒真）")
     assert "40" in ev, f"重数没有出现在证据串里：{ev}"
     assert ev.count("1.1 章节说明") == 1, f"仍在逐次重复同一标题：{ev}"
 
@@ -111,11 +129,15 @@ def test_duplicate_anchor_evidence_reports_multiplicity_not_a_retracted_cause():
 def test_duplicate_anchor_truncation_is_announced():
     """截断必须留痕：>5 种重复标题时显式报出未列数量（与 `_join_capped` 同纪律）。"""
     blocks = [b for i in range(7) for b in _heads(2, f"第 {i} 章 总则")]
-    ev = ds.r_duplicate_anchor("", blocks, None)[0].evidence
-    assert "另有 2 种未列" in ev, ev
-    # 恰好 5 种时不该出现「另有」——否则截断标记本身成了噪声
     blocks5 = [b for i in range(5) for b in _heads(2, f"第 {i} 章 总则")]
-    assert "另有" not in ds.r_duplicate_anchor("", blocks5, None)[0].evidence
+    ev = ds.r_duplicate_anchor("", blocks, None)[0].evidence
+    ev5 = ds.r_duplicate_anchor("", blocks5, None)[0].evidence
+    # CH-516 成对判据前置（判据归属）：留痕在 7 种面上必须 1、恰好 5 种面上必须 0。
+    # 只保留后一条否定，「始终声明截断」的实现照样全绿；排在精确串判据之前才有归属。
+    assert (ev.count("另有"), ev5.count("另有")) == (1, 0), (
+        f"截断留痕判据无感：7 种命中 {ev.count('另有')} 处、恰好 5 种命中 "
+        f"{ev5.count('另有')} 处（应为 1 / 0；7 种为 0 说明截断不留痕，后一条否定恒真）")
+    assert "另有 2 种未列" in ev, ev
 
 
 # --- R19-QA-3：已知非缺陷登记的单一事实源 -------------------------------------
