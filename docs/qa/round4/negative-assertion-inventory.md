@@ -51,6 +51,7 @@
 | CH-515（第六批） | `tests/test_ch501_qa_auto.py` | 4（全为 gate：#44/#45/#46/#47） | **87** |
 | CH-516（第七批） | `tests/test_ch504_qa_caliber.py` | 4（全为 gate：#54/#55/#56/#57） | 83 |
 | CH-518（第八批） | `tests/test_ch504_service_faces.py` | 4（全为 gate：#58/#59/#60/#61） | **79** |
+| CH-519（第九批） | `tests/test_ch473_fixes.py` | 4（全为 gate：#2/#3/#4/#5） | **75** |
 
 首批实测出一条**判据本身失真**的形态：#89 原口径 `json.dumps(body)` 用默认
 `ensure_ascii=True`，中文查询被写成 `\uXXXX`，`'例外' not in ...` 对任何中文查询
@@ -89,6 +90,26 @@ sink 类**（`api.py` 用的就是 `RotatingJsonlWriter`）：短字段原样命
 落在测试自己的行收集表达式（`{d["doc_id"]: ...}` 抛 KeyError）而非新判据，故不计入本批牙齿证据）。全部
 还原后 `doc2md/api.py`（`1657445f…`）、`doc2md/auth.py`、`doc2md/errors.py`、
 `doc2md/static/editor.html` 四个文件 md5 与改前逐字节一致。
+
+第九批（CH-519）打出**第四种恒真形态：在只装幸存者的容器上数被丢弃者的标记**。`test_pipe6_real_short_block
+_before_longer_not_replaced` 原判据 `not any(b.flags.get('dropped_dup_of') for b in out)` 读的是 `overlap_dedupe`
+的返回值，而该函数按构造把被丢弃块留在结果之外——标记只写在被丢弃的那个块对象上，`out` 里永远数不到，
+所以对任何实现都真（把产品改成「锚定表覆盖所有块」，误判确实发生了，这条否定依然全绿：红的是它后面那条
+精确列表判据）。正例面因此不能向 `out` 要，只能**用同一夹具另造一轮必然丢弃的场景**（片界 `[1,3]` 的截断块
+必须被记一次标记），判据写成 `(clean, hit) == (0, 1)` 且**前置**到精确列表判据之前，M-6（锚定表覆盖所有块）/ M-7（替换时不写标记）/
+M-8（截断分支整体短路）/ M-9（锚定轮不传片界，`[1,3]` 改回 `[3]`）四个方向的变异才都落在新行 173。
+
+同批三条 v2.2 迁移前自检是 CH-516 规则①在 **schema 列集合**上的落地：判据读「`revision` / `role` / `aux`
+不在同一容器的列名集合里」，命中基准就取「同一容器里 v2.2 形状必须存在的列数」（blocks 5、tokens 4、
+search_blocks 3，实测取来而非推断）——把建表脚本写坏成缺列的空表，三条否定会一起全绿。三条面按 CH-514 的
+独立变异面纪律合并成一条 `(leak, base) == ([0, 0, 0], [5, 4, 3])`，五个面各自单独打变异、各落新行 1223 转红：
+漏出面 M-1 `revision` 没摘 → `[1, 0, 0]`、M-2 `role` 没摘 → `[0, 1, 0]`、M-3 `aux` 没摘 → `[0, 0, 1]`；基准面 M-4 `blocks.text` 改名 → `[4, 4, 3]`、M-5 `tokens.label` 改名 → `[5, 3, 3]`。另设一条
+**对照变异**：把 blocks 的 `revision` 摘除动作直接失效（不摘），红并不落在本批判据上，而是先被建库夹具的位置插入拦下
+（第 1209 行打 `sqlite3.OperationalError: table blocks has 12 columns but 11 values were supplied`）——按第六批
+立的纪律不计入本批牙齿证据，但它说明夹具自己的 INSERT 是这一族断言的第一道守门人；漏出面因此必须**保列数**打（M-1/M-2 把 strip 目标改摘另一列，让 `revision` / `role` 留下而列数不变，判据才收得到）。九个变异各自转红，
+还原后 `tests/test_ch473_fixes.py`（`e99058bc…`）与 `doc2md/pipeline/sharding.py`（`90023f58…`）md5 与改前逐字节
+一致：产品语句零变化，`PIPELINE_VERSION` 保持 2.22.0，gate 仍 **735**、全量仍 **1575**、覆盖率仍
+**7,942 stmts / 678 miss**。剩余 **75** 条。
 
 ## 红线层优先复核（gate 且无同主语正断言）
 
@@ -171,10 +192,10 @@ sink 类**（`api.py` 用的就是 `RotatingJsonlWriter`）：短字段原样命
 | # | 层 | 文件::测试 | 行 | 形态 | 被否定表达式 | 同主语正断言 | 控制流内 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | 1 | G | `tests/test_ch469_service.py::test_editor_log_sink_is_text_content` | 620 | not-in | `'<img src=x onerror=' not in html` → `assert html.count(probe) == 0` | CH-510 ✓（同计数注入探针后 =1） |  |
-| 2 | G | `tests/test_ch473_fixes.py::test_pipe6_real_short_block_before_longer_not_replaced` | 164 | not-any | `not any((b.flags.get('dropped_dup_of') for b in out))` | 163 |  |
-| 3 | G | `tests/test_ch473_fixes.py::test_test5_v22_legacy_rebuilds_fts_and_backfills_columns` | 1199 | not-in | `'revision' not in {r[1] for r in con.execute('PRAGMA table_info(blocks)')}` |  |  |
-| 4 | G | `tests/test_ch473_fixes.py::test_test5_v22_legacy_rebuilds_fts_and_backfills_columns` | 1200 | not-in | `'role' not in {r[1] for r in con.execute('PRAGMA table_info(tokens)')}` |  |  |
-| 5 | G | `tests/test_ch473_fixes.py::test_test5_v22_legacy_rebuilds_fts_and_backfills_columns` | 1201 | not-in | `'aux' not in {r[1] for r in con.execute('PRAGMA table_info(search_blocks)')}` |  |  |
+| 2 | G | `tests/test_ch473_fixes.py::test_pipe6_real_short_block_before_longer_not_replaced` | 173 | not-any | `not any((b.flags.get('dropped_dup_of') for b in out))` → 输入全集计数 `(clean, hit) == (0, 1)` | CH-519 ✓（锚定截断轮命中 1） |  |
+| 3 | G | `tests/test_ch473_fixes.py::test_test5_v22_legacy_rebuilds_fts_and_backfills_columns` | 1223 | not-in | `'revision' not in {r[1] for r in con.execute('PRAGMA table_info(blocks)')}` → 三面合并 `(leak, base) == ([0,0,0], [5,4,3])` | CH-519 ✓（同容器必存列 5/4/3） |  |
+| 4 | G | `tests/test_ch473_fixes.py::test_test5_v22_legacy_rebuilds_fts_and_backfills_columns` | 1223 | not-in | `'role' not in ...`（并入第 3 行的三面计数判据） | CH-519 ✓ |  |
+| 5 | G | `tests/test_ch473_fixes.py::test_test5_v22_legacy_rebuilds_fts_and_backfills_columns` | 1223 | not-in | `'aux' not in ...`（并入第 3 行的三面计数判据） | CH-519 ✓ |  |
 | 6 | G | `tests/test_ch475_fixes.py::test_idempotent_replay_skips_save_ir_no_conflict` | 95 | not-in | `'status' not in j1` |  |  |
 | 7 | G | `tests/test_ch475_fixes.py::test_patch_audit_actor_is_token_hash_not_plaintext` | 144 | not-in | `editor_tok not in actor` | 143 |  |
 | 8 | G | `tests/test_ch475_fixes.py::test_scrub_record_fingerprints_long_bytes` | 175 | not-in | `'正文' not in out` |  |  |

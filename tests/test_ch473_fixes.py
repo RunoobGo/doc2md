@@ -159,9 +159,22 @@ def test_pipe6_real_short_block_before_longer_not_replaced():
     short = _blk("b1", "注意：", 298)
     long_ = _blk("b2", "注意：以下事项须严格遵守。", 298)
     nxt = _blk("b3", "另一段。", 299)
-    out = overlap_dedupe([short, long_, nxt], _SPANS, shard_bounds=[3])
+    blocks = [short, long_, nxt]
+    out = overlap_dedupe(blocks, _SPANS, shard_bounds=[3])
+    # `out` 只装幸存者，被丢弃块的标记按构造不会出现在它里面——只在 `out` 上数
+    # `dropped_dup_of` 对任何实现都真，可观测对象是输入全集；正例面用同一夹具构造的
+    # 锚定截断轮（片界 [1,3] 下 `cut` 必须被记一次），两个数进同一条消息。
+    anchored = [_blk("c1", "跨片段落的前半。", 298),
+                _blk("c2", "跨片段落的前半。后半内容。", 298),
+                _blk("c3", "另一段。", 299)]
+    overlap_dedupe(anchored, _SPANS, shard_bounds=[1, 3])
+    clean = sum(1 for b in blocks if b.flags.get("dropped_dup_of"))
+    hit = sum(1 for b in anchored if b.flags.get("dropped_dup_of"))
+    assert (clean, hit) == (0, 1), (
+        f"片界锚定判据无感：未锚定轮的输入块带 dropped_dup_of {clean} 处、"
+        f"锚定截断轮带 {hit} 处（应为 0 / 1；锚定轮低于 1 说明丢弃标记的写入通路本身"
+        f"是死的，那条否定就在空壳上恒真）")
     assert out == [short, long_, nxt]
-    assert not any(b.flags.get("dropped_dup_of") for b in out)
 
 
 def test_pipe6_no_anchor_falls_back_to_text_match():
@@ -1194,12 +1207,23 @@ def test_test5_v22_legacy_rebuilds_fts_and_backfills_columns(tmp_path):
 
     db = tmp_path / "legacy.sqlite"
     _seed_v22_lib(db)
-    # 迁移前形状自检：三处「缺」都真实存在（否则下面断言空转）
+    # 迁移前形状自检：三处「缺」都真实存在，且同一容器里 v2.2 应有的列一个不少
+    # （只数「缺」的话，把建表脚本写坏成空表也能全绿——正例面取同一容器的必存成员数）。
     con = sqlite3.connect(str(db))
-    assert "revision" not in {r[1] for r in con.execute("PRAGMA table_info(blocks)")}
-    assert "role" not in {r[1] for r in con.execute("PRAGMA table_info(tokens)")}
-    assert "aux" not in {r[1] for r in con.execute("PRAGMA table_info(search_blocks)")}
+    pre = {t: {r[1] for r in con.execute(f"PRAGMA table_info({t})")}
+           for t in ("blocks", "tokens", "search_blocks")}
     con.close()
+    leak = [int(k in pre[t]) for k, t in
+            (("revision", "blocks"), ("role", "tokens"), ("aux", "search_blocks"))]
+    must = (("doc_id", "block_id", "type", "text", "flags_json"),
+            ("token", "label", "created_at", "revoked_at"),
+            ("doc_id", "block_id", "text"))
+    base = [sum(1 for k in m if k in pre[t]) for m, t in
+            zip(must, ("blocks", "tokens", "search_blocks"))]
+    assert (leak, base) == ([0, 0, 0], [len(m) for m in must]), (
+        f"迁移前形状自检无感：不该有的列漏出 {leak}、同容器必存列命中 {base}"
+        f"（应为 {[0, 0, 0]} / {[len(m) for m in must]}；必存列低于基准说明遗留表本身就"
+        f"没建起来，那条「缺列」断言是在空壳上恒真）")
 
     store = Store(db)
     assert store.q1("PRAGMA user_version")[0] == DB_VERSION
