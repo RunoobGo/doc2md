@@ -590,15 +590,30 @@ def test_gate_test_env_neutralization():
         if inner is not None:
             neuter = inner
     assert inspect.isgeneratorfunction(neuter), f"取不到夹具生成器本体：{type(neuter)}"
+
+    def _present() -> set:
+        """存在性判据按大小写归一取集合，而不是字面列表。
+
+        Windows 的 `os.environ` 键大小写不敏感（CPython 用 `encodekey=str.upper`），
+        注入 `HTTP_PROXY` 后 `http_proxy in os.environ` 同样为真；POSIX 才按字面区分。
+        归一后「注入 1 条 ⇒ 集合 1 个」在两宿主同形；写成字面列表 `[injected]`
+        就把红线钉在了「宿主大小写敏感」这件事上。
+        """
+        return {k.upper() for k in qa_conftest._PROXY_VARS if k in os.environ}
+
     injected = "HTTP_PROXY"
     os.environ[injected] = "http://127.0.0.1:9"
     gen = None
     try:
-        assert [k for k in qa_conftest._PROXY_VARS if k in os.environ] == [injected]
+        before = _present()
+        assert before == {injected.upper()}, (
+            f"注入面判据无感：注入 {injected} 后大小写归一的代理键集合是 "
+            f"{sorted(before)}（应为 [{injected.upper()}]；空集合说明宿主把注入吞了，"
+            "后一条归零断言就退化成空集恒真）")
         gen = neuter(_NoKeywordRequest())
         next(gen)                             # 夹具 setup 段：保存并清除
-        after = [k for k in qa_conftest._PROXY_VARS if k in os.environ]
-        assert after == [], f"清除机制无感：注入后仍有 {after}"
+        after = _present()
+        assert after == set(), f"清除机制无感：注入后仍有 {sorted(after)}"
     finally:
         if gen is not None:
             gen.close()                       # 触发夹具 teardown：恢复 saved 快照

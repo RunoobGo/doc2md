@@ -13,6 +13,15 @@
 无关变量），`缺`也不等于没牙齿（正夹具可能在同一文件的别处或 fixture 里）。真正的
 判据仍是 OPT4-10 纪律②：同一检查必须在应当命中的地方确实命中，且该命中数要打进输出。
 
+**纪律③（CH-517 补）：成对判据的「命中数」本身要按宿主中立口径取。** CH-511 第二批把代理泄漏
+判据改写成成对形态时，注入面写成字面列表比对（`[k for k in _PROXY_VARS if k in os.environ] ==
+[injected]`），而 Windows 的 `os.environ` 键大小写不敏感（CPython 的 `_Environ` 用
+`encodekey=str.upper`），注入 `HTTP_PROXY` 后 `http_proxy` 也算命中——同一份 735 项在 Linux 三档
+`merge-gate` 与本机 macOS 全绿，只在 `windows-suite` 门禁层连红六推（CH-511～CH-516）。所以凡是
+「数一数命中了几个」的判据，键名要做大小写归一、路径要做分隔符归一、编码要做口径归一，并把**实际值
+与期望值同时**打进失败消息；`windows-suite` 在门禁层零跳过（CH-498 立的口径）正是让这一类病灶当场
+显形、而不是被 skip 藏起来的机制。
+
 `控制流内` 标出位于 `for` / `while` / `if` / `try` / `with` 内的断言——这是 O-b 型
 「前件恒假」最常落脚的位置（循环集合为空时断言根本不执行），列为首批复核对象。
 
@@ -223,7 +232,7 @@ sink 类**（`api.py` 用的就是 `RotatingJsonlWriter`）：短字段原样命
 | 79 | G | `tests/test_v24_gates.py::test_delete_cascade` | 381 | not-in | `'text' not in json.dumps(tomb[-1], ensure_ascii=False)` → 同判据对 `{**tomb[-1], "text": …}` 计数须为 1 | CH-511 ✓（注入 `text` 键命中 1） |  |
 | 80 | G | `tests/test_v24_gates.py::test_service_business_events_land_in_logs` | 461 | not-in | `'本条款' not in dumped` → 同一个 `RotatingJsonlWriter` 写短记录后原文须命中 1 | CH-511 ✓（同 sink 短字段命中 1） |  |
 | 81 | G | `tests/test_v24_gates.py::test_logs_contain_no_document_text` | 543 | not-in | `'本条款' not in dumped` → 短字段原样命中 1 且长字段只剩 `<sha256:` 1 | CH-511 ✓（短 1 / 指纹 1 双写） |  |
-| 82 | G | `tests/test_v24_gates.py::test_gate_test_env_neutralization` | 580 | not-in | `k not in os.environ` → `hits = [k for k in _PROXY_VARS if k in os.environ]` + `assert not hits` | CH-511 ✓（注入 `HTTP_PROXY` 命中 1、夹具本体清除后归零） | 是 |
+| 82 | G | `tests/test_v24_gates.py::test_gate_test_env_neutralization` | 580 | not-in | `k not in os.environ` → `hits = [k for k in _PROXY_VARS if k in os.environ]` + `assert not hits` | CH-511 ✓（注入 `HTTP_PROXY` 命中 1、夹具本体清除后归零）；CH-517 ✓（注入面/清除面两处判据由字面列表改写为**大小写归一的键集合**，纪律③——旧形态在 `windows-suite` 连红六推） | 是 |
 | 83 | · | `tests/qa/test_mdscore.py::test_parse_blocks_skips_front_matter_heading_like_keys` | 70 | not-in | `'hr' not in types` |  |  |
 | 84 | · | `tests/qa/test_mdscore.py::test_lint_classifies_md025_as_dialect_not_contract` | 156 | not-in | `'MD025' not in mdscore.CONTRACT_RULES` |  |  |
 | 85 | · | `tests/qa/test_mdscore.py::test_score_without_ref_emits_only_consistency_keys` | 217 | not-in | `'text' not in out['scores']` |  |  |
