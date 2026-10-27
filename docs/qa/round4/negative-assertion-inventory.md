@@ -116,9 +116,9 @@ search_blocks 3，实测取来而非推断）——把建表脚本写坏成缺�
 | 文件::测试 | 行 | 形态 | 被否定表达式 | 控制流内 |
 | --- | --- | --- | --- | --- |
 | `tests/test_ch469_service.py::test_editor_log_sink_is_text_content` | 620 | not-in | `'<img src=x onerror=' not in html`（**CH-510 已补同主语正断言**） |  |
-| `tests/test_ch473_fixes.py::test_test5_v22_legacy_rebuilds_fts_and_backfills_columns` | 1199 | not-in | `'revision' not in {r[1] for r in con.execute('PRAGMA table_info(blocks)')}` |  |
-| `tests/test_ch473_fixes.py::test_test5_v22_legacy_rebuilds_fts_and_backfills_columns` | 1200 | not-in | `'role' not in {r[1] for r in con.execute('PRAGMA table_info(tokens)')}` |  |
-| `tests/test_ch473_fixes.py::test_test5_v22_legacy_rebuilds_fts_and_backfills_columns` | 1201 | not-in | `'aux' not in {r[1] for r in con.execute('PRAGMA table_info(search_blocks)')}` |  |
+| `tests/test_ch473_fixes.py::test_test5_v22_legacy_rebuilds_fts_and_backfills_columns` | 1223 | not-in | `'revision' not in {r[1] for r in con.execute('PRAGMA table_info(blocks)')}`（**CH-519 已补同容器必存列面：blocks 5 / tokens 4 / search_blocks 3 必须计满，三面合并判据 `([0, 0, 0], [5, 4, 3])`**） |  |
+| `tests/test_ch473_fixes.py::test_test5_v22_legacy_rebuilds_fts_and_backfills_columns` | 1223 | not-in | `'role' not in {r[1] for r in con.execute('PRAGMA table_info(tokens)')}`（**CH-519 已并入同一条三面计数判据**） |  |
+| `tests/test_ch473_fixes.py::test_test5_v22_legacy_rebuilds_fts_and_backfills_columns` | 1223 | not-in | `'aux' not in {r[1] for r in con.execute('PRAGMA table_info(search_blocks)')}`（**CH-519 已并入同一条三面计数判据**） |  |
 | `tests/test_ch475_fixes.py::test_idempotent_replay_skips_save_ir_no_conflict` | 95 | not-in | `'status' not in j1` |  |
 | `tests/test_ch475_fixes.py::test_scrub_record_fingerprints_long_bytes` | 175 | not-in | `'正文' not in out` |  |
 | `tests/test_ch476_fixes.py::test_sync_jobs_reject_when_task_row_gone_before_commit` | 238 | not-in | `done_hits = codes.count("job_done")`（**CH-513 已补同主语正断言**：同表补一条正常作业，判据 `(0, 1)`） |  |
