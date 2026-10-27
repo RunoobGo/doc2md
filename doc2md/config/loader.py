@@ -438,16 +438,25 @@ def unknown_keys(user: dict) -> list[str]:
     """用户配置里 SPEC 之外的键（拼错的键不会生效，但原实现全程静默）。
 
     未知分表只报**表名**一条（`[mystery]` 不必把里面每个键都念一遍）。
+
+    CH-504（R19-SVC-1）：原实现在「父分表未知」时 `continue`，理由是「所属未知分表已
+    单独报过」——那个前提只对**嵌套**输入成立（`{"mystery": {"a": 1}}` 经 `_dotted_keys`
+    会同时产出 `mystery` 与 `mystery.a`，前者被报、后者被跳过）。`PUT /settings` 喂进来
+    的是**平铺点号**键（`{"log.rotate_mb": 5}`，附录 A 的键名口径），此时分表名从来不是
+    独立条目，`continue` 就把整条静默吞掉：实测 `unknown_keys({"log.rotate_mb": 5})` 返回
+    `[]`，于是拼错分表的写入回 200 并落进 `settings_override.json`，每次重启再叠加一次，
+    永不生效也永不报错。改为报**最短的未知祖先前缀**：嵌套输入的结果逐字不变（仍只报
+    表名），平铺输入现在报得出来。
     """
-    out: list[str] = []
+    out: set[str] = set()
     for dotted in sorted(_dotted_keys(user)):
         if dotted in SPEC or _section_known(dotted):
             continue                                # 已知键 / 已知分表（含空表）
         parents = dotted.split(".")[:-1]
-        if any(not _section_known(".".join(parents[:i + 1])) for i in range(len(parents))):
-            continue                                # 所属未知分表已单独报过
-        out.append(dotted)
-    return out
+        bad = next((".".join(parents[:i + 1]) for i in range(len(parents))
+                    if not _section_known(".".join(parents[:i + 1]))), None)
+        out.add(bad or dotted)                      # 未知分表 → 只报分表名
+    return sorted(out)
 
 
 def _deep_merge(dst: dict, src: dict) -> dict:

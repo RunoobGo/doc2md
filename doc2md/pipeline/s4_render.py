@@ -16,6 +16,7 @@ import urllib.parse
 
 from ..errors import E5031_StorageError
 from ..ir import IR, Block
+from .escapes import INLINE_ESCAPE, escape_inline
 from .s3_structure import ORDERED_ITEM
 
 _EXT_SCHEMES = ("http://", "https://", "mailto:", "ftp://")
@@ -40,10 +41,10 @@ _FENCE_RUN = re.compile(r"`+|~+")
 # D2/D3（QA-R2）：源文本是**文本**，不是 Markdown。全角标点与普通英文原样保留，
 # 只转义会被解析器当成语法的 ASCII 元字符；反斜杠必须最先转义，否则后续插入的
 # 转义符会被二次解释。
-_INLINE_ESCAPE = set("\\`*_[]<~")
-# CH-495（R14-PERF-2）：逐字符 join 换成预建 translate 表——逐字节等价，
-# 长文本实测 ~3× 提速（32.8→10.6 ns/char）。translate 走 C 实现单遍扫描。
-_INLINE_ESCAPE_TABLE = str.maketrans({c: "\\" + c for c in _INLINE_ESCAPE})
+# OPT4-16（B-37）：字符集与 translate 表（CH-495 的 3× 提速）收口到 `escapes`；
+# 这里保留 `_INLINE_ESCAPE` / `_escape_inline` 两个名字作模块内引用与测试锚点。
+_INLINE_ESCAPE = INLINE_ESCAPE
+_escape_inline = escape_inline
 _LINE_START_MARK = re.compile(r"^(\s*)([#>])")
 _LINE_START_LIST = re.compile(r"^(\s*)([-+])(?=\s|$)")
 _LINE_START_NUM = re.compile(r"^(\s*)(\d{1,9})([.)])(?=\s)")
@@ -90,11 +91,6 @@ def _link_dest(url: str) -> str:
     if any(ch in u for ch in " \t\r\n()<>"):
         return urllib.parse.quote(u, safe=":/?#[]@!$&'*+,;=%")
     return u
-
-
-def _escape_inline(text: str) -> str:
-    """行内字面量转义：强调/代码/链接/HTML 开标签不得由源文本激活。"""
-    return text.translate(_INLINE_ESCAPE_TABLE)
 
 
 def _escape_line_start(line: str) -> str:

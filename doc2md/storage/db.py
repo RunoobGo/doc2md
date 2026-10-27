@@ -498,7 +498,14 @@ class Store:
             if holder is not None:
                 with self._lock:
                     self._conns.discard(holder)
-            self._local = threading.local()
+            # R19-ARCH-6：只清**本线程**的槽位，不替换 `self._local` 对象本身。
+            # `threading.local()` 实例是各线程共用的一个容器（每线程一份值），重新赋值
+            # 会把其它线程缓存的 conn/holder 一并抹掉：① 那些线程的下一次 `_conn()` 静默
+            # 新建连接，Store「关了又活」；② 它们的原连接从此失去 close() 路径，
+            # `PRAGMA optimize` 不再执行、fd 挂到 GC 才释放；③ `_conns` 里的弱引用条目滞留。
+            # `_conn` 以 `conn is None` 判新建，故置 None 与「属性不存在」等价。
+            self._local.conn = None
+            self._local.holder = None
 
     def live_conn_count(self) -> int:
         """存活连接数（弱引用口径：已被 GC 收走的死线程连接不计入）。

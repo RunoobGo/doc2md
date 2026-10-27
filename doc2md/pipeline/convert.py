@@ -399,6 +399,25 @@ def _metrics(md: str, ir, pages=None) -> dict:
     return out
 
 
+#: CH-504（R19-PIPE-1）：交付 zip 的条目时间戳钉死在 DOS 纪元。
+#: `ZipFile.writestr(str, …)` 会用 `time.localtime(time.time())[:6]` 现造 ZipInfo，于是
+#: 同一份 IR / md / meta 两次打包得到两个不同的 zip sha256——三个条目的**内容**逐字节
+#: 相同（CRC 一致），容器却不可复现。后果是交付物的哈希不再是其内容的函数：
+#: `artifacts._rebuild_artifact_body` 的空操作 PATCH / rollback 会产出与初次转换不同的
+#: zip，内容寻址校验、备份去重、「产物变没变」的比对一律拿到假阳性。这也与本函数剔除
+#: `llm_stats` 的理由（front-matter 不得污染正文哈希）自相矛盾。
+#: 取 DOS 纪元而非源文件 mtime：DB 重建路径根本没有源文件，两条路径必须给出同一份字节。
+#: 同口径的既有先例：`ops/bench/t6_large_corpus.py`（重烤语料）、`tests/make_golden.py`
+#: 的 `DOCX_ZIP_TIMESTAMP`（CH-442）。
+ZIP_ENTRY_DATE_TIME = (1980, 1, 1, 0, 0, 0)
+
+#: `ZipInfo.create_system` 未固定时随生成机 OS 漂移（Windows=0 / Unix=3），条目内容
+#: 逐字节相同也会得到不同 sha256——跨 OS 的产物哈希比对会静默失效。CH-442 已在
+#: `tests/make_golden.py::DOCX_ZIP_CREATE_SYSTEM` 为此固定过语料包，交付包同办。
+#: 固定为 0（MS-DOS）：与既有已提交语料一致，且交付包不携带 Unix 权限语义。
+ZIP_ENTRY_CREATE_SYSTEM = 0
+
+
 def package(ir: IR, md: str, meta: dict, out_dir: Path, cfg: dict,
             gate: dict | None = None, metrics: dict | None = None) -> Path:
     """产物打包：zip 条目名双闸（FR-127）；raw 名不进 content.md/ir.json（约定 14）。
@@ -427,7 +446,17 @@ def package(ir: IR, md: str, meta: dict, out_dir: Path, cfg: dict,
         with zipfile.ZipFile(part, "w", zipfile.ZIP_DEFLATED) as z:
             for name, content in entries:
                 assert_entry_safe(name)
-                z.writestr(f"{ir.doc_id}/{name}", content)
+                # R19-PIPE-1：显式 ZipInfo，时间戳与 create_system 都用钉死值（见上方
+                # 两个常量的论证）。`compress_type` **必须**在 ZipInfo 上重申：
+                # `ZipFile(…, ZIP_DEFLATED)` 的默认只作用于 str 弧名那条路径，传 ZipInfo
+                # 时取 `ZipInfo.__init__` 的 ZIP_STORED——本机 3.15 实测同一条目
+                # compress_size 36 B（DEFLATED）对 4,000 B（STORED），漏写这行会让产物
+                # 静默膨胀两个数量级。`external_attr` 两条路径同为 0o600<<16，不必钉。
+                zi = zipfile.ZipInfo(f"{ir.doc_id}/{name}",
+                                     date_time=ZIP_ENTRY_DATE_TIME)
+                zi.compress_type = zipfile.ZIP_DEFLATED
+                zi.create_system = ZIP_ENTRY_CREATE_SYSTEM
+                z.writestr(zi, content)
         with part.open("rb+") as fh:
             fh.flush()
             os.fsync(fh.fileno())

@@ -24,6 +24,7 @@ from __future__ import annotations
 import re
 
 from ..ir import IR, Block
+from .escapes import escape_cell_markdown, escape_entities
 from .s1_parse import RawPage
 
 _NUM = re.compile(r"^\s*(\d+(?:\.\d+)*)\s*[、\.::]?\s*")
@@ -564,7 +565,7 @@ def _quote_text(text: str) -> str:
     return t
 
 
-def _gfm_table(rows: list[list[str]]) -> str:
+def _gfm_table(rows: list[list[str]], *, entities: bool = False) -> str:
     """行单元格 → GFM 表格文本（列数不齐补齐到最多列；单元格内 | 转义）。
 
     O-05（C-06）：单元格内容规范统一收口在本函数——调用方只交单元格文本、
@@ -575,17 +576,20 @@ def _gfm_table(rows: list[list[str]]) -> str:
     `\\|` 先留下一个未转义反斜杠，渲染器把 `\\` 还原成字面反斜杠后管道
     成为分隔符，整行多出一格。按 `<br>` 分段处理：结构换行保留，段内
     Markdown 元字符转义（含源文本的字面 `<`）。
+
+    `entities`（OPT4-16 / B-37）：调用方是否**尚未**折过 HTML 实体。
+    - False（DOCX 路径，默认）：S1 `_docx_cell_text` 已折过 `& < >` 再插入
+      结构 `<br>`，这里的 `<br>` 是分隔符，字面 `<` 已不存在；
+    - True（PDF 路径）：先折实体再分段——源文本里的字面 `<br>` 因此不会被
+      误当结构换行，与 DOCX 语义对齐。
+    实体折转与 Markdown 转义的实现都在 `escapes` 模块（单一来源）。
     """
     def cell_md(c: str) -> str:
-        parts = str(c).strip().replace("\n", "<br>").split("<br>")
-        esc = []
-        for part in parts:
-            for a, b in (("\\", "\\\\"), ("|", "\\|"), ("*", "\\*"),
-                         ("_", "\\_"), ("[", "\\["), ("]", "\\]"),
-                         ("`", "\\`"), ("~", "\\~"), ("<", "&lt;")):
-                part = part.replace(a, b)
-            esc.append(part)
-        return "<br>".join(esc)
+        s = str(c).strip()
+        if entities:
+            s = escape_entities(s)
+        parts = s.replace("\n", "<br>").split("<br>")
+        return "<br>".join(escape_cell_markdown(p) for p in parts)
 
     ncols = max(len(r) for r in rows)
     padded = [(r + [""] * ncols)[:ncols] for r in rows]
@@ -764,7 +768,12 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
             # 非零即「本表有合并信息被降维」，convert 据此留 W1045 告警。
             flat = sum(int(getattr(ln, "row_flat", 0) or 0) for ln in row_lines)
             blocks.append(Block(id="", type="table",
-                                text=_gfm_table(row_buf), page=row_page,
+                                text=_gfm_table(
+                                    row_buf,
+                                    # OPT4-16：DOCX 行由 S1 折过实体（<br> 是结构），
+                                    # PDF 行在此折——同一实现、恰好一次。
+                                    entities=not row_lines[0].row_explicit),
+                                page=row_page,
                                 flags={"flattened_cells": flat} if flat else {},
                                 row_shape=[len(r) for r in row_buf]))
             _mark_provenance(blocks[-1], row_lines)     # CH-476（R7-GAP-1）
@@ -831,7 +840,13 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
                 continue
             # --- 代码块累积中（CH-459：三种模式各自的关闭条件）---
             if code_buf is not None:
-                if code_mode == "mono" and not ln.mono:
+                if code_mode == "mono" and (not ln.mono or ln.link
+                                            or ln.link_internal):
+                    # R19-PIPE-2：等宽段里遇到带链接标注的行也收块，让本行走常规分流去拿
+                    # `_attach_link`——与下面「带链接的行不起等宽块」是同一条契约（等宽是
+                    # 排版证据、Link 标注是语义证据）。**只**对 mono 段生效：fence / indent
+                    # 段的边界来自源文档的显式记号，在那里收块会改写代码内容，其链接丢失
+                    # 另行登记（需新告警码 + 附录 D 预留，见 dev-plan §12.7）。
                     emit_code(page.index)       # 等宽段结束：落块后本行走常规分流
                 elif code_mode == "indent" and not (
                         text.startswith("    ") or text.startswith("\t")):
@@ -867,7 +882,14 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
                 lvl = _heading_level(text, ln.size, base_size, ln.bold,
                                      hint=ln.level_hint, top=ln.top,
                                      page_height=getattr(page, "height", None))
-            elif re.sub(r"\d+", "#", _furniture_key(text)) in page_titles:
+            elif page_titles and \
+                    re.sub(r"\d+", "#", _furniture_key(text)) in page_titles:
+                # R19-PERF-1：`page_titles` 空集时短路。31 篇样本里 29 篇该集合为空，
+                # 而本臂对每个非表格行都要付一次 `_furniture_key`（内含 3 次预编译 sub
+                # + 一次模块级 `re.sub`，后者每次调用还要走 `re._compile` 缓存查找）。
+                # 320 页金样本实测：`_furniture_key` 18,312 次调用中 15,613 次（85%）来自
+                # 本行，占 `analyze()` 118.4 ms 里的 27.2 ms（S3 的 23.0%）。空集上的
+                # `in` 恒为 False，加前件不改语义、不改产物字节。
                 lvl = None        # N-8：逐页变体页标题，字号再大也不抬（宁漏勿误）
             else:
                 lvl = None if ln.list_marker else _heading_level(
@@ -1001,7 +1023,14 @@ def analyze(pages: list[RawPage], base_size: float | None = None) -> IR:
             flush_quote()   # CH-464：非引用行到达 → 引用缓冲立即落块（原实现推迟到
                             # 下一个空行/结构行，quote 块会排进其后的段落之间，乱序）
             # --- 等宽字体连续段 → 代码块（CH-459）---
-            if ln.mono and not para_buf:
+            # R19-PIPE-2：带链接标注的行**不起**代码块。等宽字体是排版证据，Link 标注是
+            # 语义证据，冲突时语义优先：原顺序让本行落进 code 块，`_attach_link` 永不执行，
+            # URL / GoTo 目标从 IR 与产物里静默消失且 `ir.warnings` 为空——违反损失台账
+            # 契约（C-29 / O-05「诚实暴露而非静默降级」）。内部跳转（`表 3 参数一览` →
+            # `#page=7`）尤其致命：正文文字完全看不出这里曾有交叉引用。
+            # 只加前件、不调分支顺序：`note_kind`（:下 8 行）与链接块的既有先后关系不动，
+            # 否则含链接的注文会从 note 块退化成普通链接段（`docx_04_links_notes` 会转红）。
+            if ln.mono and not para_buf and not (ln.link or ln.link_internal):
                 code_buf, code_mode = [text], "mono"
                 code_lines = [ln]
                 code_page = page.index

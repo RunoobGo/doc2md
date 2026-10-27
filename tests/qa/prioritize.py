@@ -69,6 +69,11 @@ FIX_EXTERNAL = 0.1   # 需其它主机 / 外部服务 / 外部语料
 DISPOSITION = {FIX_LOCAL: "fix_local", FIX_REBAKE: "rebake",
                FIX_HUMAN: "human", FIX_EXTERNAL: "external"}
 
+#: 第五种处置（R19-QA-3）：命中来自 `defect_scan.CORPUS_KNOWN_BENIGN` 登记的语料预期
+#: 形态——扫描器正确命中，但该形态不是缺陷。它**不进** DISPOSITION：那张表的键是可修复性
+#: 分值，而「已知非缺陷」与可修复性无关（该项的 fixability 仍取规则登记值）。
+DISP_KNOWN_BENIGN = "known_benign"
+
 #: 偏差类型（attribute.KIND_STAGE 的键）∪ 缺陷规则（defect_scan.RULES 的键）→ 可修复性。
 #: **单一口径**：改排期就改这张表；表缺口径会 KeyError（`test_priority_calibers_...`
 #: 先红）。末尾两条是 attribute.UNATTRIBUTED 的伪类型（`heading_residual` /
@@ -235,7 +240,7 @@ def bucket(score: float, blocking: bool) -> str:
 def make_item(origin: str, key: str, title: str, stage: str, impact: float,
               frequency: float, fixability: float, basis: str, blocking: bool,
               loss: float, n_sources: int, evidence: str, b_linked: str,
-              **extra) -> Item:
+              known_benign: bool = False, **extra) -> Item:
     # 先夹取、再算分、再落库：Item 存的是夹取后的 impact / frequency，分数必须用
     # 同一组值，否则「分数 = 0.6·影响 + 0.4·频率」无法从打印字段复算
     # （make_item(..., impact=1.0, frequency=2.0) 会存 frequency=1.0 却给出 1.4）。
@@ -250,7 +255,13 @@ def make_item(origin: str, key: str, title: str, stage: str, impact: float,
                 priority=bucket(score, blocking), blocking=blocking, basis=basis,
                 loss=round(loss, 6), n_sources=n_sources,
                 evidence=ev, b_linked=b_linked,
-                disposition=DISPOSITION[fixability], extra=extra)
+                # R19-QA-3：`known_benign` 只改**处置**，不动 impact / frequency / score /
+                # priority——与「fixability 不进分档」是同一条纪律（O-f：判定不看修复代价）。
+                # 已登记的语料预期形态照原分数落档，只是处置从「fix_local（去改产品）」变成
+                # 「known_benign（已登记，别去改产品）」，并按下方拟号规则不占 B 号。
+                disposition=(DISP_KNOWN_BENIGN if known_benign
+                             else DISPOSITION[fixability]),
+                extra=extra)
 
 
 def collect(*, attribution: dict | None = None, defects: dict | None = None,
@@ -298,8 +309,13 @@ def collect(*, attribution: dict | None = None, defects: dict | None = None,
                 # severity 缺失时用 defect_scan.SEVERITY 的**登记值**兜底：规则名就是
                 # 口径；未登记的按 minor 计（不静默抬档）。
                 sev = f.get("severity") or defect_scan.SEVERITY.get(f["rule"], "minor")
-                a = agg.setdefault(f["rule"], {"sev": sev, "ev": "", "src": set()})
+                a = agg.setdefault(f["rule"], {"sev": sev, "ev": "", "src": set(),
+                                               "benign": set()})
                 a["src"].add(r.get("source", "?"))
+                # R19-QA-3：登记是 (样本, 规则) 级的。同一规则若在**任一**未登记样本上
+                # 命中，本条就仍是可施工项——按规则整体豁免会把真实退化一起吞掉。
+                if f.get("known_benign"):
+                    a["benign"].add(r.get("source", "?"))
                 a["sev"] = _worse(a["sev"], sev)
                 a["ev"] = a["ev"] or f.get("evidence", "")
         for rule, a in sorted(agg.items()):
@@ -308,7 +324,8 @@ def collect(*, attribution: dict | None = None, defects: dict | None = None,
                 "defect", rule, f"规则命中 {rule}（{RULE_STAGE[rule]}）",
                 RULE_STAGE[rule], SEVERITY_IMPACT[a["sev"]], len(a["src"]) / n,
                 FIXABILITY[rule], "severity",
-                a["sev"] == "blocking" or b in block_b, 0.0, len(a["src"]), a["ev"], b))
+                a["sev"] == "blocking" or b in block_b, 0.0, len(a["src"]), a["ev"], b,
+                known_benign=bool(a["src"]) and a["benign"] == a["src"]))
 
     # ③ 可追溯层：结构性缺口，每轮恒定存在 ⇒ frequency = 1.0（basis=structural）
     if trace:

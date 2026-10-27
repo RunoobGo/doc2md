@@ -538,7 +538,7 @@ def table_score(pred: list[Block], gt: list[Block]) -> tuple[float, dict]:
 SEVERITY: dict[str, float] = {
     "MD001": 2.0,   # 标题跳级        -> S3 层级判定错误
     "MD003": 2.0,   # Setext 标题     -> S4 渲染方言不归一
-    "MD040": 2.0,   # 代码块缺语言    -> S3 代码块识别无 lang
+    "MD040": 2.0,   # 代码块缺语言    -> 方言类（源侧无语言元数据，见 LINT_CLASS）
     "MD045": 2.0,   # 图片缺 alt      -> 资产侧 alt 未填
     "MD055": 1.5,   # 表格管道破损    -> S4 表格渲染缺陷
     "MD056": 1.5,   # 表格列数不一致  -> S3 行形判定 / 补齐缺陷
@@ -562,19 +562,35 @@ LINT_PENALTY = 5.0      # 加权违规率 -> 扣分的放大系数
 LINT_CLASS: dict[str, str] = {
     "MD001": "contract",   # 标题跳级      -> S3 层级判定
     "MD003": "contract",   # Setext 标题   -> S4 方言不归一
-    "MD040": "contract",   # 代码块缺语言  -> S3 未带 lang
     "MD045": "contract",   # 图片缺 alt
     "MD055": "contract",   # 表格管道破损
     "MD056": "contract",   # 表格列数不一致 -> S3 行形/补齐
     "MD012": "contract",   # 连续空行
     "MD047": "contract",   # 末尾换行
     "MD009": "contract",   # 行尾空格
+    "MD040": "dialect",    # 代码块缺语言  -> 源侧本就不存在语言元数据（R19-QA-1）
     "MD025": "dialect",    # 多个顶级标题  -> 忠实还原时必然命中
     "MD060": "dialect",    # 分隔符未对齐  -> CJK 宽度口径争议
     "MD022": "dialect",    # 标题前后空行
     "MD031": "dialect",    # 围栏前后空行
     "MD026": "dialect",    # 标题末尾标点  -> 源标题自带标点时应保留
 }
+
+#: MD040 的改档依据（R19-QA-1，第十九轮）。原档 `contract` 的注释写「S3 未带 lang」，
+#: 但 PDF 与 DOCX 都**不携带代码语言元数据**，`ir.model.Block` 也没有 `lang` 字段
+#: （全包 grep 只命中 `static/editor.html` 的 `<html lang="zh-CN">`）——S4 无从渲染
+#: 一个上游不存在的值。裸围栏因此是**忠实还原**，正落在本文件 dialect 档自己写下的
+#: 判据里（「源文档本就可能如此，拿它扣分会惩罚忠实还原」）。旧档的来源是一条查无此
+#: 物的引用：`tests/qa/defect_scan.py` 模块 docstring 与 CH-501 方案文档都把 MD040 的
+#: 权威记作 `MARKDOWN_SPEC`，而仓库里从来没有这个符号，于是「契约类」这个前提无人能核。
+#: 代价（写明，不藏）：改档后 `lint_contract` 不再对裸围栏扣分，两个代码样本的
+#: `evaluate.py` gate_failures 随之消失；MD040 仍计入 `lint_dialect`（只报不扣分），
+#: 且 `defect_scan.fence_no_lang` 与 `tests/test_ch503_qa_face.py` 的冻结命中表继续
+#: 盯着它，可见性没有下降。若将来 S3 真的带上了 lang，本档必须改回 `contract`——
+#: 由 `tests/test_ch504_qa_caliber.py::test_md040_class_tracks_product_lang_capability`
+#: 双向钉住：该红线断言「`Block` 有 lang 字段」与「本档是 contract」同真同假，
+#: 产品一旦出现 lang 能力而本档仍是 dialect（或反之），都转红。
+MD040_DIALECT_REASON = "源侧无语言元数据（PDF/DOCX 皆不携带，Block 无 lang 字段）"
 
 CONTRACT_RULES = {r for r, c in LINT_CLASS.items() if c == "contract"}
 

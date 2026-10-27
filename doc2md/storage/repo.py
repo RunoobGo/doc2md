@@ -267,7 +267,17 @@ def get_doc(store: Store, doc_id: str) -> dict:
     if not r:
         raise E4041_NotFound(f"doc {doc_id} not found")
     d = dict(r)
-    d["meta"] = json.loads(d.pop("meta_json") or "{}")
+    try:
+        d["meta"] = json.loads(d.pop("meta_json") or "{}")
+    except (TypeError, ValueError):
+        # R19-API-6：`meta_json` 是文档级元数据（展示面），一行损坏不该让
+        # `GET /docs/<id>`、`/markdown`、审计三张读面全部 500/E5000——与 api.py 读
+        # `detail_json` / `cascade_json` 的降级同口径。
+        # 注意**不**推广到下面 `list_blocks` 里逐字段的 flags/marks/links/font/
+        # provenance 反序列化：那些是承载正文的 IR 字段，静默降级成空值等于把
+        # 「内容丢了」伪装成成功，与本产品「失败必须可见」的纪律相悖，
+        # 坏在那里就该响。
+        d["meta"] = {}
     return d
 
 
@@ -607,7 +617,12 @@ def _purge(ids: list[str], root: Path | None, *,
             if p.is_dir():
                 shutil.rmtree(p)
             else:
-                p.unlink()
+                p.unlink(missing_ok=True)
+            removed.append(str(p))
+        except FileNotFoundError:
+            # R19-ARCH-4：列举与删除之间被并发方（watch / 另一次 delete）抢先移除时，
+            # 期望终态已经达成，不该记成 purge 失败而让 delete_doc / delete_source 冒
+            # E5031（500）。与 `artifacts.py` 心跳令牌清理的 `missing_ok=True` 同口径。
             removed.append(str(p))
         except OSError:
             failed.append(str(p))

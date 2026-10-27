@@ -2,10 +2,10 @@ r"""CH-503（第十八轮）B-34 指标汇总器的红线：`tests/corpus/run_me
 
 补的是**上报面**（CH-500 报告 AR-11 / B-34 更正口径）：`doc2md/qa_eval.py` 的三个指标
 此前只有单篇消费者（`convert._metrics` 随报告走、`test_qa_n03_ideal.py` 46 项断言），
-没有任何地方把 21 份 ideal 标注**逐篇汇总**——「指标存在」与「指标看得见」之间断了链。
+没有任何地方把 24 份 ideal 标注**逐篇汇总**——「指标存在」与「指标看得见」之间断了链。
 本轮落地 runner 后，本文件钉住它最容易写坏的四处：
 
-① **分母**：21 份标注（DOCX 11 / PDF 10）逐篇都要有一行；漏一篇就是「看不见的回退」。
+① **分母**：24 份标注（DOCX 14 / PDF 10）逐篇都要有一行；漏一篇就是「看不见的回退」。
 ② **无真值 ≠ 满分**：`heading_pr` 在 `ref==0` 时各项 `None`（`pdf_10_two_column_6p` 实测如此）。
    聚合若按 1.0 计入，质量数会随「标注变空」而**上升**——这是度量面上的空跑形态。
 ③ **双口径不得交叉**：对 `expected/*.md`（管线自己重烤的基线）的 `char_f1` 只作漂移监控，
@@ -13,7 +13,7 @@ r"""CH-503（第十八轮）B-34 指标汇总器的红线：`tests/corpus/run_me
 ④ **冻结基线**：逐篇命中数/一致率/漂移 F1 与 `tests/corpus/metrics/ideal-baseline.json`
    相等；产物结构回退在这里转红，而不是等人去看报告。
 
-④ 需要真实转换（21 篇实测 0.78s 本机），因此挂 `corpus` 标记跑在全量层；
+④ 需要真实转换（24 篇本机秒级），因此挂 `corpus` 标记跑在全量层；
 ①②③⑤ 是纯函数与文件系统检查，毫秒级，进 gate。
 """
 from __future__ import annotations
@@ -30,8 +30,8 @@ sys.path.insert(0, str(REPO))
 
 BASELINE_PATH = REPO / "tests" / "corpus" / "metrics" / "ideal-baseline.json"
 
-# 现存标注集合的分母口径（CH-503 实测，不是估算）：DOCX 11 份 / PDF 10 份 = 21
-EXPECTED_BATCH_COUNTS = {"docx": 11, "pdf": 10}
+# 现存标注集合的分母口径（CH-505 实测，不是估算）：DOCX 14 份 / PDF 10 份 = 24
+EXPECTED_BATCH_COUNTS = {"docx": 14, "pdf": 10}
 # 无标题真值的样本：双栏样本没有标题可标，必须显形而不是被算成满分
 EXPECTED_NO_TRUTH = {"pdf_10_two_column_6p"}
 
@@ -61,11 +61,11 @@ def _row(stem: str, batch: str, *, ref: int, matched: int, f1, rate, drift_f1) -
 # --- ① 分母：每份标注都要有一行 ---------------------------------------------
 @pytest.mark.gate
 def test_annotation_denominator_and_source_files_are_complete():
-    """21 份标注、两批分母、每份都能解析到真实源文件——漏一篇就红，不用等转换。"""
+    """24 份标注、两批分母、每份都能解析到真实源文件——漏一篇就红，不用等转换。"""
     from tests.qa.assertions import assert_no_vacuous, require_hits
 
     rm = _runner()
-    items = require_hits(rm.annotations(), 21, "ideal 标注清单")
+    items = require_hits(rm.annotations(), 24, "ideal 标注清单")
     counts = {"docx": 0, "pdf": 0}
     for it in items:
         counts["docx" if it["stem"].startswith("docx_") else "pdf"] += 1
@@ -86,7 +86,7 @@ def test_baseline_rows_cover_exactly_the_annotation_set():
     baseline = json.loads(BASELINE_PATH.read_text(encoding="utf-8"))
     from tests.qa.assertions import require_hits
 
-    frozen = {r["stem"] for r in require_hits(baseline["rows"], 21, "基线行")}
+    frozen = {r["stem"] for r in require_hits(baseline["rows"], 24, "基线行")}
     live = {it["stem"] for it in rm.annotations()}
     assert frozen == live, (
         f"基线与标注集合错位：只有基线有 {sorted(frozen - live)}，"
@@ -145,7 +145,7 @@ def test_measured_metrics_match_frozen_baseline():
     rm = _runner()
     from tests.qa.assertions import assert_no_vacuous, require_hits
 
-    rows = require_hits(rm.measure()["rows"], 21, "语料逐篇指标行")
+    rows = require_hits(rm.measure()["rows"], 24, "语料逐篇指标行")
     assert_no_vacuous(rows, lambda r: "headings" in r or "skipped" in r,
                       subject="指标行完整性（每篇要么出数要么写明跳过原因）")
     skipped = [(r["stem"], r["skipped"]) for r in rows if "skipped" in r]
@@ -169,10 +169,10 @@ def test_measured_metrics_match_frozen_baseline():
 
 @pytest.mark.corpus
 def test_frozen_summary_counts_are_stated_and_reproducible():
-    """汇总行的两个总数（DOCX 111 / PDF 102 条标题真值）必须能复算——文档引用的是它们。"""
+    """汇总行的两个总数（DOCX 117 / PDF 102 条标题真值）必须能复算——文档引用的是它们。"""
     rm = _runner()
     s = rm.measure()["summary"]
-    assert s["docx"]["headings_ref"] == 111 and s["docx"]["headings_matched"] == 111, s["docx"]
+    assert s["docx"]["headings_ref"] == 117 and s["docx"]["headings_matched"] == 117, s["docx"]
     assert s["pdf"]["headings_ref"] == 102 and s["pdf"]["headings_matched"] == 102, s["pdf"]
     assert set(s["docx"]["no_truth"] + s["pdf"]["no_truth"]) == EXPECTED_NO_TRUTH, (
         f"无真值样本集合漂移：实测 {s['docx']['no_truth'] + s['pdf']['no_truth']}")

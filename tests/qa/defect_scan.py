@@ -10,7 +10,13 @@
 
 规则来源不是凭空设计：R1/R2/R3 对应已登记的 B-43/B-44，R4 对应 B-47（乱码文本层），
 R5 对应 D08 页眉变体，R6 对应 C-29/O-05 的「诚实暴露而非静默降级」，R7/R9 对应
-MARKDOWN_SPEC 的 MD040 与 FR-107，R8 对应 S3 的 row_shape / TCOLC。
+`mdscore.LINT_CLASS` 里的 MD040 与 FR-107，R8 对应 S3 的 row_shape / TCOLC。
+
+R19-QA-4：上一行原写作「MARKDOWN_SPEC 的 MD040」，而仓库里从来没有 `MARKDOWN_SPEC`
+这个符号——它只出现在 `docs/superpowers/plans/2026-10-25-ch501-realtest.md`。引用一个
+不存在的权威，等于把「MD040 属契约类」这个前提置于**无人能核**的状态；它随后被
+`mdscore.LINT_CLASS` 抄走，一路污染 evaluate 的门禁判定、attribute 的阶段归因与
+prioritize 的 P0 分档。凡判定口径，一律指向可 grep 的符号。
 
 本模块是**信息层**：命中只报告、不阻断（退出码恒 0）。要变成红线，先在
 `tests/qa/test_hard_gate.py` 里以 expectations 的形式落地，别在这里加 sys.exit(1)。
@@ -70,6 +76,37 @@ SEVERITY = {"split_table": "blocking", "leader_dots_in_cell": "blocking",
             "furniture_residue": "major", "silent_degrade": "blocking",
             "fence_no_lang": "minor", "col_count_drift": "major",
             "duplicate_anchor": "major"}
+
+#: 语料基线上的**已知非缺陷命中**（`source stem → {规则名: 命中数}`）。R19-QA-3 把这张
+#: 表从 `tests/test_ch503_qa_face.py`（CH-503 / R18-QA-2 冻结）挪到扫描器侧：`prioritize.py`
+#: 要据此区分「可施工的缺陷」与「语料设计的预期形态」，而生产侧 QA 工具去 import 一个
+#: `test_` 模块是反向依赖。红线强度不变——CH-503 改为 import 本表，并继续断言「22 篇基线
+#: 的命中集合 == 本表」；想让一条新命中过线，仍必须显式改这里。
+#:
+#: 两条登记的成因都由语料生成器证实，不是推断：
+#: - `fence_no_lang`（minor）：`make_corpus.py` 特意造了**不带语言标注**的围栏样本，这是
+#:   MD040 的展示用例，不是管线丢语言——语言标注在源侧本就不存在（见
+#:   `mdscore.MD040_DIALECT_REASON`）。
+#: - `duplicate_anchor`（major）：大样本生成器循环输出同名二级标题（`make_corpus.py:190`
+#:   的 `_para(…, "1.1 章节说明", 14)` 与 `:633` 的 `add_heading("1.1 章节说明", level=2)`），
+#:   重复标题是**语料设计**，不是 TOC 缓存被当正文（D09 的真实形态）。
+#:
+#: 登记是 **(样本, 规则)** 级的，不是规则级的：真实样本腿上同一条规则命中不在本表里，
+#: 照常出项、照常施工。
+CORPUS_KNOWN_BENIGN: dict[str, dict[str, int]] = {
+    "pdf_04_links_code_2p": {"fence_no_lang": 1},
+    "docx_07_code_quote": {"fence_no_lang": 1},
+    "pdf_08_large_40p": {"duplicate_anchor": 1},
+    "docx_08_large_30sections": {"duplicate_anchor": 1},
+}
+
+#: 已知命中允许来自的规则集。**从上表派生**而不是另写一份——两份并集迟早分叉。
+CORPUS_KNOWN_RULES = frozenset(r for v in CORPUS_KNOWN_BENIGN.values() for r in v)
+
+
+def known_benign(source: str | Path, rule: str) -> bool:
+    """该 (样本, 规则) 命中是否属已登记的预期形态。"""
+    return rule in CORPUS_KNOWN_BENIGN.get(Path(source).stem, {})
 
 #: 页眉/页码家具。页码页脚必须是**整行**（`第 N 页` / `第 N 页 共 M 页`），
 #: 否则 pdf_08 的正文 `第 1 页第 1 段：…` 会被整段误判；
@@ -209,8 +246,11 @@ def r_fence_no_lang(md: str, blocks: list, ctx: ScanCtx | None) -> list[Finding]
     bare = [i for i, b in enumerate(blocks) if b.type == "code" and not b.meta.get("lang")]
     if not bare:
         return []
+    # R19-QA-4：证据串原写「MD040 契约类」，随 mdscore.LINT_CLASS 的改档一并更正。
+    # 类别与理由都从 mdscore 取，不再各写一份——两份口径正是上一轮走偏的起点。
     return [Finding("fence_no_lang", SEVERITY["fence_no_lang"], f"block{bare}",
-                    f"{len(bare)} 个代码块缺语言标注（MD040 契约类）")]
+                    f"{len(bare)} 个代码块缺语言标注（MD040 "
+                    f"{mdscore.LINT_CLASS['MD040']} 类：{mdscore.MD040_DIALECT_REASON}）")]
 
 
 def r_col_count_drift(md: str, blocks: list, ctx: ScanCtx | None) -> list[Finding]:
@@ -237,9 +277,20 @@ def r_duplicate_anchor(md: str, blocks: list, ctx: ScanCtx | None) -> list[Findi
     if not dup:
         return []
     texts = [t for t, s in zip(heads, slugs) if s in dup]
+    # R19-QA-2：证据串原先断言成因（「TOC 缓存结果被当正文标题的典型形态」）并截成
+    # texts[:5]，两处都错。① 语料里 pdf_08 / docx_08 的重复标题出自 `make_corpus.py`
+    # 的生成器循环（40 页 / 30 节各输出一次同名二级标题），第十八轮已认定是**语料设计**
+    # 而非 TOC 误判，断言却把已被否掉的成因写死在报告里，每轮都把工程师指向 B-48/D09；
+    # ② texts 是**逐次命中**的列表，40 个同名标题截 5 条只是把同一字符串抄五遍，真正
+    # 有信息量的重数（40 / 30）反而看不见。改为按「不同标题 → 重数」报告，截断只作用于
+    # 去重后的种类且显式说明剩余量。
+    kinds = list(dict.fromkeys(texts))
+    shown = kinds[:5]
+    counts = {t: texts.count(t) for t in shown}
+    more = f"，另有 {len(kinds) - len(shown)} 种未列" if len(kinds) > len(shown) else ""
     return [Finding("duplicate_anchor", SEVERITY["duplicate_anchor"], "headings",
-                    f"重复锚点 {dup}，涉及标题 {texts[:5]}"
-                    f"（TOC 缓存结果被当正文标题的典型形态）")]
+                    f"重复锚点 {len(dup)} 个 {dup}，标题重数 {counts}{more}"
+                    f"（源侧同名标题与 TOC 缓存误判同形，须复核源文档才能定性，不断言成因）")]
 
 
 RULES = {
@@ -368,6 +419,10 @@ def scan_one(source: Path, *, out_dir: Path) -> dict:
         findings = scan(md, ctx=ctx)
         out = _neutral_record(source, "ok")
         out["findings"] = [f.to_dict() for f in findings]
+        # R19-QA-3：逐条标注是否属已登记的预期形态。`by_rule` / `by_severity` 的计数
+        # **不因标注而减少**——命中照样可见，改的只是下游 `prioritize` 给的处置。
+        for fd in out["findings"]:
+            fd["known_benign"] = known_benign(source, fd["rule"])
         out["by_rule"] = {n: sum(1 for f in findings if f.rule == n) for n in RULES}
         out["by_severity"] = {s: sum(1 for f in findings if f.severity == s)
                               for s in ("blocking", "major", "minor")}

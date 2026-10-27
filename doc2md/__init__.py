@@ -10,10 +10,12 @@
 - PLAN_VERSION：开发方案文档版本（主题篇规格变化时递增）。
 """
 
-PIPELINE_VERSION = "2.19.0"   # CH-503 两项产物字节级修复：① R18-PIPE-1 渲染红线判据改「未被反斜杠转义的语法位置」，
-                              # 含 `](#…)` / `#page-…` 惰性源文本的文档不再被 E5031 整篇拒收；② R18-PIPE-2 页脚剔除豁免
-                              # 「上一句未写完的折行后半截」，长 PDF 被误删的正文回到产物。两者都改交付字节 → minor
+PIPELINE_VERSION = "2.21.0"   # CH-506：`w:num/w:lvlOverride`（含 `startOverride`）按 ECMA-376 §17.9.15
+                              # 覆盖该 numId 的抽象级定义——覆盖层置 `numFmt="none"` / 空 `lvlText`
+                              # 时不再凭空造出标记，`startOverride` 也不再被忽略。带该构造的 DOCX
+                              # 交付字节随之改变 → minor。CH-504 的三项产物修复（固定 `ZipInfo` 打包 /
+                              # 等宽行链接标注 / `numFmt="none"` 不造号）见 2.20.0 历史注释。
 SCHEMA_VERSION = 14          # IR 约定 14（文件名与内容的边界）落地
-PLAN_VERSION = "3.37"         # 开发方案文档版本（docs/dev-plan.md，文件名不带版本号）
+PLAN_VERSION = "3.39"         # 开发方案文档版本（docs/dev-plan.md，文件名不带版本号）
 
 __all__ = ["PIPELINE_VERSION", "SCHEMA_VERSION", "PLAN_VERSION"]

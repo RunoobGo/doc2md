@@ -30,8 +30,11 @@ CH-476（R7-PERF-d/g）：DOCX 解析两处热点（口径不变，产物逐字�
 """
 from __future__ import annotations
 
+from bisect import bisect_left
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+
+from .escapes import escape_entities
 
 MAGIC_PDF = b"%PDF-"
 MAGIC_ZIP = b"PK\x03\x04"
@@ -354,14 +357,32 @@ def _edge_spaces(vis: list[dict], blanks: list[dict]) -> tuple[bool, bool]:
     return leading, trailing
 
 
-def _blanks_in_band(chars: list[dict], top: float, bottom: float) -> list[dict]:
-    """行纵向带内的空白字符（与 `_slice_chars` 同 band 口径）。"""
-    if not chars:
-        return []
-    hi = max(bottom, top + 1.0)
-    return [c for c in chars
-            if not (c.get("text") or "").strip()
-            and top - 1.0 <= float(c.get("top", 0.0) or 0.0) < hi]
+class _BlankIndex:
+    """页内空白字形的带查询索引（与 `_slice_chars` 同 band 口径）。
+
+    OPT4-17：原 `_blanks_in_band` 每次调用重扫整页字符，双栏路径逐行取三次，
+    实测量级 32.9×–323× 的重复扫描。这里按 `top` 排序一次、二分定位带边界。
+    返回结果保持 `chars` 的原始顺序——`_edge_spaces` 按 any() 消费，顺序无语义，
+    但保持可让重构的等价性可被逐元素比对。
+    """
+
+    __slots__ = ("_tops", "_items")
+
+    def __init__(self, chars: list[dict] | None):
+        items = [(float(c.get("top", 0.0) or 0.0), i, c)
+                 for i, c in enumerate(chars or [])
+                 if not (c.get("text") or "").strip()]
+        items.sort(key=lambda t: (t[0], t[1]))
+        self._tops = [it[0] for it in items]
+        self._items = items
+
+    def in_band(self, top: float, bottom: float) -> list[dict]:
+        lo = bisect_left(self._tops, top - 1.0)
+        hi = bisect_left(self._tops, max(bottom, top + 1.0))
+        band = self._items[lo:hi]
+        if len(band) > 1:
+            band = sorted(band, key=lambda t: t[1])
+        return [c for _, _, c in band]
 
 
 def _line_from_raw(raw: dict, lchars: list[dict],
@@ -475,27 +496,36 @@ def _extract_two_column(page, raw_lines: list[dict], mid: float,
                 and float(ln.get("x1", 0.0)) > mid + gutter / 2
                 and (float(ln.get("top", 0.0)) < col_top - 2.0
                      or float(ln.get("bottom", 0.0)) > col_bottom + 2.0)]
-    full_tops = [float(ln.get("top", 0.0)) for ln in full_raw]
-    def keep(ln) -> bool:
-        top = float(ln.get("top", 0.0))
-        return all(abs(top - t) > 2.0 for t in full_tops)
+    full_tops = sorted(float(ln.get("top", 0.0)) for ln in full_raw)
 
-    def edge_blanks_for(ln, chars: list[dict]) -> list[dict]:
+    def keep(ln) -> bool:
+        # OPT4-17：原实现对每个候选行重扫 full_tops（O(行数×跨栏行数)）。
+        # 排序后二分定位最近候选——只有紧邻 top±2.0 的可能命中，左邻取一位
+        # 是为浮点边界（t 落在 top-2.0 下侧一个 ULP 内）兜底。
+        top = float(ln.get("top", 0.0))
+        i = bisect_left(full_tops, top - 2.0)
+        return all(abs(top - t) > 2.0 for t in full_tops[max(0, i - 1):i + 2])
+
+    left_blanks = _BlankIndex(left_chars)
+    right_blanks = _BlankIndex(right_chars)
+    page_blanks = _BlankIndex(page_chars)
+
+    def edge_blanks_for(ln, idx: _BlankIndex) -> list[dict]:
         # O-01：两栏路径的行字典 chars 已被 extract_text_lines 剥掉空白，
         # 行缘空白证据改从 crop 后的 chars 里补（band 口径同 _slice_chars）。
         # full 行用全页 chars：行缘 gap 边界（见 _edge_spaces）天然排除
         # 栏间 / 他栏空白，只留本行自己的行首尾空格。
-        return _blanks_in_band(chars, float(ln.get("top", 0.0) or 0.0),
-                               float(ln.get("bottom", 0.0) or 0.0))
+        return idx.in_band(float(ln.get("top", 0.0) or 0.0),
+                           float(ln.get("bottom", 0.0) or 0.0))
 
     left = [_line_from_raw(ln, ln.get("chars") or [],
-                           edge_blanks_for(ln, left_chars))
+                           edge_blanks_for(ln, left_blanks))
             for ln in left_raw if keep(ln)]
     right = [_line_from_raw(ln, ln.get("chars") or [],
-                            edge_blanks_for(ln, right_chars))
+                            edge_blanks_for(ln, right_blanks))
              for ln in right_raw if keep(ln)]
     full = [_line_from_raw(ln, ln.get("chars") or [],
-                           edge_blanks_for(ln, page_chars))
+                           edge_blanks_for(ln, page_blanks))
             for ln in full_raw]
     col = left + right
     if not col:
@@ -743,30 +773,62 @@ class _DocxNumbering:
             root = parse_xml(part.blob)
         except Exception:
             return
+        def read_lvl(lvl) -> tuple[int, dict] | None:
+            try:
+                ilvl = int(lvl.get(f"{_W_NS}ilvl", "0"))
+            except ValueError:
+                return None
+            fmt = lvl.find(f"{_W_NS}numFmt")
+            txt = lvl.find(f"{_W_NS}lvlText")
+            start = lvl.find(f"{_W_NS}start")
+            return ilvl, {
+                "fmt": (fmt.get(f"{_W_NS}val", "decimal") if fmt is not None
+                        else "decimal"),
+                "text": (txt.get(f"{_W_NS}val", "") if txt is not None else ""),
+                # CH-504：区分「lvlText 元素存在但为空」（= 该级不显示编号）与
+                # 「元素缺失」（畸形文档，保留 decimal 兜底）。两者都读成 ""
+                # 会把前者误判成后者。
+                "has_text": txt is not None,
+                "start": int(start.get(f"{_W_NS}val", "1")) if start is not None else 1,
+            }
+
         abstract: dict[str, dict[int, dict]] = {}
         for an in root.findall(f"{_W_NS}abstractNum"):
             aid = an.get(f"{_W_NS}abstractNumId", "")
             lv: dict[int, dict] = {}
             for lvl in an.findall(f"{_W_NS}lvl"):
-                try:
-                    ilvl = int(lvl.get(f"{_W_NS}ilvl", "0"))
-                except ValueError:
-                    continue
-                fmt = lvl.find(f"{_W_NS}numFmt")
-                txt = lvl.find(f"{_W_NS}lvlText")
-                start = lvl.find(f"{_W_NS}start")
-                lv[ilvl] = {
-                    "fmt": (fmt.get(f"{_W_NS}val", "decimal") if fmt is not None
-                            else "decimal"),
-                    "text": (txt.get(f"{_W_NS}val", "") if txt is not None else ""),
-                    "start": int(start.get(f"{_W_NS}val", "1")) if start is not None else 1,
-                }
+                parsed = read_lvl(lvl)
+                if parsed is not None:
+                    lv[parsed[0]] = parsed[1]
             abstract[aid] = lv
         for num in root.findall(f"{_W_NS}num"):
             nid = num.get(f"{_W_NS}numId", "")
             aid_el = num.find(f"{_W_NS}abstractNumId")
             aid = aid_el.get(f"{_W_NS}val", "") if aid_el is not None else ""
-            self.levels[nid] = abstract.get(aid, {})
+            # CH-506（OPT4-12）：`w:lvlOverride` 才是该 numId 的**有效**级别定义
+            # （ECMA-376 §17.9.15）——Word 的「重新开始编号」写 startOverride，
+            # 「本节单独换格式」写整条 lvl。只读抽象层会让覆盖层的 numFmt=none
+            # 被无视、凭抽象层造出标记（D-1 同型），startOverride 被无视则编号
+            # 从 1 起。逐 num 深拷贝：同一 abstractNumId 可被多个 numId 共享，
+            # 覆盖不得回写。
+            level_map = {i: dict(c) for i, c in abstract.get(aid, {}).items()}
+            for ov in num.findall(f"{_W_NS}lvlOverride"):
+                try:
+                    oilvl = int(ov.get(f"{_W_NS}ilvl", "0"))
+                except ValueError:
+                    continue
+                lvl_el = ov.find(f"{_W_NS}lvl")
+                if lvl_el is not None:
+                    parsed = read_lvl(lvl_el)
+                    if parsed is not None:
+                        level_map[oilvl] = parsed[1]
+                start_el = ov.find(f"{_W_NS}startOverride")
+                if start_el is not None:
+                    try:
+                        level_map[oilvl]["start"] = int(start_el.get(f"{_W_NS}val", "1"))
+                    except (KeyError, ValueError):
+                        pass
+            self.levels[nid] = level_map
         try:
             styles = d.styles.element
         except Exception:
@@ -834,6 +896,13 @@ class _DocxNumbering:
         for i in list(counters):
             if i > ilvl:
                 counters[i] = int((levels.get(i) or {}).get("start", 1)) - 1
+        # CH-504：`numFmt="none"` 或空 `lvlText` = 该级不显示编号（ECMA-376
+        # §17.9.19）。计数器已在上面推进，深层 `%2` 之类引用仍算得对，只是本级
+        # 不产出标记。原实现对空 lvlText 兜底成 `"%1."`，于是 LibreOffice 写出的
+        # 标题样式（Heading1..9 挂样式级 numPr → numFmt=none）被凭空加上 `1. `
+        # 前缀——文档里不存在的字符进了交付正文，且不留告警。
+        if cfg["fmt"] == "none" or (cfg["has_text"] and not cfg["text"]):
+            return "", -1
         if cfg["fmt"] == "bullet":
             # CH-485（R9-PIPE-3）：lvlText 可能是 "o"/"§" 等任意字形；bullet
             # 的语义是项目符号，不能让它落入 S3 的“非数字→1.”归一。
@@ -847,7 +916,7 @@ class _DocxNumbering:
 
         import re as _re
         marker = _re.sub(r"%(\d)", repl, cfg["text"] or "%1.")
-        return marker or f"{counters[ilvl]}.", ilvl
+        return marker, ilvl
 
 
 def _docx_style_name(el, d, ctx: _DocxCtx) -> str:
@@ -1107,9 +1176,8 @@ def _docx_cell_text(tc) -> str:
         if txt:
             # D3（QA-R2）：单元格里的 `<`/`>` 是源文本字面量，不是允许直通的
             # HTML；`<br>` 只在下面作为**结构**分隔符由本函数自己拼入。
-            txt = (txt.replace("&", "&amp;").replace("<", "&lt;")
-                   .replace(">", "&gt;"))
-            parts.append(txt)
+            # OPT4-16：实体折转收口到 `escapes.escape_entities`（B-37 单一来源）。
+            parts.append(escape_entities(txt))
     return "<br>".join(parts)
 
 

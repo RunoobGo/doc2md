@@ -2,7 +2,8 @@
 
 角色边界：
   admin  —— 全部写操作 + token 管理 + settings
-  editor —— 提交作业 + 编辑 / 回滚 + 重跑
+  editor —— 提交作业（含 `force` 重跑：`POST /jobs` 走 `submit_job`，没有独立动作）
+            + 编辑 / 回滚
   reader —— 只读查询与导出
 吊销即时生效：写 `revoked_at` 后下次 `check` 即拒（CH-473 / R5-SVC-9 澄清，
 无传播窗口；`api.revoke_effective_seconds` 仅为对外承诺值的展示键）。
@@ -27,13 +28,20 @@ RANK = {"reader": 1, "editor": 2, "admin": 3}
 _LABEL_MAX = 256
 
 # 端点权限矩阵：action -> 所需最低角色
+# R19-API-5：删掉 `"rerun": "editor"`。它全仓只有这一处出现（`api.py` 的 `need("…")`
+# 共 9 个不同 action，删前与本表的 10 个键差一个、差的正是它；dev-plan §5.5 的权限
+# 矩阵表 9 行也没有它）——一条永远查不到的键，读者会以为存在一个「重跑」动作需要
+# editor，而产品的重跑路径其实是 `POST /jobs` 带 `force`（E4091 的唯一放行手段），
+# 走的是 `submit_job`。同 CH-456 删 `require` / `timing_safe_equal` /
+# `RevocationCache` 的口径：零调用符号不留。
+# 反向红线 `tests/test_ch504_service_faces.py::test_matrix_has_no_dead_action`
+# 按 AST 数 `need("…")` / `auth.check(…, "…")` 的字面量，矩阵键必须全部被用到。
 MATRIX = {
     "read":            "reader",
     "export":          "reader",
     "submit_job":      "editor",
     "edit":            "editor",
     "rollback":        "editor",
-    "rerun":           "editor",
     "delete":          "admin",
     "settings_put":    "admin",
     "system_reload":   "admin",

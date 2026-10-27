@@ -1,6 +1,6 @@
-"""CH-491（B-1 / B-2）+ CH-499 + CH-503：错误码、死代码与文档口径的静态对账红线。
+"""CH-491（B-1 / B-2）+ CH-499 + CH-503 + CH-504 + CH-507：错误码、死代码与文档口径的静态对账红线。
 
-六条断言同属「静态对账」一族，与 `test_ch477_version_sync.py`
+八条断言同属「静态对账」一族，与 `test_ch477_version_sync.py`
 （文档 ↔ 代码）互补：
 
 - **错误码引用**：`errors.CODE_INDEX` 里每个错误码必须在全仓至少有一处
@@ -21,6 +21,13 @@
   「分母 / 未覆盖」现场算出来。v3.34 的三写口径只规定「怎么记」，没规定「记得
   对不对」——本轮实测抓到两处继承错（分母从 740 换成 738、百分比仍抄 90.51%，
   现场复算是 90.53%），与附录 G 组头是同一个病灶。
+- **交叉引用可解析（CH-504，1 项）**：每处 `some/file.py` 里的 `symbol` 都要能解析到
+  那个符号。本轮实测两例悬空引用：一例正是「改档承诺无人看守」的那条反向红线，
+  另一例在活文档里给一条真实存在的红线记了一个从未出现过的名字。详见文末该节病史。
+- **行号引用棘轮（CH-507 / OPT4-19，1 项）**：活文档里 `文件.py:NNN` 形态的命中数
+  不得超过冻结常量（初始 173 = dev-plan 72 + technical-reference 101）。行号随代码
+  漂移后引用**静默指错**——比断链更糟：读者会读到一段无关代码并把它当成依据。
+  历史轮次报告与计划文档是取证快照，行号正是其证据价值的一部分，**不进分母**。
 
 断言写法沿用 CH-477 的纪律：**先确认锚点/枚举成功，再比对**——解析不到
 必须红，不能静默跳过。
@@ -312,3 +319,153 @@ def test_coverage_trio_is_recomputable() -> None:
     orphan, m = _trio_violations("打出 91%、精确 90.54%")
     assert m == 0 and orphan, "三写助手对「只有百分比、没有分母」报绿（缺式即漏）"
 
+
+# --- 交叉引用可解析（CH-504 / R19-DOC-1）--------------------------------------
+#
+# 同族第三例。CH-495 抓的是「第 N 层」指向不存在的层标题，CH-503 抓的是「精确 X%」
+# 配不上自己的分母，本轮抓的是 `path/to/file.py` 里的 `symbol` 指向不存在的符号。三例的共同
+# 点：**交叉引用是一份承诺，而这份承诺过去没人核**。
+#
+# 本轮实测两例，都不是无害笔误：
+# ① `tests/qa/mdscore.py` 把 MD040 改档的反向红线记作
+#    `test_md040_reverts_to_contract_if_lang_lands`（真名
+#    `test_md040_class_tracks_product_lang_capability`）。按名 grep 得到空结果，于是
+#    「若 S3 将来带上 lang，本档必须改回 contract」这个承诺看起来无人看守——而它正是
+#    改档能被批准的前提。同轮 `defect_scan.py` 的 docstring 把 MD040 的权威记作
+#    `MARKDOWN_SPEC`（仓库里从来没有这个符号）是同一病灶的更严重形态：那份引用一度
+#    是「MD040 属契约类」的唯一依据，并污染了 evaluate / attribute / prioritize 三层。
+# ② `docs/dev-plan.md` §12.7 的 B-27 行把 v10 迁移红线记作
+#    `test_db_v10_migration_backfills_lease_columns`；真名
+#    `test_db_v10_adds_lease_columns_and_migrates_old_library` 在三份活文档里**一次都
+#    没出现过**（改前实测 `grep -c` = 0）。该行同时写明了这条红线「用 `ALTER TABLE …
+#    DROP COLUMN` 造出 v9 形态、重开补齐、再开仍幂等」——描述与真名下的断言逐条相符，
+#    错的只有名字。所以它比 ① 更隐蔽：内容是对的，读者会以为是自己的 grep 姿势不对。
+#
+# 只扫活文档与本仓代码，不扫 `docs/qa/**` 与各轮审查报告：那些是历史存档，按 §12.3
+# 「旧记录不因新数字删除」保留当时时点的写法；拿今天的符号表去判它们红，等于强迫改写
+# 档案，也会把「当时的引用后来失效」这个事实抹掉。
+#
+# 上面两个错名**故意**不带 `::` 写成裸名：带了就会让本节判自己的病史红。这不是给
+# 本文件开后门——负夹具用的是真文件配假符号，助手照样报得出红。
+#
+# **盲区（本轮自己踩到，写明）**：本节只认「`某文件.py` + 双冒号 + 符号名」这一种写法
+# （此处刻意不写出完整形态：本文件自己也在 tests/ 扫描面内，写出即被自己判成悬空引用）。
+# 裸反引号名
+# （`` `_row_to_block` ``）不在扫描面里，而本轮实施 R19-API-6 时新写的注释正是这么
+# 引用了一个不存在的函数——真名是 `list_blocks` 内联的逐字段反序列化，仓库里没有
+# `_row_to_block` 这个符号。把裸名也纳入会误伤大量普通行文（反引号在本仓文档里也用于
+# 配置键、字段名、命令），故本节维持窄口径；裸名引用仍靠评审与 `grep` 兜。
+
+CITE_RE = re.compile(r"([\w./\-]+\.py)::(\w+)")
+CITE_DIRS = ("doc2md", "tests", "ops", "config")
+
+
+def _defined_names(path: Path) -> set[str]:
+    """文件里可被 `::` 引用的名字：函数 / 类 / 赋值目标（含带注解与嵌套的）。"""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    out: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            out.add(node.name)
+        elif isinstance(node, ast.Assign):
+            out |= {t.id for t in node.targets if isinstance(t, ast.Name)}
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            out.add(node.target.id)
+    return out
+
+
+def _py_index() -> tuple[dict[str, list[Path]], dict[Path, set[str]]]:
+    """裸文件名 → 候选路径；路径 → 已定义名（缓存，避免同一文件重复解析）。"""
+    index: dict[str, list[Path]] = {}
+    cache: dict[Path, set[str]] = {}
+    for d in CITE_DIRS:
+        for p in (REPO_ROOT / d).rglob("*.py"):
+            if "__pycache__" in p.parts:
+                continue
+            index.setdefault(p.name, []).append(p)
+            cache[p] = _defined_names(p)
+    return index, cache
+
+
+def _cite_violations(text: str, index: dict[str, list[Path]],
+                     cache: dict[Path, set[str]]) -> tuple[list[str], int]:
+    """返回（解析不到的引用清单，成功扫到的引用条数）。"""
+    out: list[str] = []
+    n = 0
+    for m in CITE_RE.finditer(text):
+        n += 1
+        rel, sym = Path(m.group(1)), m.group(2)
+        direct = REPO_ROOT / rel
+        cands = [direct] if direct.exists() else index.get(rel.name, [])
+        if not cands:
+            out.append(f"{rel}::{sym}：仓库里没有这个文件")
+            continue
+        for c in cands:
+            cache.setdefault(c, _defined_names(c))
+        if not any(sym in cache[c] for c in cands):
+            out.append(f"{rel}::{sym}：{'、'.join(str(c.relative_to(REPO_ROOT)) for c in cands)}"
+                       f" 里没有这个符号")
+    return out, n
+
+
+def test_cross_references_resolve() -> None:
+    """每处 `some/file.py` 里的 `name` 都必须能在仓库里解析到那个符号。"""
+    index, cache = _py_index()
+    assert index, "四个代码目录一个 .py 都没扫到——红线锚点失效"
+    texts = {rel: (REPO_ROOT / rel).read_text(encoding="utf-8") for rel in LIVING_DOCS}
+    for d in CITE_DIRS:
+        for p in sorted((REPO_ROOT / d).rglob("*.py")):
+            if "__pycache__" not in p.parts:
+                texts[str(p.relative_to(REPO_ROOT))] = p.read_text(encoding="utf-8")
+
+    violations: list[str] = []
+    total = 0
+    for rel, text in texts.items():
+        found, n = _cite_violations(text, index, cache)
+        total += n
+        violations += [f"{rel}: {v}" for v in found]
+    # 显式前置：CH-504 复核实测 **51** 处（三份活文档 37 + 代码 14）。原下限 20 是
+    # CH-491 那轮的口径，此后本轮把 dev-plan 附录 C 与 doctor 段共 13 处 `文件.py:NNN`
+    # 行号引用改写成符号引用（R19-API-2 / R19-API-3：行号引用无从机器复核、且实测
+    # 10/13 已漂移），条数只增不减。下限随之抬到 40——留着 20 就等于允许活文档把
+    # 半数符号引用退回成不可验证的行号，而这条红线看不出来。
+    assert total >= 40, f"交叉引用只剩 {total} 处（<40），正则或扫描面漂移即视为红线失效"
+    assert not violations, (
+        "悬空的交叉引用（假承诺：读者按名 grep 必然落空）：\n  " + "\n  ".join(violations))
+    # 负夹具：助手自己必须报得出红——两种形态（文件在而符号不在、文件根本不在）都要。
+    # 两个字面量都**拆开拼**：本节要扫 `tests/` 下每个 .py 的正文，写成一个完整串就会
+    # 被自己扫到、判自己红。拆开后正则在本文件里匹配不到，运行时拼出的值照旧是坏引用。
+    sep = "::"
+    bad_sym, k = _cite_violations("tests/qa/mdscore.py" + sep + "no_such_rule", index, cache)
+    assert k == 1 and bad_sym, "引用助手对「文件在、符号不在」报绿（助手本身失效）"
+    bad_file, j = _cite_violations("tests/test_nope.py" + sep + "test_x", index, cache)
+    assert j == 1 and bad_file, "引用助手对「文件不存在」报绿（助手本身失效）"
+
+
+
+# --- 行号引用棘轮（CH-507 / OPT4-19 / B-50）----------------------------------
+#
+# 活文档的指位纪律是「`文件.py` + 双冒号 + 符号名」：行号随代码漂移，漂移后引用
+# **静默指错**——读者会读到一段无关代码并把它当成依据。历史轮次报告与计划文档
+# （`docs/review-round*.md`、`docs/pm-review-*.md`、`docs/spec-*.md`、
+# `docs/superpowers/plans/*.md`）是取证快照，行号正是其证据价值的一部分，
+# **不进本棘轮分母**——改掉等于篡改病史。
+#
+# 存量只减不增：每把一处 `文件.py:NNN` 改写成符号引用（文件名 + 双冒号 + 符号名），
+# 就把 LINE_REF_LIMIT 下调一处。新增引用一律用符号——本断言只防增长，不主动收敛。
+LINE_REF_RE = re.compile(r"[A-Za-z0-9_./-]+\.py:[0-9]{2,4}")
+LINE_REF_LIMIT = 173
+
+
+def test_living_docs_line_number_references_do_not_grow() -> None:
+    """活文档的 `文件.py:NNN` 引用数不得超过冻结上限（只减不增）。"""
+    counts = {rel: len(LINE_REF_RE.findall(
+        (REPO_ROOT / rel).read_text(encoding="utf-8"))) for rel in LIVING_DOCS}
+    total = sum(counts.values())
+    assert total <= LINE_REF_LIMIT, (
+        f"活文档行号引用 {total} 处 > 冻结上限 {LINE_REF_LIMIT}（只减不增）。"
+        f"分项：{counts}。新增指位请用符号引用（文件名 + 双冒号 + 符号名）；"
+        "存量每改一处把 LINE_REF_LIMIT 下调一处。")
+    # 负夹具：正则对已知行号形态必须命中——否则计数恒 0，棘轮恒真。
+    assert LINE_REF_RE.findall("见 doc2md/api.py:123 与 l2.py:45") == [
+        "doc2md/api.py:123", "l2.py:45"], "行号引用正则对已知形态无命中（棘轮本身失效）"

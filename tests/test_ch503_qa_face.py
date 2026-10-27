@@ -31,23 +31,17 @@ EXPECTED = CORPUS / "expected"
 #: 冻结**具名**而不是「数量 1」——将来多一个拒收样本必须显式改这里。
 CORPUS_REJECTED = frozenset({"pdf_06_scanned_1p"})
 
-#: 冻结的已知命中（`source stem → {规则名: 命中数}`），来源是 CH-503 本机实测而不是推断：
-#: - `fence_no_lang`（minor）：`make_corpus.py` 特意造了**不带语言标注**的围栏样本，
-#:   这是 MD040 的展示用例，不是管线丢语言——语言标注在源侧本就不存在。
-#: - `duplicate_anchor`（major）：大样本生成器按 30 节循环输出同名二级标题
-#:   （`make_corpus.py` 的 `add_heading("1.1 章节说明", level=2)`），重复标题是
-#:   **语料设计**，不是 TOC 缓存被当正文（D09 的真实形态）。
-#: 两类都是「扫描器正确命中、但该形态不是缺陷」的已知集合。写在这里的意义是：想让
-#: 一条新命中过线，必须先把它加进这张表——重烤基线不再能顺带吞掉结构退化。
-CORPUS_KNOWN_FINDINGS = {
-    "pdf_04_links_code_2p": {"fence_no_lang": 1},
-    "docx_07_code_quote": {"fence_no_lang": 1},
-    "pdf_08_large_40p": {"duplicate_anchor": 1},
-    "docx_08_large_30sections": {"duplicate_anchor": 1},
-}
+# 冻结的已知命中表（`source stem → {规则名: 命中数}`）**已迁至扫描器侧**
+# `tests/qa/defect_scan.py::CORPUS_KNOWN_BENIGN`（R19-QA-3）：`prioritize.py` 要据此区分
+# 「可施工的缺陷」与「语料设计的预期形态」，而生产侧 QA 工具去 import 一个 `test_` 模块
+# 是反向依赖。本文件改为 import 该表，红线强度不变——想让一条新命中过线，仍必须显式改表；
+# 表里留一条已不再命中的陈登记，同样会被下面的逐样本双向差打红。成因论证（`fence_no_lang`
+# 是 MD040 展示用例、`duplicate_anchor` 是生成器循环）随表迁走，写在离判据最近的地方。
+# 仍走惰性 import：`defect_scan` 会拉起 `doc2md.pipeline.convert`，不该在收集期就付这个代价。
+def _known_tables() -> tuple[dict[str, dict[str, int]], frozenset[str]]:
+    from tests.qa import defect_scan as ds
 
-#: 已知命中允许来自的规则集（同表并集，写成常量是为了让「意外规则」报得清楚）。
-CORPUS_KNOWN_RULES = frozenset({"fence_no_lang", "duplicate_anchor"})
+    return ds.CORPUS_KNOWN_BENIGN, ds.CORPUS_KNOWN_RULES
 
 _SCAN_CACHE: dict[str, dict] = {}
 
@@ -106,13 +100,16 @@ def test_defect_scan_corpus_baseline_matches_frozen_set():
     # 每篇都必须真的读到非空产物：空文件 / 读失败在这里转红，而不是「0 命中 = 清白」
     assert_no_vacuous(sorted(scanned), lambda s: scanned[s]["text_bytes"] > 0,
                       subject="语料逐篇扫描记录")
+    known, _ = _known_tables()
+    # 表被清空会让下面的双向差退化成「零命中即清白」（O-g 的形态），所以表本身也要有牙齿
+    assert known, "CORPUS_KNOWN_BENIGN 被清空——冻结表失效，本红线随之空转"
     unexpected = {s: v["by_rule"] for s, v in scanned.items()
-                  if v["by_rule"] != CORPUS_KNOWN_FINDINGS.get(s, {})}
+                  if v["by_rule"] != known.get(s, {})}
     assert not unexpected, (
         f"基线产物出现未登记的缺陷命中：{unexpected}\n"
         "新增结构性退化——先人工判定是缺陷还是新的已知形态，"
-        "再决定改不改本文件的 CORPUS_KNOWN_FINDINGS")
-    known_total = sum(sum(v.values()) for v in CORPUS_KNOWN_FINDINGS.values())
+        "再决定改不改 defect_scan.CORPUS_KNOWN_BENIGN")
+    known_total = sum(sum(v.values()) for v in known.values())
     measured_total = sum(sum(v["by_rule"].values()) for v in scanned.values())
     assert measured_total == known_total, (
         f"命中总数不一致：实测 {measured_total} / 冻结 {known_total}")
@@ -131,8 +128,13 @@ def test_blocking_rules_are_silent_on_all_corpus_products():
     assert not {s: v for s, v in hit.items() if v}, (
         f"基线语料出现 blocking 级命中（发布面缺陷）：{ {s: v for s, v in hit.items() if v} }")
     fired = {r for v in scanned.values() for r in v["by_rule"]}
-    assert fired <= CORPUS_KNOWN_RULES, (
-        f"基线语料上出现了预期外的规则：{sorted(fired - CORPUS_KNOWN_RULES)}")
+    _, known_rules = _known_tables()
+    # 登记了不存在的规则名 = 一条永远不命中的登记，与「没有登记」在报告里长得一样；
+    # 派生集必须落在 SEVERITY 的键上，写错名字在这里转红。
+    assert known_rules <= set(ds.SEVERITY), (
+        f"登记表里有 SEVERITY 未收录的规则名：{sorted(known_rules - set(ds.SEVERITY))}")
+    assert fired <= known_rules, (
+        f"基线语料上出现了预期外的规则：{sorted(fired - known_rules)}")
 
 
 # --- R18-QA-1：助手自身必须有牙齿 -------------------------------------------

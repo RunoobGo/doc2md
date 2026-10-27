@@ -758,6 +758,173 @@ def docx_complex_tables() -> None:
     print(f"  ✓ {path.name:36s} {path.stat().st_size:>9,} bytes  DOCX 复杂表格/合并单元格/长单元格")
 
 
+# --- OPT4-4：LibreOffice 形态的 DOCX 编号语料 ---------------------------------
+# 三份样本对准 `_DocxNumbering.marker` 修复（CH-504 / R19-PIPE-3）守卫的两半：
+#   ① 样式级 numPr → numFmt="none" + 空 lvlText（LibreOffice 写出的 Heading1..9）；
+#   ② bullet + 非空 lvlText（反向守卫：真实项目符号不得被削掉）；
+#   ③ 多级 %1.%2.%3. + 中间层「元素存在但 lvlText 为空」（守卫第二半的深层形态）。
+# 语料腿的验收判据：去掉守卫 → `run_corpus.py` 必须转红（原先只有 gate 4 项会红）。
+_WML_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+_NUMBERING_NONE = f'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:numbering xmlns:w="{_WML_NS}">
+ <w:abstractNum w:abstractNumId="10">
+  <w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="none"/><w:lvlText w:val=""/></w:lvl>
+  <w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="none"/><w:lvlText w:val=""/></w:lvl>
+ </w:abstractNum>
+ <w:num w:numId="1"><w:abstractNumId w:val="10"/></w:num>
+</w:numbering>'''
+_NUMBERING_BULLET = f'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:numbering xmlns:w="{_WML_NS}">
+ <w:abstractNum w:abstractNumId="10">
+  <w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="bullet"/><w:lvlText w:val="o"/></w:lvl>
+  <w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="bullet"/><w:lvlText w:val="§"/></w:lvl>
+ </w:abstractNum>
+ <w:num w:numId="1"><w:abstractNumId w:val="10"/></w:num>
+</w:numbering>'''
+_NUMBERING_MULTILEVEL = f'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:numbering xmlns:w="{_WML_NS}">
+ <w:abstractNum w:abstractNumId="10">
+  <w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl>
+  <w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val=""/></w:lvl>
+  <w:lvl w:ilvl="2"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1.%2.%3."/></w:lvl>
+ </w:abstractNum>
+ <w:num w:numId="1"><w:abstractNumId w:val="10"/></w:num>
+</w:numbering>'''
+
+
+def _docx_numpr(paragraph, num_id: int, ilvl: int) -> None:
+    """段落级 `w:numPr`（python-docx 未暴露该属性）。"""
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+    pPr = paragraph._p.get_or_add_pPr()
+    numPr = OxmlElement("w:numPr")
+    lvl = OxmlElement("w:ilvl")
+    lvl.set(qn("w:val"), str(ilvl))
+    num = OxmlElement("w:numId")
+    num.set(qn("w:val"), str(num_id))
+    numPr.append(lvl)
+    numPr.append(num)
+    pPr.append(numPr)
+
+
+def _inject_docx_numbering(path: Path, numbering_xml: str,
+                           style_levels: dict[str, tuple[int, int]] | None = None) -> None:
+    """替换 `word/numbering.xml`，可给段落样式挂样式级 numPr。
+
+    `style_levels`：{styleId: (numId, ilvl)}——LibreOffice 把标题编号写成
+    Heading1..9 的样式级 numPr，而不是段落级；这是本组语料的主要形态。
+    改完 zip 后由调用方再跑 `freeze_docx`（本函数不负责时间戳冻结）。
+    """
+    import zipfile
+
+    from docx.oxml import OxmlElement, parse_xml
+    from docx.oxml.ns import qn
+    from lxml import etree
+
+    with zipfile.ZipFile(path) as z:
+        items = [(n, z.read(n)) for n in z.namelist()]
+    out = []
+    for name, data in items:
+        if name == "word/numbering.xml":
+            data = numbering_xml.encode("utf-8")
+        elif name == "word/styles.xml" and style_levels:
+            root = parse_xml(data)
+            for sid, (nid, ilvl) in style_levels.items():
+                st = next((s for s in root.findall(f"{{{_WML_NS}}}style")
+                           if s.get(f"{{{_WML_NS}}}styleId") == sid), None)
+                if st is None:
+                    raise SystemExit(f"style {sid} missing from default template")
+                pPr = st.find(f"{{{_WML_NS}}}pPr")
+                if pPr is None:
+                    pPr = OxmlElement("w:pPr")
+                    st.insert(0, pPr)
+                numPr = OxmlElement("w:numPr")
+                lvl = OxmlElement("w:ilvl")
+                lvl.set(qn("w:val"), str(ilvl))
+                num = OxmlElement("w:numId")
+                num.set(qn("w:val"), str(nid))
+                numPr.append(lvl)
+                numPr.append(num)
+                # pPr 子元素有固定顺序（ECMA-376 §17.3.1.26）：numPr 必须在
+                # spacing / ind / outlineLvl 之前，否则 Word 视为损坏包。
+                anchor = None
+                for tag in ("suppressLineNumbers", "pBdr", "shd", "tabs",
+                            "suppressAutoHyphens", "kinsoku", "wordWrap",
+                            "overflowPunct", "topLinePunct", "autoSpaceDE",
+                            "autoSpaceDN", "bidi", "adjustRightInd", "snapToGrid",
+                            "spacing", "ind", "contextualSpacing", "mirrorIndents",
+                            "suppressOverlap", "jc", "textDirection",
+                            "textAlignment", "textboxTightWrap", "outlineLvl",
+                            "divId", "cnfStyle", "rPr", "sectPr", "pPrChange"):
+                    anchor = pPr.find(f"{{{_WML_NS}}}{tag}")
+                    if anchor is not None:
+                        anchor.addprevious(numPr)
+                        break
+                if anchor is None:
+                    pPr.append(numPr)
+            data = etree.tostring(root.getroottree(), xml_declaration=True,
+                                  encoding="UTF-8", standalone=True)
+        out.append((name, data))
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+        for name, data in out:
+            z.writestr(name, data)
+
+
+def docx_lo_heading_numbering() -> None:
+    """LibreOffice 形态：Heading1/2 挂样式级 numPr → numFmt=none + 空 lvlText。"""
+    path, d = _docx("docx_12_lo_heading_numbering.docx")
+    d.add_heading("总则", level=1)
+    d.add_paragraph("本样本模拟 LibreOffice 写出的标题自动编号形态。")
+    d.add_heading("编制目的", level=2)
+    d.add_paragraph("标题样式指向的抽象编号每一级都是 numFmt=none。")
+    d.add_heading("适用范围", level=2)
+    d.add_paragraph("按 ECMA-376 §17.9.19，none 的语义是「不显示编号」。")
+    d.add_heading("附则", level=1)
+    d.add_paragraph("转换后标题不得带任何数字前缀。")
+    d.save(path)
+    _inject_docx_numbering(path, _NUMBERING_NONE,
+                           {"Heading1": (1, 0), "Heading2": (1, 1)})
+    freeze_docx(path)
+    print(f"  ✓ {path.name:36s} {path.stat().st_size:>9,} bytes  "
+          "DOCX 样式级 numPr + numFmt=none（LibreOffice 形态）")
+
+
+def docx_bullet_glyph() -> None:
+    """bullet 编号：lvlText 是字形 o / §（非数字），反向守卫真实项目符号。"""
+    path, d = _docx("docx_13_bullet_glyph.docx")
+    d.add_heading("项目符号字形测试", level=1)
+    d.add_paragraph("下面三个项目符号的 lvlText 是字形 o，不是数字。")
+    for text in ("第一条要点", "第二条要点", "第三条要点"):
+        _docx_numpr(d.add_paragraph(text), 1, 0)
+    d.add_paragraph("下面一行是二级项目符号，lvlText 为 §。")
+    _docx_numpr(d.add_paragraph("子要点"), 1, 1)
+    d.save(path)
+    _inject_docx_numbering(path, _NUMBERING_BULLET)
+    freeze_docx(path)
+    print(f"  ✓ {path.name:36s} {path.stat().st_size:>9,} bytes  "
+          "DOCX bullet + 非空 lvlText（o / §）")
+
+
+def docx_multilevel_hidden() -> None:
+    """多级编号：中间层 lvlText 元素存在但为空 → 本级不显示编号，计数器仍推进。"""
+    path, d = _docx("docx_14_multilevel_hidden.docx")
+    d.add_heading("多级编号隐藏中间层", level=1)
+    rows = [
+        (0, "总则与适用范围"),
+        (1, "隐藏层级条目：本级 lvlText 为空，不显示编号，但计数器仍推进"),
+        (2, "第一条细则"),
+        (2, "第二条细则"),
+        (0, "附则"),
+    ]
+    for ilvl, text in rows:
+        _docx_numpr(d.add_paragraph(text), 1, ilvl)
+    d.save(path)
+    _inject_docx_numbering(path, _NUMBERING_MULTILEVEL)
+    freeze_docx(path)
+    print(f"  ✓ {path.name:36s} {path.stat().st_size:>9,} bytes  "
+          "DOCX 多级 %1.%2.%3. + 中间层空 lvlText")
+
+
 CASES = [
     ("pdf_01_simple_1p.pdf", "pdf", "ok"),
     ("pdf_02_lists_2p.pdf", "pdf", "ok"),
@@ -781,6 +948,9 @@ CASES = [
     ("docx_09_mixed_cn_en.docx", "docx", "ok"),
     ("docx_10_complex_long.docx", "docx", "ok"),
     ("docx_11_complex_tables.docx", "docx", "ok"),
+    ("docx_12_lo_heading_numbering.docx", "docx", "ok"),
+    ("docx_13_bullet_glyph.docx", "docx", "ok"),
+    ("docx_14_multilevel_hidden.docx", "docx", "ok"),
 ]
 
 
@@ -814,6 +984,9 @@ def main() -> int:
     docx_mixed()
     docx_complex_long()
     docx_complex_tables()
+    docx_lo_heading_numbering()
+    docx_bullet_glyph()
+    docx_multilevel_hidden()
     manifest = []
     for name, kind, behavior in CASES:
         p = SOURCES / name

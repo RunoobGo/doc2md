@@ -143,10 +143,19 @@ def run(cfg: dict | None = None, root: Path | None = None, mode: str = "daily",
                                  rotate_keep=int(config.get(cfg, "logs.rotate_keep", 5)))
 
     # 1) 日报 —— NFR-20：只含统计，不含正文片段
-    daily = _daily_report(store, root, cfg)
-    rep.add("daily_report", path=str(daily.path), docs=daily.stat_doc if daily.ok else -1)
-    writer.write({"code": "CRON_DAILY", "mode": mode, "docs": daily.stat_doc,
-                  "jobs_ok": daily.ok})
+    # R19-ARCH-3：本步骤原先裸在 try/finally 之外。`_daily_report` 内部有 `store.q1`
+    # 与 reports/ 的 mkdir + `out.write_text`，ENOSPC / 只读卷 / 库损坏都会在此抛出，
+    # 而 CH-495（R14-OPS-1）加的那个 finally 尚未进入——整份 cron 报告随之丢失、
+    # writer 与 store 都不关闭，正是该 finally 要防的形态，只是漏在了它前面的步骤。
+    # 守护写法与下面的备份段、search_reconcile 段同款（单步失败不吞掉后续步骤）。
+    try:
+        daily = _daily_report(store, root, cfg)
+        rep.add("daily_report", path=str(daily.path), docs=daily.stat_doc)
+        writer.write({"code": "CRON_DAILY", "mode": mode, "docs": daily.stat_doc,
+                      "jobs_ok": daily.ok})
+    except Exception as exc:               # noqa: BLE001 — 日报失败不得吞掉后续 10 步
+        rep.add("daily_report", error=type(exc).__name__, ok=False)
+        rep.ok = False
 
     # 2) 本地快照备份 —— FR-607
     plan = BackupPlan(local_dir=config.path_setting(

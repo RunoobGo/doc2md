@@ -29,3 +29,34 @@ def test_single_column_long_paragraph_stays_whole():
     first = "\n".join(ln.text for ln in pages[0].lines)
     assert "这一段用于验证长段落折行" in first
     assert "双栏" not in first
+
+
+def test_blank_index_matches_naive_band_filter():
+    """OPT4-17：带查询索引与旧「逐次重扫」口径逐元素等价（含顺序与边界）。
+
+    索引是纯性能重构（双栏路径 32.9×–323× 的重复扫描），口径一旦漂移，
+    受影响的是行缘空白证据 → 两栏乘除号形态的空格保真。这里钉旧口径的
+    三条语义：空白判定 `not text.strip()`、下界 `top-1.0` 含、上界
+    `max(bottom, top+1.0)` 不含。
+    """
+    from doc2md.pipeline.s1_parse import _BlankIndex
+
+    def naive(chars, top, bottom):
+        hi = max(bottom, top + 1.0)
+        return [c for c in chars
+                if not (c.get("text") or "").strip()
+                and top - 1.0 <= float(c.get("top", 0.0) or 0.0) < hi]
+
+    chars = [
+        {"text": "A", "top": 10.0},          # 非空白：任何带都不收
+        {"text": " ", "top": 9.0},           # 恰在下界（含）
+        {"text": "\t", "top": 10.0},
+        {"text": " ", "top": 10.999},
+        {"text": " ", "top": 11.0},          # 恰在上界（不含）
+        {"text": " ", "top": 40.0},
+    ]
+    idx = _BlankIndex(chars)
+    for top, bottom in ((10.0, 8.0), (10.0, 10.5), (40.0, 40.0), (0.0, 5.0)):
+        want = naive(chars, top, bottom)
+        assert idx.in_band(top, bottom) == want
+        assert idx.in_band(top, bottom) == want, "索引查询不得改变自身状态"

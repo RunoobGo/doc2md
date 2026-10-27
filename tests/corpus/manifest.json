@@ -174,5 +174,29 @@
     "expected_markdown": "expected/docx_11_complex_tables.md",
     "bytes": 37327,
     "sha256": "9bc69a6e8033c5b4def8a77b71d77ab8a4689142a7668798399a602c20dd9fdb"
+  },
+  {
+    "source": "docx_12_lo_heading_numbering.docx",
+    "kind": "docx",
+    "expected_behavior": "ok",
+    "expected_markdown": "expected/docx_12_lo_heading_numbering.md",
+    "bytes": 36271,
+    "sha256": "25290fbbe641a0e77bb01c9ce3af96d399500c709d8303e080ac84ff54b0f98e"
+  },
+  {
+    "source": "docx_13_bullet_glyph.docx",
+    "kind": "docx",
+    "expected_behavior": "ok",
+    "expected_markdown": "expected/docx_13_bullet_glyph.md",
+    "bytes": 36171,
+    "sha256": "1eebe4d584214054a47f21ab5a69b060f4a344778cd551d18023a7c8acd1f011"
+  },
+  {
+    "source": "docx_14_multilevel_hidden.docx",
+    "kind": "docx",
+    "expected_behavior": "ok",
+    "expected_markdown": "expected/docx_14_multilevel_hidden.md",
+    "bytes": 36197,
+    "sha256": "537cf48b27b600bdce344bf8dc95f79afa6648c5ab0e7ad7a3c06636ced0bc4c"
   }
 ]

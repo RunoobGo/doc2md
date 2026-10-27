@@ -262,9 +262,14 @@ def create_app(cfg: dict | None = None, root: Path | None = None,
         # 有正文就必须是 JSON；无正文（真·空体）才按缺省 {} 处理。
         if not request.is_json:
             if request.content_length or request.get_data(parse_form_data=False):
+                # CH-504（R19-API-4）：附录 C 承诺这条 400 带 `detail.field=Content-Type`，
+                # 实测 `detail` 整个缺失（`to_body` 对空 detail 省略该键）——调用方只能读
+                # message 里的英文串去分支。补上 field 与实际 mimetype，与 PATCH 的
+                # `detail.field` 同口径。
                 raise E4001_BadRequest(
                     "Content-Type must be application/json "
-                    f"(got {request.mimetype or 'unset'})")
+                    f"(got {request.mimetype or 'unset'})",
+                    detail={"field": "Content-Type", "got": request.mimetype or "unset"})
             return {}
         data = request.get_json(silent=True)
         if data is None:
@@ -947,7 +952,13 @@ def create_app(cfg: dict | None = None, root: Path | None = None,
         out = []
         for r in store.q(sql, tuple(args)):
             d = dict(r)
-            d["cascade"] = json.loads(d.pop("cascade_json") or "{}")
+            try:
+                d["cascade"] = json.loads(d.pop("cascade_json") or "{}")
+            except (TypeError, ValueError):
+                # R19-ARCH-5：与 `/jobs` 读 `detail_json` 的降级同款（见本文件 list_jobs）。
+                # 一行损坏的 cascade_json 不该把整份删除审计列表变成 500/E5000——
+                # 审计面读不出来就等于运维面失明，降级成空对象保住其余行。
+                d["cascade"] = {}
             out.append(d)
         return jsonify({"deletions": out, "total": total, "offset": offset,
                         "limit": limit,
@@ -1010,7 +1021,10 @@ def create_app(cfg: dict | None = None, root: Path | None = None,
     @app.put("/settings")
     def put_settings():
         need("settings_put")
-        b = body()
+        raw = body()
+        # CH-504（R19-SVC-1）：平铺点号键先展开成嵌套再校验/合并；`updated` 与事件仍回
+        # 调用方原样给出的键名（回显的是「你改了什么」，不是内部表示）。
+        b = _expand_dotted(raw)
         unknown = config.unknown_keys(b)
         if unknown:
             raise E4001_BadRequest(
@@ -1041,8 +1055,8 @@ def create_app(cfg: dict | None = None, root: Path | None = None,
                 raise E4001_BadRequest(f"invalid configuration: {exc}") from None
             app.config["doc2md"]["cfg"] = candidate
             write_override(override, candidate, app.config["doc2md"]["cfg_baseline"])
-        emit(store, "settings_updated", None, None, {"keys": sorted(b.keys())}, logw())
-        return jsonify({"updated": sorted(b.keys())})
+        emit(store, "settings_updated", None, None, {"keys": sorted(raw.keys())}, logw())
+        return jsonify({"updated": sorted(raw.keys())})
 
     @app.post("/system/reload")
     def reload_():
@@ -1102,15 +1116,25 @@ def create_app(cfg: dict | None = None, root: Path | None = None,
     def create_token():
         need("token_admin")
         b = body()
-        role = b.get("role", "reader")
         # CH-469（V-7）：角色白名单在 API 面判掉。原实现把任意字符串直送
         # `auth.issue`，而它抛的是 ValueError（不是 Doc2mdError）→ 逃逸成 500 + HTML，
         # 调用方拿不到 {code,message} 契约也看不出正确取值。
         allowed = config.get(cur(), "api.token_roles", auth.ROLES)
+        pickable = [r for r in auth.ROLES if r in tuple(allowed)]
+        # R19-API-1：`role` 是必填项——附录 C 写作 `body {role, label?}`，只有 `label`
+        # 带 `?`。原实现 `b.get("role", "reader")` 让漏写 role 的请求静默签出一枚
+        # reader token 并回 200。这不是「失败安全」而是「看似成功」：调用方要 admin、
+        # 漏写 role，直到第一次写操作吃 403 才发现手里是 reader。判据与 CH-495
+        # （R14-API-2）/ CH-500（R17-API-1）两次修 `body()` 折叠时写下的完全同一条
+        # ——那两处的病灶原文就是「POST /tokens 静默签出 reader token」，只是它们堵的
+        # 是「有正文却被折叠成 {}」，这里堵的是「真·空体」，同一契约的最后一个口子。
+        # 缺省不取 `auth.issue` 的 `role="admin"`：两个面缺省必须一致，而缺省抬高权限
+        # 比缺省拒绝更糟。
+        if "role" not in b:
+            raise E4001_BadRequest("role is required", detail={"allowed": pickable})
+        role = b["role"]
         if role not in auth.ROLES or role not in tuple(allowed):
-            raise E4001_BadRequest(f"bad role {role!r}",
-                                   detail={"allowed": [r for r in auth.ROLES
-                                                       if r in tuple(allowed)]})
+            raise E4001_BadRequest(f"bad role {role!r}", detail={"allowed": pickable})
         return jsonify({"token": auth.issue(store, role, b.get("label", ""),
                                             allowed=allowed),
                         "role": role})
@@ -1147,6 +1171,35 @@ def _deep(dst: dict, src: dict) -> dict:
         else:
             dst[k] = v
     return dst
+
+
+def _expand_dotted(b: dict) -> dict:
+    """把平铺点号键展开成嵌套：`{"logs.rotate_mb": 11}` → `{"logs": {"rotate_mb": 11}}`。
+
+    CH-504（R19-SVC-1）：附录 A 与 `config.get` 的键名口径都是点号串，`PUT /settings`
+    的原实现却只认嵌套对象——`_deep` 把 `"logs.rotate_mb"` 当**字面顶层键**写进 cfg 与
+    `settings_override.json`，而读取侧 `config.get(cfg, "logs.rotate_mb")` 按嵌套逐段走，
+    永远取不到那个字面键。实测形态：PUT 回 `200 {updated:["logs.rotate_mb"]}`、override
+    文件里躺着 `{"logs.rotate_mb": 11}`、`GET /settings` 的有效值纹丝不动——正是方案
+    §11「把静默失效当第一类缺陷」点名的那一类（说成功了但结果不对）。
+    展开后两种输入同归一路：合法键真的生效，拼错分表的键由 `unknown_keys` 报 400。
+    """
+    out: dict = {}
+    for k, v in b.items():
+        parts = str(k).split(".")
+        cur = out
+        for p in parts[:-1]:
+            nxt = cur.get(p)
+            if not isinstance(nxt, dict):
+                nxt = {}
+                cur[p] = nxt
+            cur = nxt
+        leaf = parts[-1]
+        if isinstance(v, dict) and isinstance(cur.get(leaf), dict):
+            _deep(cur[leaf], v)
+        else:
+            cur[leaf] = v
+    return out
 
 
 def _sparse(base: dict, merged: dict) -> dict:

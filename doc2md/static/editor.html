@@ -154,7 +154,8 @@ async function api(path, opt) {
 // 无需翻日志。chip 计数是全库口径，任务表只回 `limit` 条窗口——两者别混为一谈。
 // 「转换中」= **已认领**：`claim` 一轮取 workers × [perf].queue_batch_factor（默认 4）
 // 件并全部置 running（CH-476 / R7-PERF-1），故它可以大于 `--workers`，
-// 且 running 行的「耗时」从认领起算，不是真正开跑的时刻。
+// 且「耗时」一律从**认领**起算（R19-GUI-3 后 running 与终态两行同源），不是真正开跑的
+// 时刻；终态行两列互斥，相加即 created→finished 的总时长。
 const QSTAGES = { queued: "排队中", running: "转换中", done: "完成",
                   failed: "失败", rejected: "拒绝" };
 const QORDER = ["queued", "running", "failed", "rejected", "done"];
@@ -177,8 +178,13 @@ function qStageCell(t, now) {
   let wait = "-", dur = "-";
   if (t.status === "queued") wait = fmtDur(now - created);
   else if (t.status === "running") { wait = fmtDur(started - created); dur = fmtDur(now - started); }
+  // R19-GUI-3：终态行的「耗时」原写 `finished - created`，即**把排队等待又算了一遍**
+  // ——同一时间段同时出现在两列里，读者按列相加会得出大于真实时长的数；且与上面
+  // running 行的 `now - started` 不同源，同一列在两种状态下含义不一样。改为同样从
+  // 认领时刻起算，两列自此互斥（排队等待 = created→started，耗时 = started→结束）。
+  // `started` 缺失（历史库里认领前就终态的行）退回 created，与 wait 的兜底同款。
   else if (finished) { wait = fmtDur(started ? started - created : finished - created);
-                       dur = fmtDur(finished - created); }
+                       dur = fmtDur(finished - (started || created)); }
   return { wait, dur };
 }
 
@@ -464,11 +470,29 @@ async function refetch(bid, rev) {
   log(`${bid} 已重取（本地锁定 rev=${rev}）`);
 }
 
+// R19-GUI-2：审计面服务端按 `rowid` **升序**（最旧在前），且这个方向被 CH-500 /
+// R17-API-5 明确冻结（`api.py::doc_audit` 原文：「翻成 DESC 是把可视契约改坏」）。
+// 于是 `?limit=N` 拿到的是**最旧 N 条**，而下面两个面板都把它标成「最近 / 最新」：
+// 一个块被编辑超过 N 次以后，showAudit 打印的是最早那批记录、showHistory 提供的
+// 「最新可回滚版本」其实是第 N 旧的那一版——标签与内容直接矛盾，且矛盾只在
+// 长期使用的库上出现（N 以内一切正常），最难被发现。
+// 方向不能改，只能在客户端取**最后一页**：先按 limit=N 取一次读回 `total`，
+// 未溢出（total<=N）时这一次就已经是全量、不多付请求；溢出才按 offset=total-N 重取。
+// 代价是溢出时多一次往返，换来的是「最近」这个词第一次真的是最近。
+async function auditNewest(base, n) {
+  const j = await api(`${base}&limit=${n}`);
+  const total = j.total ?? (j.audit || []).length;
+  return total <= n ? j : api(`${base}&limit=${n}&offset=${total - n}`);
+}
+
 async function showAudit(bid) {
   // CH-495（R14-GUI-4）：api() 抛错（401/403/网络）时原实现是未捕获 rejection——
   // 用户点了「审计」毫无反馈。与 load()/save() 同口径：错误进 log 条。
   let j;
-  try { j = await api(`/docs/${encodeURIComponent(VIEW.doc)}/audit?block_id=${encodeURIComponent(bid)}&limit=20`); }
+  try {
+    j = await auditNewest(`/docs/${encodeURIComponent(VIEW.doc)}/audit` +
+                          `?block_id=${encodeURIComponent(bid)}`, 20);
+  }
   catch (e) { return log(`审计载入失败：${e.message}`, true); }
   $("log").textContent =
     j.audit.map(a =>
@@ -478,8 +502,9 @@ async function showAudit(bid) {
 }
 
 // --- G4'（FR-211）：块历史 / 回滚 -------------------------------------------
-// 数据面：GET /docs/<id>/audit?block_id=<bid>&limit=50。审计行 before/from_revision
-// 与 edits.rollback 的取文口径一致：回滚到 N = 取 from_revision==N 那次的 before。
+// 数据面：GET /docs/<id>/audit?block_id=<bid>&limit=50（经 auditNewest 取**最后**一页，
+// 见 R19-GUI-2）。审计行 before/from_revision 与 edits.rollback 的取文口径一致：
+// 回滚到 N = 取 from_revision==N 那次的 before。
 function historyRows(audit) {
   const seen = new Set();
   const out = [];
@@ -501,7 +526,10 @@ async function showHistory(bid) {
   const box = el.querySelector("[data-hist]");
   if (!box) return;
   let j;
-  try { j = await api(`/docs/${encodeURIComponent(VIEW.doc)}/audit?block_id=${encodeURIComponent(bid)}&limit=50`); }
+  try {
+    j = await auditNewest(`/docs/${encodeURIComponent(VIEW.doc)}/audit` +
+                          `?block_id=${encodeURIComponent(bid)}`, 50);
+  }
   catch (e) { return log(`历史载入失败：${e.message}`, true); }
   const rows = historyRows(j.audit);
   box.textContent = "";
@@ -570,8 +598,10 @@ async function doSearch(page) {
   let j;
   try { j = await api(`/search?q=${encodeURIComponent(q)}&offset=${offset}`); }
   catch (e) { return log(`检索失败：${e.message}`, true); }
-  SRCH = { q, offset: Number.isInteger(j.offset) ? j.offset : offset,
-           limit: Number.isInteger(j.limit) ? j.limit : 0 };
+  // R19-GUI-1：`SRCH` 是顶层 `const`（同 VIEW / QSTATE / DSTATE 的写法：绑定不可变、按属性改写），
+  // 整体赋值会在 fetch 成功后抛 TypeError，令「检索」静默失效——改用 Object.assign 保住 const 语义。
+  Object.assign(SRCH, { q, offset: Number.isInteger(j.offset) ? j.offset : offset,
+                        limit: Number.isInteger(j.limit) ? j.limit : 0 });
   $("goMore").disabled = !j.has_more;
   // CH-498 / B-11 走查：`total` 是**本页**命中数（服务端截断时 has_more=true），
   // 原实现只报总数，用户看到「20 命中」会以为是全部。
@@ -615,8 +645,26 @@ $("qrefresh").onclick = loadQueue;
 $("qauto").addEventListener("change", qAutoToggle);
 // B-36：文档清单接线。填 Token 后队列与清单一起刷——两者是同一次人工走查的两面
 // （「转了什么」与「库里剩下什么」），只刷一面会让人误判另一面是实时数。
+// R19-GUI-4：原实现把 loadQueue()+loadDocs() 直接挂在 `input` 上，**每敲一键各发一次**。
+// token 是 64 位十六进制，逐字输入 = 128 次请求，除最后一次全部 401；本机实测一次
+// 逐字输入在 401 秒里打出 86 次请求。401 不免费：每次都要走 `tok()` → `auth.check`
+// → 一次按 token 哈希的 SQL 查找，而 `api.py` 的鉴权口径是「每请求实时查库、无缓存」
+// （CH-473 / R5-SVC-9），所以这 86 次是 86 次真实的库查询。
+// 不换 `change`：既有接线（上面 T4 那行「填 Token 即触发一次」与 B-36 那行「填 Token 后
+// 队列与清单一起刷」）说的是**填了就刷**，而 `change` 要等失焦才触发——那是 UI 行为变更，
+// 得走人工浏览器验收，不该顺手夹在一次性能收口里。改为去抖 + 同值不重发：粘贴仍在 400ms
+// 内触发一次，逐字输入收敛成一次；要重刷同一枚 token 用面板自己的刷新按钮。
+let TOKTIMER = null;
+const TOKSEEN = { v: "" };            // 与 SRCH / VIEW / QSTATE 同款：绑定不变、按属性改写
+function tokKick() {
+  const v = $("tok").value.trim();
+  if (!v || v === TOKSEEN.v) return;
+  TOKSEEN.v = v;
+  loadQueue(); loadDocs();
+}
 $("tok").addEventListener("input", () => {
-  if ($("tok").value.trim()) { loadQueue(); loadDocs(); }
+  clearTimeout(TOKTIMER);
+  TOKTIMER = setTimeout(tokKick, 400);
 });
 loadQueue();
 qAutoToggle();

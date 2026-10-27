@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-10-25T10:28:05+00:00",
+  "generated_at": "2026-10-27T11:31:27+00:00",
   "note": "tests/corpus/run_metrics.py --write-baseline 重烤；改动前请先人工确认每篇的标题命中数变化是有意的。",
   "rows": [
     {
@@ -317,6 +317,90 @@
       ]
     },
     {
+      "stem": "docx_12_lo_heading_numbering",
+      "batch": "docx",
+      "kind": "headings",
+      "provenance": "xml_style",
+      "source": "docx_12_lo_heading_numbering.docx",
+      "headings": {
+        "pred": 4,
+        "ref": 4,
+        "matched": 4,
+        "p": 1.0,
+        "r": 1.0,
+        "f1": 1.0,
+        "no_truth": false
+      },
+      "tables": {
+        "tables": 0,
+        "rows": 0,
+        "rate": null
+      },
+      "drift": {
+        "p": 1.0,
+        "r": 1.0,
+        "f1": 1.0,
+        "bytes": 298
+      },
+      "warnings": []
+    },
+    {
+      "stem": "docx_13_bullet_glyph",
+      "batch": "docx",
+      "kind": "headings",
+      "provenance": "xml_style",
+      "source": "docx_13_bullet_glyph.docx",
+      "headings": {
+        "pred": 1,
+        "ref": 1,
+        "matched": 1,
+        "p": 1.0,
+        "r": 1.0,
+        "f1": 1.0,
+        "no_truth": false
+      },
+      "tables": {
+        "tables": 0,
+        "rows": 0,
+        "rate": null
+      },
+      "drift": {
+        "p": 1.0,
+        "r": 1.0,
+        "f1": 1.0,
+        "bytes": 218
+      },
+      "warnings": []
+    },
+    {
+      "stem": "docx_14_multilevel_hidden",
+      "batch": "docx",
+      "kind": "headings",
+      "provenance": "xml_style",
+      "source": "docx_14_multilevel_hidden.docx",
+      "headings": {
+        "pred": 1,
+        "ref": 1,
+        "matched": 1,
+        "p": 1.0,
+        "r": 1.0,
+        "f1": 1.0,
+        "no_truth": false
+      },
+      "tables": {
+        "tables": 0,
+        "rows": 0,
+        "rate": null
+      },
+      "drift": {
+        "p": 1.0,
+        "r": 1.0,
+        "f1": 1.0,
+        "bytes": 206
+      },
+      "warnings": []
+    },
+    {
       "stem": "pdf_01_simple_1p",
       "batch": "pdf",
       "kind": "headings",
@@ -599,14 +683,14 @@
   ],
   "summary": {
     "filter": null,
-    "n_rows": 21,
+    "n_rows": 24,
     "skipped": [],
     "docx": {
-      "n": 11,
+      "n": 14,
       "heading_micro_recall": 1.0,
       "heading_macro_f1": 1.0,
-      "headings_matched": 111,
-      "headings_ref": 111,
+      "headings_matched": 117,
+      "headings_ref": 117,
       "no_truth": [],
       "table_macro_rate": 1.0,
       "tables_with_rows": 4,

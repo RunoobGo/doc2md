@@ -5,7 +5,7 @@
 ----------
 - 补的是**上报面**，不是判据面：`doc2md/qa_eval.py` 的三个指标此前只有两处消费者——
   `convert._metrics`（单篇，随报告走）与 `tests/test_qa_n03_ideal.py`（46 项断言，
-  只钉「标注与源一致」「S3 不回退」）。没有任何地方把 21 份标注的指标**逐篇汇总**，
+  只钉「标注与源一致」「S3 不回退」）。没有任何地方把 24 份标注的指标**逐篇汇总**，
   于是「指标存在」与「指标看得见」之间断了链（CH-500 报告 AR-11 / B-34）。
 - **双口径物理分列**（`qa_eval` 模块 docstring 的纪律，本脚本是唯一把它落到版式上的地方）：
   · `ideal` 列 = 对 `tests/corpus/ideal/*.ideal.json` 的标题 P/R 与表格列一致率；
@@ -22,7 +22,7 @@
 
 用法
 ----
-    .venv/bin/python tests/corpus/run_metrics.py                  # 全 21 份，打印对照表
+    .venv/bin/python tests/corpus/run_metrics.py                  # 全 24 份，打印对照表
     .venv/bin/python tests/corpus/run_metrics.py --only docx_     # 按文件名前缀过滤
     .venv/bin/python tests/corpus/run_metrics.py --json work/qa/metrics.json
     .venv/bin/python tests/corpus/run_metrics.py --write-baseline # 重烤冻结基线（人工审阅后提交）

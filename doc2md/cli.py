@@ -1005,11 +1005,17 @@ def _open_store(cfg: dict):
     return Store(db)
 
 
-def _nonneg(args: argparse.Namespace, name: str, default: int) -> int | None:
+def _nonneg(args: argparse.Namespace, name: str, default: int,
+            *, capped: bool = True) -> int | None:
     """--limit / --offset 收口（O-07）：负值打印 E4001 并返回 None（调用方退
     EXIT_USAGE——argparse 对 `--limit abc` 同样退 2，负值没理由按业务错 4；
     API `_window` 亦拒负）；超 DOCS_MAX_ROWS 截断不报错（search help 既定的
     「上限 500」口径）。必须挡在 SQL 之前：SQLite `LIMIT -1` 是无界的反直觉语义。
+
+    `capped=False` 用于翻页游标（R19-ARCH-1）：`DOCS_MAX_ROWS` 是**单页行数**上限，
+    拿它夹 offset 会让 `docs list --offset 600` 静默从 500 开窗——退出码 0、结果却
+    不是请求的那一页。`cmd_search` 早已按此口径绕过（R17-API-7：「翻页游标天然可以
+    大于单页上限」），API `_window` 也只夹 limit 不夹 offset；负值仍在本函数挡回。
     """
     raw = getattr(args, name, None)
     if raw is None:
@@ -1019,7 +1025,7 @@ def _nonneg(args: argparse.Namespace, name: str, default: int) -> int | None:
                       "message": f"{name} must be >= 0"}),
               file=sys.stderr)
         return None
-    return min(raw, DOCS_MAX_ROWS)
+    return min(raw, DOCS_MAX_ROWS) if capped else raw
 
 
 def cmd_docs(args: argparse.Namespace) -> int:
@@ -1034,7 +1040,7 @@ def _cmd_docs_list(args: argparse.Namespace) -> int:
     from .storage.repo import list_docs
     cfg = _cfg(args)
     limit = _nonneg(args, "limit", 50)
-    offset = _nonneg(args, "offset", 0)
+    offset = _nonneg(args, "offset", 0, capped=False)   # R19-ARCH-1：游标不受单页上限夹
     if limit is None or offset is None:
         return EXIT_USAGE
     store = _open_store(cfg)
@@ -1050,7 +1056,7 @@ def _cmd_docs_show(args: argparse.Namespace) -> int:
     from .storage.repo import count_blocks, get_doc, list_blocks
     cfg = _cfg(args)
     limit = _nonneg(args, "limit", 20)
-    offset = _nonneg(args, "offset", 0)
+    offset = _nonneg(args, "offset", 0, capped=False)   # R19-ARCH-1：分片长文档的块窗口可越过 500
     if limit is None or offset is None:
         return EXIT_USAGE
     store = _open_store(cfg)
