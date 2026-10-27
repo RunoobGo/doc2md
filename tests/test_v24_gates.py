@@ -21,6 +21,7 @@ CH-456（T8 门禁时长裁剪）：`test_shard_fallback_is_honest` 与
 """
 from __future__ import annotations
 
+import inspect
 import json
 import os
 from pathlib import Path
@@ -378,6 +379,11 @@ def test_delete_cascade(saved_doc):
     assert tomb and tomb[-1]["doc_id"] == doc
     assert "before" not in tomb[-1] and "after" not in tomb[-1]
     assert "text" not in json.dumps(tomb[-1], ensure_ascii=False)
+    # B-53 同主语正断言（CH-511）：同一判据必须看得见 `text` 键本身——把缺陷形状
+    # （审计墓碑带回正文字段）注进同一份 dict，计数必须恰好 1。
+    leaky = json.dumps({**tomb[-1], "text": "本条款正文"}, ensure_ascii=False)
+    leaky_hits = leaky.count('"text"')
+    assert leaky_hits == 1, f"泄漏判据无感：注入 text 键后命中 {leaky_hits} 处"
 
 
 def test_delete_removes_artifacts(saved_doc):
@@ -453,6 +459,17 @@ def test_service_business_events_land_in_logs(tmp_path, tmp_cfg, small_pdf):
     codes = [json.loads(ln)["code"] for ln in dumped.splitlines()]
     assert "job_done" in codes and "text_edited" in codes
     assert "本条款" not in dumped, "NFR-20：正文片段进了服务日志"
+    # B-53 同主语正断言（CH-511）：上面那条读的是日志**原文**，中文 needle 能否
+    # 被看见取决于 writer 是否 `ensure_ascii=False`。用同一个 writer 写一条短记录
+    # （≤ SCRUB_MAX_LEN 不脱敏），needle 必须原样出现一次——writer 若退回转义，
+    # 否定断言对任何正文恒真，而本条先红。
+    sink_dir = tmp_path / "sink-caliber"
+    sink = RotatingJsonlWriter(sink_dir, rotate_mb=50, rotate_keep=5)
+    sink.write({"code": "PROBE", "note": "本条款"})
+    sink.close()
+    probe = (sink_dir / "app.jsonl").read_text(encoding="utf-8")
+    probe_hits = probe.count("本条款")
+    assert probe_hits == 1, f"泄漏判据无感：同一 sink 的中文 needle 命中 {probe_hits} 处"
 
 
 def test_service_start_sweeps_work_tmp(tmp_path, tmp_cfg):
@@ -524,7 +541,25 @@ def test_logs_contain_no_document_text(tmp_path):
     w.close()
     dumped = (tmp_path / "app.jsonl").read_text(encoding="utf-8")
     assert "本条款" not in dumped
+    # B-53 同主语正断言（CH-511）：上面两条读的都是日志原文，判据的牙齿取决于
+    # writer「短字段原样、长字段换指纹」这一口径真的成立。同一个 writer 写一条
+    # 短记录，中文 needle 必须原样出现一次；写一条长记录必须只剩指纹。
+    # writer 若退回 ensure_ascii=True，`"本条款" not in dumped` 就恒真——本条先红。
+    caliber = RotatingJsonlWriter(tmp_path / "caliber", rotate_mb=50, rotate_keep=5)
+    caliber.write({"code": "PROBE", "note": "本条款"})
+    caliber.write({"code": "PROBE", "note": "本条款" * 22})   # 66 字 > SCRUB_MAX_LEN
+    caliber.close()
+    raw = (tmp_path / "caliber" / "app.jsonl").read_text(encoding="utf-8")
+    raw_hits = raw.count("本条款")
+    assert raw_hits == 1, f"判据口径无感：短字段原样 / 长字段指纹未成立（命中 {raw_hits} 处）"
+    assert raw.count("<sha256:") == 1, f"长字段未落指纹：<sha256: 命中 {raw.count('<sha256:')} 处"
     assert "<sha256:" in dumped
+
+
+class _NoKeywordRequest:
+    """`_neutral_proxy_env` 只读 `request.keywords`（判 `keep_proxy` 反向 opt-in）。"""
+
+    keywords: dict = {}
 
 
 def test_gate_test_env_neutralization():
@@ -541,8 +576,33 @@ def test_gate_test_env_neutralization():
     assert hasattr(qa_conftest, "pytest_configure")      # basetemp 注入钩子
     # 夹具效应：本用例自身就在 autouse 夹具作用下，进程内不应残留代理变量
     # （夹具缺失 + 宿主带代理时本条即红；宿主干净时由上面的在位断言兜底）
-    for k in qa_conftest._PROXY_VARS:
-        assert k not in os.environ, f"{k} leaked into test process"
+    hits = [k for k in qa_conftest._PROXY_VARS if k in os.environ]
+    assert not hits, f"代理变量泄漏进测试进程：{hits}"
+    # B-53 同主语正断言（CH-511）：循环判据在「宿主本来干净」时恒真，所以必须
+    # 自己造一次命中——注入一个代理变量，同一判据先命中 1 处，再由同一个夹具
+    # 生成器清除、判据归零。夹具的清除步被删掉时，归零断言即红。
+    # 夹具本体在 pytest 9 里被包成 FixtureFunctionDefinition，直接调用会报
+    # 「called directly」，故先取回生成器函数；取不到就当场断言失败，
+    # 绝不允许退化成「跳过这段检查」。
+    neuter = qa_conftest._neutral_proxy_env
+    for attr in ("_fixture_function", "__wrapped__"):
+        inner = getattr(neuter, attr, None)
+        if inner is not None:
+            neuter = inner
+    assert inspect.isgeneratorfunction(neuter), f"取不到夹具生成器本体：{type(neuter)}"
+    injected = "HTTP_PROXY"
+    os.environ[injected] = "http://127.0.0.1:9"
+    gen = None
+    try:
+        assert [k for k in qa_conftest._PROXY_VARS if k in os.environ] == [injected]
+        gen = neuter(_NoKeywordRequest())
+        next(gen)                             # 夹具 setup 段：保存并清除
+        after = [k for k in qa_conftest._PROXY_VARS if k in os.environ]
+        assert after == [], f"清除机制无感：注入后仍有 {after}"
+    finally:
+        if gen is not None:
+            gen.close()                       # 触发夹具 teardown：恢复 saved 快照
+        os.environ.pop(injected, None)
 
 
 def test_gate_wrap_space_preserved():

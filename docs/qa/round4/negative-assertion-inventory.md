@@ -35,12 +35,20 @@
 | 批次 | 文件 | 补位数 | 剩余（需人工读） |
 | --- | --- | --- | --- |
 | CH-510（首批） | `tests/test_ch469_service.py` | 3（1 条 gate + 2 条非 gate） | 112 |
+| CH-511（第二批） | `tests/test_v24_gates.py` | 4（全为 gate：#79/#80/#81/#82） | 108 |
 
 首批实测出一条**判据本身失真**的形态：#89 原口径 `json.dumps(body)` 用默认
 `ensure_ascii=True`，中文查询被写成 `\uXXXX`，`'例外' not in ...` 对任何中文查询
 恒真——不是「实现干净」，是断言看不见缺陷。教训：**否定断言的字符串口径要与被测
 数据的字符集一致**，同主语正断言（把缺陷注入同一份产物再计数）是唯一能证明这点的
 形态。
+
+第二批（CH-511）实测出同一病灶的**另一头**：#80/#81 的判据读的是日志**原文**，中文 needle 能不能被看见不由
+测试这一侧决定，而由产品 writer 是否 `ensure_ascii=False` 决定——所以正例不能只在测试里自证，必须**走同一个
+sink 类**（`api.py` 用的就是 `RotatingJsonlWriter`）：短字段原样命中 1、长字段只剩 `<sha256:` 1，两个数同时成立
+才证明「读原文」这个口径真有牙齿。#82 是控制流内循环判据在干净宿主上恒真，正例改为先注入一个代理变量让
+同一判据命中 1，再驱动夹具本体清除、判据归零；夹具在 pytest 9 被包成 `FixtureFunctionDefinition`，取生成器本体
+时用 `isgeneratorfunction` 断言兜底——取不到就红，不许静默跳过这段。
 
 ## 红线层优先复核（gate 且无同主语正断言）
 
@@ -113,10 +121,10 @@
 | `tests/test_pdf_columns.py::test_single_column_long_paragraph_stays_whole` | 31 | not-in | `'双栏' not in first` |  |
 | `tests/test_pdf_structure_repair.py::test_wrapped_heading_continuation_joins_heading` | 155 | not-in | `'继续部分' not in [b.text for b in ir.blocks if b.type == 'paragraph']` |  |
 | `tests/test_qa_n04_furniture_ext.py::test_roman_decorated_number_not_in_inline_mixed_case` | 100 | not-search | `not _PAGE_NUM_INLINE.search('第一章 引言 · 12')` |  |
-| `tests/test_v24_gates.py::test_delete_cascade` | 380 | not-in | `'text' not in json.dumps(tomb[-1], ensure_ascii=False)` |  |
-| `tests/test_v24_gates.py::test_service_business_events_land_in_logs` | 455 | not-in | `'本条款' not in dumped` |  |
-| `tests/test_v24_gates.py::test_logs_contain_no_document_text` | 526 | not-in | `'本条款' not in dumped` |  |
-| `tests/test_v24_gates.py::test_gate_test_env_neutralization` | 545 | not-in | `k not in os.environ` | 是 |
+| `tests/test_v24_gates.py::test_delete_cascade` | 381 | not-in | `'text' not in json.dumps(tomb[-1], ensure_ascii=False)`（**CH-511 已补同主语正断言**） |  |
+| `tests/test_v24_gates.py::test_service_business_events_land_in_logs` | 461 | not-in | `'本条款' not in dumped`（**CH-511 已补同主语正断言**） |  |
+| `tests/test_v24_gates.py::test_logs_contain_no_document_text` | 543 | not-in | `'本条款' not in dumped`（**CH-511 已补同主语正断言**） |  |
+| `tests/test_v24_gates.py::test_gate_test_env_neutralization` | 580 | not-in | `k not in os.environ`（**CH-511 已改写为命中数判据 + 注入面归零**） | 是 |
 
 ## 全量清单（gate 在前，其余按文件 / 行排序）
 
@@ -200,10 +208,10 @@
 | 76 | G | `tests/test_pdf_structure_repair.py::test_repeated_body_line_near_top_is_kept` | 187 | not-any | `not any(('小页眉' in t for t in texts))` | 188 |  |
 | 77 | G | `tests/test_qa_n04_furniture_ext.py::test_roman_decorated_number_not_in_inline_mixed_case` | 100 | not-search | `not _PAGE_NUM_INLINE.search('第一章 引言 · 12')` |  |  |
 | 78 | G | `tests/test_v24_gates.py::test_malicious_filenames` | 175 | not-in | `out.rsplit('.', 1)[0].lower() not in WIN_RESERVED` | 173 |  |
-| 79 | G | `tests/test_v24_gates.py::test_delete_cascade` | 380 | not-in | `'text' not in json.dumps(tomb[-1], ensure_ascii=False)` |  |  |
-| 80 | G | `tests/test_v24_gates.py::test_service_business_events_land_in_logs` | 455 | not-in | `'本条款' not in dumped` |  |  |
-| 81 | G | `tests/test_v24_gates.py::test_logs_contain_no_document_text` | 526 | not-in | `'本条款' not in dumped` |  |  |
-| 82 | G | `tests/test_v24_gates.py::test_gate_test_env_neutralization` | 545 | not-in | `k not in os.environ` |  | 是 |
+| 79 | G | `tests/test_v24_gates.py::test_delete_cascade` | 381 | not-in | `'text' not in json.dumps(tomb[-1], ensure_ascii=False)` → 同判据对 `{**tomb[-1], "text": …}` 计数须为 1 | CH-511 ✓（注入 `text` 键命中 1） |  |
+| 80 | G | `tests/test_v24_gates.py::test_service_business_events_land_in_logs` | 461 | not-in | `'本条款' not in dumped` → 同一个 `RotatingJsonlWriter` 写短记录后原文须命中 1 | CH-511 ✓（同 sink 短字段命中 1） |  |
+| 81 | G | `tests/test_v24_gates.py::test_logs_contain_no_document_text` | 543 | not-in | `'本条款' not in dumped` → 短字段原样命中 1 且长字段只剩 `<sha256:` 1 | CH-511 ✓（短 1 / 指纹 1 双写） |  |
+| 82 | G | `tests/test_v24_gates.py::test_gate_test_env_neutralization` | 580 | not-in | `k not in os.environ` → `hits = [k for k in _PROXY_VARS if k in os.environ]` + `assert not hits` | CH-511 ✓（注入 `HTTP_PROXY` 命中 1、夹具本体清除后归零） | 是 |
 | 83 | · | `tests/qa/test_mdscore.py::test_parse_blocks_skips_front_matter_heading_like_keys` | 70 | not-in | `'hr' not in types` |  |  |
 | 84 | · | `tests/qa/test_mdscore.py::test_lint_classifies_md025_as_dialect_not_contract` | 156 | not-in | `'MD025' not in mdscore.CONTRACT_RULES` |  |  |
 | 85 | · | `tests/qa/test_mdscore.py::test_score_without_ref_emits_only_consistency_keys` | 217 | not-in | `'text' not in out['scores']` |  |  |
