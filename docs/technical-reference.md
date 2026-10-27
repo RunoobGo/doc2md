@@ -5,7 +5,7 @@
 | 文档地位 | 综述与技术分析（**不是规格权威**，规格以 `docs/dev-plan.md` 为准） |
 | 对应代码版本 | `PIPELINE_VERSION` **2.22.0** / `SCHEMA_VERSION` **14** / `DB_VERSION` **10** |
 | 对应方案版本 | `PLAN_VERSION` **v3.41**（撰写时；本文与方案同轮收口） |
-| 取证基线 | CH-509 收口轮（Windows 门禁层宿主耦合修复；**零产品改动**），本机 macOS arm64 / Python 3.15，gate **735 项全绿 / 0 skipped**（51.109s）、全量 **1575 收集 = 1559 passed / 16 skipped（真 skip 10 + xfail 6）**（118.427s）、覆盖率 **7,942 stmts / 680 miss = 精确 91.44%**（测试改动轮，产品语句零变化，沿用 CH-508 实测）、语料回归 25/25（未重烤）、难度语料 6/10；**远端复证以推送后的 CI 为准**——`da1d3f7` 的 run `40519331722` 在 `windows-suite` 门禁层红 6 项（729 passed / 6 failed / 840 deselected），正是本轮修复对象 |
+| 取证基线 | CH-509 收口轮（Windows 门禁层宿主耦合修复；**零产品改动**），本机 macOS arm64 / Python 3.15，gate **735 项全绿 / 0 skipped**（51.109s）、全量 **1575 收集 = 1559 passed / 16 skipped（真 skip 10 + xfail 6）**（118.427s）、覆盖率 **7,942 stmts / 680 miss = 精确 91.44%**（测试改动轮，产品语句零变化，沿用 CH-508 实测）、语料回归 25/25（未重烤）、难度语料 6/10；**远端复证已闭合**——`da1d3f7` 的 run `40519331722` 曾在 `windows-suite` 门禁层红 6 项（729 passed / 6 failed / 840 deselected，正是本轮修复对象）；修复后的 run `40529390636`（push `83470dc`）六作业全绿，`windows-suite` 门禁层 **735 passed / 0 skipped**（100.74s）、全量 **1554 passed / 15 skipped / 6 xfailed**（210.74s），`full-suite`（ubuntu）1558 / 11 / 6（145.11s）；远端与本机 skip 集合的差是平台面（Windows 多跳 7 项 POSIX-only，本机多跳 2 项 junction），两侧合计同为 **1575** |
 | 覆盖的历史 | 导入提交 `23f8906` 起、**截至 `ae17fbd` 共 123 个提交**、`CH-422 … CH-509`、十九轮全面审查、四轮 QA 优化（第四轮实跑）、实机自动测试体系 CH-501 |
 | 代码口径 | `doc2md/` 包 **15,800** 行 Python / 47 个 `.py`（其中 6 个是子包 re-export 门面） |
 
