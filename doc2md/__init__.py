@@ -15,6 +15,7 @@ PIPELINE_VERSION = "2.22.0"   # CH-508：三种间接编号形态接上——样
                               # 1 级。带这些构造的 DOCX 交付字节改变 → minor。CH-506 的
                               # `lvlOverride` 覆盖语义见 2.21.0 历史注释。
 SCHEMA_VERSION = 14          # IR 约定 14（文件名与内容的边界）落地
-PLAN_VERSION = "3.40"         # 开发方案文档版本（docs/dev-plan.md，文件名不带版本号）
+PLAN_VERSION = "3.41"         # 开发方案文档版本（docs/dev-plan.md，文件名不带版本号）；CH-509 为
+                              # 测试宿主耦合修复轮，文档面登记（PIPELINE_VERSION 不动）
 
 __all__ = ["PIPELINE_VERSION", "SCHEMA_VERSION", "PLAN_VERSION"]

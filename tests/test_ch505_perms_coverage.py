@@ -35,6 +35,13 @@ class _NtOs(SimpleNamespace):
     environ = os.environ
 
 
+class _Stat:
+    """伪 `stat_result`：只带 `st_mode`，让 POSIX 分支能在任意宿主上被驱动。"""
+
+    def __init__(self, mode: int) -> None:
+        self.st_mode = mode
+
+
 @pytest.fixture(autouse=True)
 def _reset_perm_caches():
     perms._IDENTITY = None
@@ -49,6 +56,17 @@ def nt(monkeypatch):
     monkeypatch.setattr(perms, "os", _NtOs())
     monkeypatch.setattr(perms, "_IDENTITY", "DOM\\alice")
     return _NtOs()
+
+
+@pytest.fixture
+def posix(monkeypatch):
+    """强制 POSIX 分支：否则 Windows 宿主的 `os.name` 会把用例导向 icacls。"""
+    class _PosixOs(SimpleNamespace):
+        name = "posix"
+        environ = os.environ
+
+    monkeypatch.setattr(perms, "os", _PosixOs())
+    return _PosixOs()
 
 
 def _done(cmd, rc=0, out="", err=""):
@@ -106,7 +124,7 @@ def test_cache_key_survives_resolve_failure(monkeypatch):
         raise OSError("gone")
 
     monkeypatch.setattr(Path, "resolve", boom)
-    assert perms._cache_key(Path("/TMP/Mixed")) == "/tmp/mixed"
+    assert perms._cache_key(Path("/TMP/Mixed")) == str(Path("/TMP/Mixed")).lower()
 
 
 # ------------------------------------------------------------ _harden_windows
@@ -168,33 +186,33 @@ def test_check_applied_missing_path_is_silent(tmp_path):
     assert perms.check_applied(tmp_path / "nope", 0o600) == []
 
 
-def test_check_applied_accepts_matching_mode(tmp_path):
+def test_check_applied_accepts_matching_mode(posix, monkeypatch, tmp_path):
     p = tmp_path / "f"
-    p.write_text("x", encoding="utf-8")
-    p.chmod(0o600)
+    monkeypatch.setattr(Path, "stat", lambda self: _Stat(0o100600))
     assert perms.check_applied(p, 0o600) == []
 
 
-def test_check_applied_flags_volume_that_ignores_chmod(tmp_path):
+def test_check_applied_flags_volume_that_ignores_chmod(posix, monkeypatch, tmp_path):
     """B-14 取证形态：请求 0600，回读仍是挂载默认——必须留告警，不得静默。"""
     p = tmp_path / "f"
-    p.write_text("x", encoding="utf-8")
-    p.chmod(0o644)
+    monkeypatch.setattr(Path, "stat", lambda self: _Stat(0o100644))
     out = perms.check_applied(p, 0o600)
     assert out == [f"{p} stays 0o644 after chmod 0o600"
                    " (volume ignores POSIX permissions)"]
 
 
 # --------------------------------------------------------------- ensure_private
-def test_ensure_private_posix_applies_and_verifies(tmp_path):
+def test_ensure_private_posix_applies_and_verifies(posix, monkeypatch, tmp_path):
     p = tmp_path / "db"
-    p.mkdir()
+    calls = []
+    monkeypatch.setattr(Path, "chmod", lambda self, mode: calls.append((self, mode)))
+    monkeypatch.setattr(Path, "stat", lambda self: _Stat(0o040700))
     assert perms.ensure_private(p, 0o700) == []
-    assert p.stat().st_mode & 0o777 == 0o700
+    assert calls == [(p, 0o700)]
     assert perms.is_private(p)
 
 
-def test_ensure_private_posix_reports_chmod_failure(tmp_path, monkeypatch):
+def test_ensure_private_posix_reports_chmod_failure(posix, tmp_path, monkeypatch):
     def boom(self, mode):
         raise OSError("read-only")
 
@@ -222,16 +240,19 @@ def test_ensure_private_windows_returns_warning_on_failure(nt, monkeypatch, tmp_
 
 
 # ------------------------------------------------------------------- is_private
-def test_is_private_posix_modes(tmp_path):
+def test_is_private_posix_modes(posix, monkeypatch, tmp_path):
     p = tmp_path / "d"
-    p.mkdir()
-    p.chmod(0o755)
+    monkeypatch.setattr(Path, "stat", lambda self: _Stat(0o040755))
     assert perms.is_private(p) is False
-    p.chmod(0o700)
+    monkeypatch.setattr(Path, "stat", lambda self: _Stat(0o040700))
     assert perms.is_private(p) is True
 
 
-def test_is_private_posix_missing_path_is_false(tmp_path):
+def test_is_private_posix_missing_path_is_false(posix, monkeypatch, tmp_path):
+    def boom(self):
+        raise OSError("gone")
+
+    monkeypatch.setattr(Path, "stat", boom)
     assert perms.is_private(tmp_path / "gone") is False
 
 
