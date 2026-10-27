@@ -30,11 +30,23 @@
 | 既无同主语正断言、也不在控制流内（需人工读） | 115 |
 | out-of-scope：`assert not <布尔名/下标/属性>` | 53 |
 
+### 补位进度（B-53 分批，本清单随批次更新）
+
+| 批次 | 文件 | 补位数 | 剩余（需人工读） |
+| --- | --- | --- | --- |
+| CH-510（首批） | `tests/test_ch469_service.py` | 3（1 条 gate + 2 条非 gate） | 112 |
+
+首批实测出一条**判据本身失真**的形态：#89 原口径 `json.dumps(body)` 用默认
+`ensure_ascii=True`，中文查询被写成 `\uXXXX`，`'例外' not in ...` 对任何中文查询
+恒真——不是「实现干净」，是断言看不见缺陷。教训：**否定断言的字符串口径要与被测
+数据的字符集一致**，同主语正断言（把缺陷注入同一份产物再计数）是唯一能证明这点的
+形态。
+
 ## 红线层优先复核（gate 且无同主语正断言）
 
 | 文件::测试 | 行 | 形态 | 被否定表达式 | 控制流内 |
 | --- | --- | --- | --- | --- |
-| `tests/test_ch469_service.py::test_editor_log_sink_is_text_content` | 580 | not-in | `'<img src=x onerror=' not in html` |  |
+| `tests/test_ch469_service.py::test_editor_log_sink_is_text_content` | 620 | not-in | `'<img src=x onerror=' not in html`（**CH-510 已补同主语正断言**） |  |
 | `tests/test_ch473_fixes.py::test_test5_v22_legacy_rebuilds_fts_and_backfills_columns` | 1199 | not-in | `'revision' not in {r[1] for r in con.execute('PRAGMA table_info(blocks)')}` |  |
 | `tests/test_ch473_fixes.py::test_test5_v22_legacy_rebuilds_fts_and_backfills_columns` | 1200 | not-in | `'role' not in {r[1] for r in con.execute('PRAGMA table_info(tokens)')}` |  |
 | `tests/test_ch473_fixes.py::test_test5_v22_legacy_rebuilds_fts_and_backfills_columns` | 1201 | not-in | `'aux' not in {r[1] for r in con.execute('PRAGMA table_info(search_blocks)')}` |  |
@@ -110,7 +122,7 @@
 
 | # | 层 | 文件::测试 | 行 | 形态 | 被否定表达式 | 同主语正断言 | 控制流内 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| 1 | G | `tests/test_ch469_service.py::test_editor_log_sink_is_text_content` | 580 | not-in | `'<img src=x onerror=' not in html` |  |  |
+| 1 | G | `tests/test_ch469_service.py::test_editor_log_sink_is_text_content` | 620 | not-in | `'<img src=x onerror=' not in html` → `assert html.count(probe) == 0` | CH-510 ✓（同计数注入探针后 =1） |  |
 | 2 | G | `tests/test_ch473_fixes.py::test_pipe6_real_short_block_before_longer_not_replaced` | 164 | not-any | `not any((b.flags.get('dropped_dup_of') for b in out))` | 163 |  |
 | 3 | G | `tests/test_ch473_fixes.py::test_test5_v22_legacy_rebuilds_fts_and_backfills_columns` | 1199 | not-in | `'revision' not in {r[1] for r in con.execute('PRAGMA table_info(blocks)')}` |  |  |
 | 4 | G | `tests/test_ch473_fixes.py::test_test5_v22_legacy_rebuilds_fts_and_backfills_columns` | 1200 | not-in | `'role' not in {r[1] for r in con.execute('PRAGMA table_info(tokens)')}` |  |  |
@@ -198,8 +210,8 @@
 | 86 | · | `tests/test_batch2_storage.py::test_scrub_covers_any_key_name` | 312 | not-in | `long not in out['note']` | 309 |  |
 | 87 | · | `tests/test_batch2_storage.py::test_event_payload_scrubbed_in_db` | 337 | not-in | `long not in row['payload_json']` |  |  |
 | 88 | · | `tests/test_ch469_ops.py::test_poll_all_flags_truncation_and_skips_prune` | 522 | not-in | `str(gone) not in t.enqueued` | 518 |  |
-| 89 | · | `tests/test_ch469_service.py::test_search_db_fault_is_not_swallowed` | 484 | not-in | `'例外' not in json.dumps(ei.value.to_body())` |  |  |
-| 90 | · | `tests/test_ch469_service.py::test_editor_escapes_document_derived_fields` | 534 | not-in | `'[data-bid="${' not in html` |  |  |
+| 89 | · | `tests/test_ch469_service.py::test_search_db_fault_is_not_swallowed` | 496 | not-in | `'例外' not in json.dumps(ei.value.to_body())` → `assert _leak_hits(body, "例外") == 0` | CH-510 ✓（monkeypatch 泄漏 detail，同判据 =1） |  |
+| 90 | · | `tests/test_ch469_service.py::test_editor_escapes_document_derived_fields` | 568 | not-in | `'[data-bid="${' not in html` → `assert not _css_selector_interp_hits(html)` | CH-510 ✓（注入 `[data-bid="${b.id}"]`，同扫描命中 1） |  |
 | 91 | · | `tests/test_ch471_fixes.py::test_api_reconvert_conflict_keeps_edits` | 213 | not-any | `not any(('哨兵编辑例外条款ZZ' in b['text'] for b in after))` | 204 |  |
 | 92 | · | `tests/test_ch471_fixes.py::test_api_unhandled_exception_is_json_500` | 410 | not-in | `'敏感正文' not in json.dumps(body, ensure_ascii=False)` |  |  |
 | 93 | · | `tests/test_ch473_fixes.py::test_pipe10_fallback_single_has_no_dead_head_param` | 346 | not-in | `'head' not in params` |  |  |
@@ -267,6 +279,8 @@
 ## 处置
 
 本清单是**文档产出，不进测试**（OPT4-10 明确「只出清单、不当轮改完」）。
+补位自 **CH-510** 起按批进行（登记项 B-53）：每批取一个测试文件，逐条补同主语正断言，
+先做 red-first 变异证明「缺陷存在时正例能红」，再在本清单勾销并更新行号。
 复核顺序：① 红线层 + 控制流内；② 红线层其余；③ 非红线。
 补正夹具的形态按纪律②：否定面命中数为 0 的**同时**，在对照面打出一个 > 0 的命中数，
 两者写进同一断言的失败消息（TC-M8-04 的 `delivery_hits` / `ir_json_hits` 是样板）。

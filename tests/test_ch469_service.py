@@ -467,7 +467,17 @@ def test_search_fts_syntax_error_degrades_with_marker(store):
     assert out["total"] >= 1                    # 兜底确实找到了内容
 
 
-def test_search_db_fault_is_not_swallowed(store):
+def _leak_hits(body: dict, needle: str) -> int:
+    """NFR-20 判据：查询内容不得出现在错误响应里。
+
+    B-53 实测：原口径 `json.dumps(body)` 默认 `ensure_ascii=True`，中文查询
+    被写成 `\\uXXXX`，`"例外" in json.dumps(...)` 对任何中文都恒假——否定断言
+    从来看不见缺陷。判据必须显式 `ensure_ascii=False`。
+    """
+    return json.dumps(body, ensure_ascii=False).count(needle)
+
+
+def test_search_db_fault_is_not_swallowed(store, monkeypatch):
     """库面故障（损坏 / 磁盘）原被 `except Exception: pass` 吞成「没搜到」。"""
     from doc2md.errors import E5031_StorageError
     _seed(store, "dft2", n=1)
@@ -481,7 +491,23 @@ def test_search_db_fault_is_not_swallowed(store):
     with pytest.raises(E5031_StorageError) as ei:
         repo.search(store, "例外")
     assert ei.value.detail["reason"] == "DatabaseError"
-    assert "例外" not in json.dumps(ei.value.to_body())   # NFR-20：detail 不带查询内容
+    body = ei.value.to_body()
+    hits = _leak_hits(body, "例外")
+    assert hits == 0, f"detail 泄漏查询内容 {hits} 处"   # NFR-20：detail 不带查询内容
+
+    # B-53 同主语正断言：把查询串注入 detail（模拟产品回归），同一判据必须命中
+    class _LeakyQuery(E5031_StorageError):
+        def __init__(self, message="", detail=None):
+            super().__init__(message, {**(detail or {}), "query": "例外"})
+
+    monkeypatch.setattr(repo, "E5031_StorageError", _LeakyQuery)
+    with pytest.raises(_LeakyQuery) as leaky:
+        repo.search(store, "例外")
+    leaky_body = leaky.value.to_body()
+    assert _leak_hits(leaky_body, "例外") == 1, "泄漏判据无感：注入 query 后仍为 0"
+    # 旧口径在该缺陷体上依然 0：证明原否定断言的前件恒假，而非「实现干净」
+    default_hits = json.dumps(leaky_body).count("例外")
+    assert default_hits == 0, "旧口径意外可命中——B-53 结论的前提已变，需重写说明"
 
 
 # --- V-11：审阅页转义 -----------------------------------------------------------
@@ -498,6 +524,13 @@ _BARE_FIELD = re.compile(
     r"\$\{\s*(?:b|blk|t|det|d|h)\s*\.\s*"
     r"(?:id|bid|text|type|revision|level|status|doc_id|source_path|job_id|"
     r"reason|error_code|mode|absorbed_ids)")
+
+# 属性选择器里拼模板：含引号的块 id 能改写选择器（B-53：判据须能命中注入面）
+_CSS_SELECTOR_INTERP = re.compile(r'\[[a-z][\w-]*="\$\{')
+
+
+def _css_selector_interp_hits(src: str) -> list[str]:
+    return [m.group(0) for m in _CSS_SELECTOR_INTERP.finditer(src)]
 
 
 def _inner_html_templates(html: str) -> list[str]:
@@ -531,7 +564,12 @@ def test_editor_escapes_document_derived_fields():
     assert "${esc(b.text || \"\")}" in html
     assert "absorbed_ids.map(esc).join(" in html
     # 块 id 不得再拼进 CSS 属性选择器（含引号的 id 能改写选择器）
-    assert '[data-bid="${' not in html
+    hits = _css_selector_interp_hits(html)
+    assert not hits, f"选择器插值残留：{hits}"
+    # B-53 同主语正断言：同一扫描在注入坏形态后必须命中
+    bad_hits = _css_selector_interp_hits(
+        html + '\nconst sel = \'[data-bid="${b.id}"]\';')
+    assert bad_hits == ['[data-bid="${'], f"选择器插值判据无感：{bad_hits}"
     # 队列面板的状态类同样来自数据面
     assert 'c-${esc(t.status)}' in html
     # dataset 查询用 bid 变量而不是拼接的选择器
@@ -577,7 +615,13 @@ def test_editor_log_sink_is_text_content():
     assert re.search(r'function log\([\s\S]*?\bel\.textContent\s*=', html)
     assert "document.write" not in html and "insertAdjacentHTML" not in html
     # 探针正文不会因「测试数据」落到源码里（真实浏览器验证属登记项）
-    assert "<img src=x onerror=" not in html
+    probe = "<img src=x onerror="
+    hits = html.count(probe)
+    assert hits == 0, f"源码残留探针载荷 {hits} 处"
+    # B-53 同主语正断言：同一计数在注入探针后必须 > 0
+    injected = html + f"\n<!-- {probe}alert(1) -->"
+    injected_hits = injected.count(probe)
+    assert injected_hits == 1, f"探针判据无感：注入后命中 {injected_hits} 处"
 
 
 # --- V-12：CLI 兜底与退出码 -----------------------------------------------------
