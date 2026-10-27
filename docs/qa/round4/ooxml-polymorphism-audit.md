@@ -36,9 +36,9 @@
 | 8 | `w:lvl/w:isLgl` | `true` = 法律编号，复合模板中所有级别以十进制显示；缺省 = 各用自身 `numFmt`（§17.9.4） | 不读 | 引用级别仍按 roman / letter 渲染（Word 显示十进制） | ⚠️ | **F-2 登记不修**：同 F-3，缺 oracle；零语料命中 |
 | 9 | `w:numPr/w:numId` | `0` = 无编号；缺 `val` = 畸形 | `0` → 无标记；缺 `val` → 无标记且不回落样式 | 畸形域取保守（不产内容） | ✅ | — |
 | 10 | `w:numPr/w:ilvl` | 缺省 0；段落只给 `ilvl` 时继承样式 `numId`（§17.3.1.19） | 继承样式 `numId` + 段落 `ilvl` 覆盖 | 无 | ✅ | — |
-| 11 | 样式级 `w:pPr/w:numPr` 的 `basedOn` 链 | 派生样式继承基样式的编号 | 只读该样式自身，不追 `basedOn` | 派生样式段落无标记 | 💤 | **F-6 登记**：静默少产，超本项口径 |
-| 12 | `w:abstractNum/w:numStyleLink` | 抽象定义可委托给编号样式 | 不读 | 无级别 → 无标记 | 💤 | **F-6 登记** |
-| 13 | `w:lvl/w:pStyle` | 级别可绑定段落样式（该样式段落自动获得此级编号） | 不读 | 该样式段落无标记 | 💤 | **F-6 登记** |
+| 11 | 样式级 `w:pPr/w:numPr` 的 `basedOn` 链 | 派生样式继承基样式的编号 | 沿 `basedOn` 找最近自带 numPr 的祖先；环 / 悬空保守终止 | 无（链上无 numPr 时仍无标记，与 Word 一致） | ✅ | **F-6 已修（CH-508）** |
+| 12 | `w:abstractNum/w:numStyleLink` | 抽象定义可委托给编号样式 | 读；解析到编号样式的 `numId` 后取其级别 | 悬空 / 环 → 无标记（不造号） | ✅ | **F-6 已修（CH-508）** |
+| 13 | `w:lvl/w:pStyle` | 级别可绑定段落样式（该样式段落自动获得此级编号） | 读；反向绑定到 `style_id → numId` | 无 | ✅ | **F-6 已修（CH-508）** |
 | 14 | `w:lvl/w:suff` | `tab` / `space` / `nothing`；缺省 tab（§17.9.28） | 不读；S3 一律 `marker + " " + text` | `nothing` → 仍补一个空格 | 🟡 | Markdown 列表必须有分隔；`nothing` 是版面提示，不是正文内容 |
 
 ## 2. 相邻 OOXML 读取处
@@ -52,7 +52,7 @@
 | 19 | `mc:AlternateContent` | `Choice` 与 `Fallback` 是同一内容的两种表达 | 优先 `Choice`，缺失才 `Fallback`；元素 id 去重 | ✅（只取一支，防文本翻倍） |
 | 20 | `w:sdt` / `w:customXml` 包裹层 | 块 / 行 / 单元格均可被内容控件包裹 | 透明下钻 | ✅ |
 | 21 | `w:footnote/@w:type` / `w:endnote/@w:type` | `separator` / `continuationSeparator` / 普通注 | 分隔符占位注跳过 | ✅ |
-| 22 | 标题样式名 | `Heading N`（N=1..9）；自定义样式名不受约束 | `heading` 前缀 + 末段整数；`Heading` 无数字 → 异常兜底为 1 级 | 🟡（**F-7 登记**：名为 `Heading` 的自定义样式会被误判成 H1，属样式名约定而非 OOXML 多态） |
+| 22 | 标题样式名 | `Heading N`（N=1..9）；自定义样式名不受约束 | 只认 `Heading` + 1–9；无数字 / 越界 → 非标题（`_heading_level_from_style`） | ✅ | **F-7 已修（CH-508）** |
 
 ## 3. 发现清单
 
@@ -63,8 +63,8 @@
 | **F-3** | `lvlRestart` 未读：`0`（永不重启）被当作默认重启，序号可能错 | ⚠️ | 登记不修（一基索引语义需 oracle；零语料） |
 | **F-4** | 少见 `numFmt`（ordinal / ideograph / chicago 等）坍缩成十进制数字 | ⚠️ | 登记不修（错字形非造标记；模块契约已声明该回退） |
 | **F-5** | `lvlText` 元素缺失 → `"%1."` | ✅ | 规范对缺失行为未定义；保留兜底 |
-| **F-6** | `basedOn` 继承、`numStyleLink`、`lvl/w:pStyle` 三种**少产**形态未读 | 💤 | 登记，超本项口径（兜底不产内容） |
-| **F-7** | 样式名 `Heading`（无数字）异常兜底为 1 级 | 🟡 | 登记（样式名约定，非 OOXML 多态） |
+| **F-6** | `basedOn` 继承、`numStyleLink`、`lvl/w:pStyle` 三种**少产**形态未读 | ✅ | **已修（CH-508）**：`tests/test_ch508_indirect_numbering.py` 前三项；悬空 / 环状链与缺 `numbering.xml` 三条反向守卫保证不凭空造号、不崩 |
+| **F-7** | 样式名 `Heading`（无数字）异常兜底为 1 级 | ✅ | **已修（CH-508）**：`_heading_level_from_style` 去掉无数字兜底，第七条红线钉住 |
 
 **为什么四条既有腿都没抓到 F-1**：14 篇 DOCX 语料全部由 python-docx 写出，而
 python-docx 从不写 `lvlOverride` / `startOverride` / `isLgl` / `lvlRestart` / `numStyleLink`

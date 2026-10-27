@@ -762,6 +762,7 @@ class _DocxNumbering:
     def __init__(self, d):
         self.levels: dict[str, dict[int, dict]] = {}
         self.style_num: dict[str, tuple[str, int]] = {}
+        self.pstyle_num: dict[str, tuple[str, int]] = {}
         self.counters: dict[str, dict[int, int]] = {}
         try:
             from docx.opc.constants import RELATIONSHIP_TYPE as RT
@@ -781,6 +782,7 @@ class _DocxNumbering:
             fmt = lvl.find(f"{_W_NS}numFmt")
             txt = lvl.find(f"{_W_NS}lvlText")
             start = lvl.find(f"{_W_NS}start")
+            pstyle = lvl.find(f"{_W_NS}pStyle")
             return ilvl, {
                 "fmt": (fmt.get(f"{_W_NS}val", "decimal") if fmt is not None
                         else "decimal"),
@@ -790,9 +792,60 @@ class _DocxNumbering:
                 # 会把前者误判成后者。
                 "has_text": txt is not None,
                 "start": int(start.get(f"{_W_NS}val", "1")) if start is not None else 1,
+                # CH-508（B-52）：该级绑定的段落样式；应用此样式的段落自动获得
+                # 本级编号（ECMA-376 §17.9.29）。
+                "pstyle": (pstyle.get(f"{_W_NS}val", "") if pstyle is not None else ""),
             }
 
+        # --- 样式侧：直接 numPr + basedOn 链 + 编号样式（供 numStyleLink 解析）---
+        style_own: dict[str, tuple[str, int]] = {}
+        style_base: dict[str, str] = {}
+        try:
+            styles = d.styles.element
+        except Exception:
+            styles = None
+        if styles is not None:
+            for st in styles.findall(f"{_W_NS}style"):
+                sid = st.get(f"{_W_NS}styleId", "")
+                if not sid:
+                    continue
+                base_el = st.find(f"{_W_NS}basedOn")
+                if base_el is not None:
+                    style_base[sid] = base_el.get(f"{_W_NS}val", "")
+                numPr = st.find(f"{_W_NS}pPr/{_W_NS}numPr")
+                if numPr is None:
+                    continue
+                nid_el = numPr.find(f"{_W_NS}numId")
+                lvl_el = numPr.find(f"{_W_NS}ilvl")
+                if nid_el is None:
+                    continue
+                style_own[sid] = (
+                    nid_el.get(f"{_W_NS}val", ""),
+                    int(lvl_el.get(f"{_W_NS}val", "0")) if lvl_el is not None else 0)
+
+        def style_num_of(sid: str, seen: set[str] | None = None):
+            """样式自身的 numPr，否则沿 basedOn 链继承（CH-508 / B-52）。
+
+            只追 basedOn，不追「编号样式」——后者是 numStyleLink 的方向。
+            环状 basedOn 返回 None（不猜、不造编号）。
+            """
+            if sid in style_own:
+                return style_own[sid]
+            seen = set() if seen is None else seen
+            if sid in seen:
+                return None
+            seen.add(sid)
+            base = style_base.get(sid, "")
+            return style_num_of(base, seen) if base else None
+
+        for sid in set(style_own) | set(style_base):
+            got = style_num_of(sid)
+            if got is not None:
+                self.style_num[sid] = got
+
+        # --- 编号定义侧：抽象层 + numStyleLink 委托 ---
         abstract: dict[str, dict[int, dict]] = {}
+        abstract_link: dict[str, str] = {}
         for an in root.findall(f"{_W_NS}abstractNum"):
             aid = an.get(f"{_W_NS}abstractNumId", "")
             lv: dict[int, dict] = {}
@@ -801,51 +854,64 @@ class _DocxNumbering:
                 if parsed is not None:
                     lv[parsed[0]] = parsed[1]
             abstract[aid] = lv
+            link_el = an.find(f"{_W_NS}numStyleLink")
+            if link_el is not None:
+                abstract_link[aid] = link_el.get(f"{_W_NS}val", "")
+
+        num_aid: dict[str, str] = {}
+        num_override: dict[str, list[tuple[int, dict | None, int | None]]] = {}
         for num in root.findall(f"{_W_NS}num"):
             nid = num.get(f"{_W_NS}numId", "")
             aid_el = num.find(f"{_W_NS}abstractNumId")
-            aid = aid_el.get(f"{_W_NS}val", "") if aid_el is not None else ""
-            # CH-506（OPT4-12）：`w:lvlOverride` 才是该 numId 的**有效**级别定义
-            # （ECMA-376 §17.9.15）——Word 的「重新开始编号」写 startOverride，
-            # 「本节单独换格式」写整条 lvl。只读抽象层会让覆盖层的 numFmt=none
-            # 被无视、凭抽象层造出标记（D-1 同型），startOverride 被无视则编号
-            # 从 1 起。逐 num 深拷贝：同一 abstractNumId 可被多个 numId 共享，
-            # 覆盖不得回写。
-            level_map = {i: dict(c) for i, c in abstract.get(aid, {}).items()}
+            num_aid[nid] = aid_el.get(f"{_W_NS}val", "") if aid_el is not None else ""
+            ovs: list[tuple[int, dict | None, int | None]] = []
             for ov in num.findall(f"{_W_NS}lvlOverride"):
                 try:
                     oilvl = int(ov.get(f"{_W_NS}ilvl", "0"))
                 except ValueError:
                     continue
                 lvl_el = ov.find(f"{_W_NS}lvl")
-                if lvl_el is not None:
-                    parsed = read_lvl(lvl_el)
-                    if parsed is not None:
-                        level_map[oilvl] = parsed[1]
+                parsed = read_lvl(lvl_el) if lvl_el is not None else None
                 start_el = ov.find(f"{_W_NS}startOverride")
+                start = None
                 if start_el is not None:
                     try:
-                        level_map[oilvl]["start"] = int(start_el.get(f"{_W_NS}val", "1"))
+                        start = int(start_el.get(f"{_W_NS}val", "1"))
                     except (KeyError, ValueError):
                         pass
-            self.levels[nid] = level_map
-        try:
-            styles = d.styles.element
-        except Exception:
-            styles = None
-        if styles is not None:
-            for st in styles.findall(f"{_W_NS}style"):
-                sid = st.get(f"{_W_NS}styleId", "")
-                numPr = st.find(f"{_W_NS}pPr/{_W_NS}numPr")
-                if numPr is None or not sid:
-                    continue
-                nid_el = numPr.find(f"{_W_NS}numId")
-                lvl_el = numPr.find(f"{_W_NS}ilvl")
-                if nid_el is None:
-                    continue
-                self.style_num[sid] = (
-                    nid_el.get(f"{_W_NS}val", ""),
-                    int(lvl_el.get(f"{_W_NS}val", "0")) if lvl_el is not None else 0)
+                ovs.append((oilvl, parsed[1] if parsed is not None else None, start))
+            num_override[nid] = ovs
+
+        def levels_for(nid: str, seen: set[str] | None = None) -> dict[int, dict]:
+            """该 numId 的有效级别定义：抽象层 / numStyleLink 委托 + 实例覆盖。"""
+            seen = set() if seen is None else seen
+            if nid in seen:
+                return {}
+            seen.add(nid)
+            aid = num_aid.get(nid, "")
+            link = abstract_link.get(aid, "")
+            if link:
+                linked = style_num_of(link)
+                target = linked[0] if linked is not None else ""
+                base = levels_for(target, seen) if target else {}
+            else:
+                base = {i: dict(c) for i, c in abstract.get(aid, {}).items()}
+            for oilvl, cfg, start in num_override.get(nid, []):
+                if cfg is not None:
+                    base[oilvl] = dict(cfg)
+                if start is not None and oilvl in base:
+                    base[oilvl]["start"] = start
+            return base
+
+        for nid in num_aid:
+            self.levels[nid] = levels_for(nid)
+
+        # 级别 → 段落样式的反向映射：未挂 numPr 的该样式段落也获得编号。
+        for nid, levels in self.levels.items():
+            for ilvl, cfg in levels.items():
+                ps = cfg.get("pstyle") or ""
+                if ps and ps not in self.pstyle_num:
+                    self.pstyle_num[ps] = (nid, ilvl)
 
     @staticmethod
     def _fmt_num(n: int, fmt: str) -> str:
@@ -879,8 +945,12 @@ class _DocxNumbering:
             lvl_el = numPr.find(f"{_W_NS}ilvl")
             nid = nid_el.get(f"{_W_NS}val", "") if nid_el is not None else None
             lvl = int(lvl_el.get(f"{_W_NS}val", "0")) if lvl_el is not None else 0
-        if nid is None and style_id in self.style_num:
-            nid, lvl = self.style_num[style_id]
+        if nid is None and style_id:
+            # CH-508（B-52）：样式自身 / basedOn 继承的 numPr 优先；其次是该样式
+            # 在某个级别 `w:lvl/w:pStyle` 上的绑定。
+            got = self.style_num.get(style_id) or self.pstyle_num.get(style_id)
+            if got is not None:
+                nid, lvl = got
         if not nid or nid == "0":
             return "", -1
         levels = self.levels.get(nid) or {}
@@ -931,6 +1001,23 @@ def _docx_style_name(el, d, ctx: _DocxCtx) -> str:
         ctx.styles[sid] = (st.name or "") if st is not None else ""
     return ctx.styles[sid]
 
+
+
+def _heading_level_from_style(style_name: str) -> int | None:
+    """`Heading N`（N=1..9）→ 层级；无数字的自定义样式名不算标题。
+
+    CH-508（B-52 / F-7）：原实现只要前缀是 `heading` 就把末段整数当层级，裸
+    `Heading` 走异常兜底成 1 级——一个自定义样式仅因命名为 `Heading` 就被判成
+    H1（连字号也按 H1 给）。规范只约定 `Heading N`，无数字名不构成层级声明。
+    """
+    s = (style_name or "").strip().lower()
+    if not s.startswith("heading"):
+        return None
+    tail = s[len("heading"):].strip()
+    if not tail.isdigit():
+        return None
+    n = int(tail)
+    return min(6, n) if 1 <= n <= 9 else None
 
 
 def _docx_para_line(p, d, rels=None, ctx: _DocxCtx | None = None) -> Line | None:
@@ -1002,12 +1089,8 @@ def _docx_para_line(p, d, rels=None, ctx: _DocxCtx | None = None) -> Line | None
     trailing_space = raw_text != raw_text.rstrip()
     leading_space = (not mono) and raw_text != raw_text.lstrip()
     style = _docx_style_name(el, d, ctx)
-    level = None
-    if style.lower().startswith("heading"):
-        try:
-            level = max(1, min(6, int(style.split()[-1])))
-        except Exception:
-            level = 1
+    level = _heading_level_from_style(style)
+    is_heading = level is not None
     marker, list_level = "", -1
     if ctx.numbering is not None:
         # CH-485（R9-PIPE-3）：Heading 的自动编号也要保留（原实现跳过，
@@ -1015,9 +1098,9 @@ def _docx_para_line(p, d, rels=None, ctx: _DocxCtx | None = None) -> Line | None
         marker, list_level = ctx.numbering.marker(el, el.style)
     link, link_internal, link_dest = _docx_para_link(p, d, text, rels, ctx.has_links)
     return Line(text=text, size=size or _style_size(style),
-                bold=bold or style.lower().startswith("heading"),
+                bold=bold or is_heading,
                 italic=italic, strike=strike, mono=mono,
-                uniform_bold=uniform_bold or style.lower().startswith("heading"),
+                uniform_bold=uniform_bold or is_heading,
                 uniform_italic=uniform_italic, uniform_strike=uniform_strike,
                 list_marker=marker, list_level=list_level,
                 link=link, link_internal=link_internal, link_dest=link_dest,
@@ -1431,11 +1514,8 @@ def _style_size(style_name: str) -> float:
     s = style_name.lower()
     if s.startswith("title"):
         return 20.0
-    if s.startswith("heading"):
-        try:
-            lvl = int(s.split()[-1])
-        except Exception:
-            lvl = 1
+    lvl = _heading_level_from_style(style_name)
+    if lvl is not None:
         return max(11.0, 18.0 - lvl * 1.5)
     return 10.5
 
