@@ -38,6 +38,7 @@
 | CH-511（第二批） | `tests/test_v24_gates.py` | 4（全为 gate：#79/#80/#81/#82） | 108 |
 | CH-512（第三批） | `tests/test_ch500_round17.py` | 6（全为 gate：#38/#39/#40/#41/#42/#43） | 102 |
 | CH-513（第四批） | `tests/test_ch476_fixes.py` | 6（全为 gate：#9/#10/#11/#12/#13/#15） | 96 |
+| CH-514（第五批） | `tests/test_llm_p0_contract.py` | 5（全为 gate：#68/#69/#70/#71/#72） | 91 |
 
 首批实测出一条**判据本身失真**的形态：#89 原口径 `json.dumps(body)` 用默认
 `ensure_ascii=True`，中文查询被写成 `\uXXXX`，`'例外' not in ...` 对任何中文查询
@@ -54,6 +55,7 @@ sink 类**（`api.py` 用的就是 `RotatingJsonlWriter`）：短字段原样命
 
 第三批（CH-512）的形态与前两批不同：六条判据读的都是**键名/字符是否出现在真实容器里**，而触发它们的缺陷形状在正常样本上压根不产生。于是补位有两个可复用的写法：① **注回真实对象而不是造一个合成 dict**——`IR.meta()` 把 `extra_meta` 平铺进交付面，所以往 `res.ir.extra_meta` 里加一个 `shard` 就能同时验证「否定面为 0」与「平铺通路是活的」（变异把 `**self.extra_meta` 摘掉，注入面立刻归零、判据红）；② **用同域的正常产物做命中基准**——`~~` 走 opt-in 档必须计 2、正文软换行必须计 1、`POST /tokens` 正常签发必须计 1 个 `token` 键，这些 > 0 的数证明判据的分子分母都在同一份产物上可数，剩下的 0 才是观测而不是恒真。
 第四批（CH-513）暴露出**第三种恒真形态**，与前两批都不同：#9 原判据读 `SELECT code FROM events`，而删除竞态路径**刻意不落任何事件**（`mark` 返回 False 即放弃留痕，见 `api.py` 该分支的注释）——空表上「没有 `job_done`」对任何实现都真。这类判据的正例不能靠注入缺陷形状，只能**给同一张表补一条正常完成的作业**：正常作业必须写出 1 条 `job_done`、同一判据在竞态轮必须仍是 0，两个数进同一条消息。同批另外五条用**源产物自身**当命中基准——`w:delText` 在夹具与黄金样本的 `word/document.xml` 里各计 1（正文计 0 才叫「接受口径」，源里压根没有则那个 0 是空话）、`page_break` 判据用一份真分页 DOCX 命中 1 证明检测器是活的、块级 `flags.has_revision` 用「带信号段落数 == 3」证明写痕通路存在。方法论收获：**判据的三个可数面——被检产物、源产物、同域正常产物——任取其一命中 > 0 就足以把「看不见」与「干净」分开**；三者都取不到，才说明这条否定断言没有观测对象。
+第五批（CH-514）不再是「找不到命中面」，而是**补位夹具自己没通过产品的准入门槛**：#70 的第一版正例把一条 47 字的标题放进同批，判据却恒红——`_candidate_score` 对标题的入门条件是 `len(t) > 60`，不足 60 字的标题压根不进候选，于是「补的正例」命中仍是 0。教训一：**先把命中基准跑出来再写断言**（本轮用一段独立脚本打印每条夹具的分数与 `op_schema`，确认 > 0 才落到测试里）。教训二：**命中数按实现的真实口径算，不按直觉算**——#69 的 `"marker"` 天然出现两处（`"required": ["target", "marker"]` 的表元素 + 独立的 `"marker"` 说明键），写成「应为 0 / 1」会把正确实现打红，基准是 2。教训三：#70/#71/#72 三条否定合并成一条 `assert (narrow, wide) == ([0,0,0], [1,1,1])`，变异面必须逐 op 独立（`_ALLOWED_BY_TYPE` 按类型摘一个 op、`_allowed_ops_for` 摘掉表边界过滤），才能证明三个位置**各自**有牙齿而不是共享一次红。
 
 ## 红线层优先复核（gate 且无同主语正断言）
 
@@ -118,11 +120,11 @@ sink 类**（`api.py` 用的就是 `RotatingJsonlWriter`）：短字段原样命
 | `tests/test_ch505_contract_sync.py::test_appendix_c_parser_has_teeth` | 154 | not-in | `'422' not in rows['POST', '/jobs']['errors']` |  |
 | `tests/test_ch505_escape_single_source.py::test_escape_implementations_have_a_single_source` | 139 | not-in | `'str.maketrans' not in text` | 是 |
 | `tests/test_ch505_escape_single_source.py::test_escape_implementations_have_a_single_source` | 140 | not-in | `'&lt;' not in text` | 是 |
-| `tests/test_llm_p0_contract.py::test_allowed_ops_hides_table_boundary_for_far_paragraph` | 116 | not-in | `'mark_table_boundary' not in _allowed_ops_for(blocks, 0, wanted)` |  |
-| `tests/test_llm_p0_contract.py::test_payload_carries_v25_schema_and_contract` | 182 | not-in | `'"marker"' not in user` |  |
-| `tests/test_llm_p0_contract.py::test_payload_op_schema_is_narrowed_to_batch_candidates` | 194 | not-in | `'fix_heading_level' not in obj['op_schema']` |  |
-| `tests/test_llm_p0_contract.py::test_payload_op_schema_is_narrowed_to_batch_candidates` | 195 | not-in | `'fix_list_marker' not in obj['op_schema']` |  |
-| `tests/test_llm_p0_contract.py::test_payload_op_schema_is_narrowed_to_batch_candidates` | 196 | not-in | `'mark_table_boundary' not in obj['op_schema']` |  |
+| `tests/test_llm_p0_contract.py::test_allowed_ops_hides_table_boundary_for_far_paragraph` | 120 | not-in | `far_hits/near_ops.count("mark_table_boundary")`（**CH-514 已补同主语正断言**：紧邻表的段落命中 1，判据 `(0, 1)`） |  |
+| `tests/test_llm_p0_contract.py::test_payload_carries_v25_schema_and_contract` | 198 | not-in | `clean_hits = user.count('"marker"')`（**CH-514 已补同主语正断言**：含 list_item 候选批命中 2，判据 `(0, 2)`） |  |
+| `tests/test_llm_p0_contract.py::test_payload_op_schema_is_narrowed_to_batch_candidates` | 231 | not-in | `narrow_hits = [only_para.count(op) …]`（**CH-514 已补同主语正断言**：标题+列表项+紧邻表段落同批 `wide_hits == [1, 1, 1]`，三行合判据） |  |
+| `tests/test_llm_p0_contract.py::test_payload_op_schema_is_narrowed_to_batch_candidates` | 231 | not-in | 同上（`fix_list_marker` 位） |  |
+| `tests/test_llm_p0_contract.py::test_payload_op_schema_is_narrowed_to_batch_candidates` | 231 | not-in | 同上（`mark_table_boundary` 位） |  |
 | `tests/test_pdf_columns.py::test_single_column_long_paragraph_stays_whole` | 31 | not-in | `'双栏' not in first` |  |
 | `tests/test_pdf_structure_repair.py::test_wrapped_heading_continuation_joins_heading` | 155 | not-in | `'继续部分' not in [b.text for b in ir.blocks if b.type == 'paragraph']` |  |
 | `tests/test_qa_n04_furniture_ext.py::test_roman_decorated_number_not_in_inline_mixed_case` | 100 | not-search | `not _PAGE_NUM_INLINE.search('第一章 引言 · 12')` |  |
@@ -202,11 +204,11 @@ sink 类**（`api.py` 用的就是 `RotatingJsonlWriter`）：短字段原样命
 | 65 | G | `tests/test_ch505_escape_single_source.py::test_escape_implementations_have_a_single_source` | 139 | not-in | `'str.maketrans' not in text` |  | 是 |
 | 66 | G | `tests/test_ch505_escape_single_source.py::test_escape_implementations_have_a_single_source` | 140 | not-in | `'&lt;' not in text` |  | 是 |
 | 67 | G | `tests/test_ch505_perms_coverage.py::test_harden_windows_reports_nonzero_exit_with_last_stderr_line` | 156 | not-in | `perms._cache_key(tmp_path) not in perms._HARDENED` | 155 |  |
-| 68 | G | `tests/test_llm_p0_contract.py::test_allowed_ops_hides_table_boundary_for_far_paragraph` | 116 | not-in | `'mark_table_boundary' not in _allowed_ops_for(blocks, 0, wanted)` |  |  |
-| 69 | G | `tests/test_llm_p0_contract.py::test_payload_carries_v25_schema_and_contract` | 182 | not-in | `'"marker"' not in user` |  |  |
-| 70 | G | `tests/test_llm_p0_contract.py::test_payload_op_schema_is_narrowed_to_batch_candidates` | 194 | not-in | `'fix_heading_level' not in obj['op_schema']` |  |  |
-| 71 | G | `tests/test_llm_p0_contract.py::test_payload_op_schema_is_narrowed_to_batch_candidates` | 195 | not-in | `'fix_list_marker' not in obj['op_schema']` |  |  |
-| 72 | G | `tests/test_llm_p0_contract.py::test_payload_op_schema_is_narrowed_to_batch_candidates` | 196 | not-in | `'mark_table_boundary' not in obj['op_schema']` |  |  |
+| 68 | G | `tests/test_llm_p0_contract.py::test_allowed_ops_hides_table_boundary_for_far_paragraph` | 120 | not-in | `far_hits = far_ops.count("mark_table_boundary")` → `assert (far_hits, near_hits) == (0, 1)` |  | CH-514 ✓ |
+| 69 | G | `tests/test_llm_p0_contract.py::test_payload_carries_v25_schema_and_contract` | 198 | not-in | `clean_hits = user.count('"marker"')` → `assert (clean_hits, marker_hits) == (0, 2)` |  | CH-514 ✓ |
+| 70 | G | `tests/test_llm_p0_contract.py::test_payload_op_schema_is_narrowed_to_batch_candidates` | 231 | not-in | `narrow_hits[0]` → `assert (narrow_hits, wide_hits) == ([0, 0, 0], [1, 1, 1])` |  | CH-514 ✓ |
+| 71 | G | `tests/test_llm_p0_contract.py::test_payload_op_schema_is_narrowed_to_batch_candidates` | 231 | not-in | `narrow_hits[1]` → 同一条 `assert (narrow_hits, wide_hits)` |  | CH-514 ✓ |
+| 72 | G | `tests/test_llm_p0_contract.py::test_payload_op_schema_is_narrowed_to_batch_candidates` | 231 | not-in | `narrow_hits[2]` → 同一条 `assert (narrow_hits, wide_hits)` |  | CH-514 ✓ |
 | 73 | G | `tests/test_pdf_columns.py::test_two_column_page_reads_left_column_before_right` | 18 | not-any | `not any(('双中栏文排' in t for t in texts))` | 17 |  |
 | 74 | G | `tests/test_pdf_columns.py::test_single_column_long_paragraph_stays_whole` | 31 | not-in | `'双栏' not in first` |  |  |
 | 75 | G | `tests/test_pdf_structure_repair.py::test_wrapped_heading_continuation_joins_heading` | 155 | not-in | `'继续部分' not in [b.text for b in ir.blocks if b.type == 'paragraph']` |  |  |

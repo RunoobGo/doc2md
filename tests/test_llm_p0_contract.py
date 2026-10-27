@@ -113,8 +113,13 @@ def test_allowed_ops_hides_table_boundary_for_far_paragraph():
               Block(id="p1", type="paragraph", text="表前说明"),
               Block(id="t1", type="table", text="| a | b |")]
     wanted = set(DEFAULT_OP_WHITELIST)
-    assert "mark_table_boundary" not in _allowed_ops_for(blocks, 0, wanted)
-    assert "mark_table_boundary" in _allowed_ops_for(blocks, 1, wanted)
+    far_ops = _allowed_ops_for(blocks, 0, wanted)
+    near_ops = _allowed_ops_for(blocks, 1, wanted)
+    far_hits, near_hits = (far_ops.count("mark_table_boundary"),
+                           near_ops.count("mark_table_boundary"))
+    assert (far_hits, near_hits) == (0, 1), (
+        f"表边界 op 收窄判据无感：远段命中 {far_hits} 处、紧邻表的段落命中 {near_hits} 处"
+        f"（应为 0 / 1；紧邻表为 0 说明 `_allowed_ops_for` 压根不发这个 op，前一条否定恒真）")
 
 
 def test_shallow_headings_are_not_lifted_further():
@@ -179,7 +184,21 @@ def test_payload_carries_v25_schema_and_contract():
     assert '"required"' in user
     assert '"level"' in user and '"at"' in user
     # 本批没有 list_item 候选，不再下发 marker 的参数契约。
-    assert '"marker"' not in user
+    clean_hits = user.count('"marker"')
+    # 同主语对照：`"marker"` 只长在 `fix_list_marker` 的参数契约里，所以「这批没有 list_item
+    # 候选 → user 里没有 "marker"」在契约压根不出门时同样成立。补一条含 list_item 候选的批次，
+    # 同一个 `count('"marker"')` 判据必须命中 1，否则前一条否定只是空话。
+    li_blocks = [Block(id="p1", type="paragraph", text="前一段没有句号"),
+                 Block(id="li1", type="list_item", text="一、列表项甲。二、列表项乙")]
+    li_user = LlmClient(bind="127.0.0.1", port=1, retries=0).payload_batches(
+        li_blocks, DEFAULT_OP_WHITELIST)[0]["messages"][1]["content"]
+    # 命中基准 2：`fix_list_marker` 的参数契约里 `"marker"` 出现两处——
+    # `"required": ["target", "marker"]` 的表元素 + 独立的 `"marker"` 说明键。
+    marker_hits = li_user.count('"marker"')
+    assert (clean_hits, marker_hits) == (0, 2), (
+        f"marker 契约下发判据无感：无 list_item 候选批命中 {clean_hits} 处、"
+        f"有候选批命中 {marker_hits} 处（应为 0 / 2；有候选批为 0 说明参数契约压根不出门，"
+        f"前一条否定恒真）")
 
 
 def test_payload_op_schema_is_narrowed_to_batch_candidates():
@@ -191,6 +210,24 @@ def test_payload_op_schema_is_narrowed_to_batch_candidates():
     obj, _ = json.JSONDecoder().raw_decode(user, user.index("{"))
     assert set(obj["op_schema"]) == {"merge_block", "split_block"}
     assert "白名单 op：[\"merge_block\", \"split_block\"]" in user
-    assert "fix_heading_level" not in obj["op_schema"]
-    assert "fix_list_marker" not in obj["op_schema"]
-    assert "mark_table_boundary" not in obj["op_schema"]
+    only_para = list(obj["op_schema"])
+    narrow_hits = [only_para.count(op) for op in
+                   ("fix_heading_level", "fix_list_marker", "mark_table_boundary")]
+    # 同主语对照：三条否定只在「schema 永远只发 merge/split」这种实现下也成立，
+    # 而那只意味着收窄判据是死的。补一条标题候选 + 列表项候选 + 紧邻表的段落同批的样本，
+    # 三个 op 必须各进 `op_schema` 一次——收窄是**按批次**发生的，不是把门焊死。
+    wide_blocks = [
+        Block(id="h1", type="heading", level=5,
+              text="5.1 这是一个超过六十个字符的长编号标题，用来验证标题候选也会进入同一批次"
+                   "并带上层级参数契约，确保收窄是按候选类型发生的而不是把门焊死"),
+        Block(id="li1", type="list_item", text="一、列表项甲。二、列表项乙"),
+        Block(id="p2", type="paragraph", text="表前正文 第 3 页 共 10 页 残留"),
+        Block(id="t1", type="table", text="| a | b |")]
+    wide_user = LlmClient(bind="127.0.0.1", port=1, retries=0).payload_batches(
+        wide_blocks, DEFAULT_OP_WHITELIST)[0]["messages"][1]["content"]
+    wide, _ = json.JSONDecoder().raw_decode(wide_user, wide_user.index("{"))
+    wide_hits = [list(wide["op_schema"]).count(op) for op in
+                 ("fix_heading_level", "fix_list_marker", "mark_table_boundary")]
+    assert (narrow_hits, wide_hits) == ([0, 0, 0], [1, 1, 1]), (
+        f"op_schema 按批收窄判据无感：纯段落批命中 {narrow_hits}、三种候选同批命中 {wide_hits}"
+        f"（应为 [0, 0, 0] / [1, 1, 1]；同批一侧为 0 说明 schema 压根不随候选变，前三条否定恒真）")
