@@ -36,6 +36,7 @@
 | --- | --- | --- | --- |
 | CH-510（首批） | `tests/test_ch469_service.py` | 3（1 条 gate + 2 条非 gate） | 112 |
 | CH-511（第二批） | `tests/test_v24_gates.py` | 4（全为 gate：#79/#80/#81/#82） | 108 |
+| CH-512（第三批） | `tests/test_ch500_round17.py` | 6（全为 gate：#38/#39/#40/#41/#42/#43） | 102 |
 
 首批实测出一条**判据本身失真**的形态：#89 原口径 `json.dumps(body)` 用默认
 `ensure_ascii=True`，中文查询被写成 `\uXXXX`，`'例外' not in ...` 对任何中文查询
@@ -50,6 +51,7 @@ sink 类**（`api.py` 用的就是 `RotatingJsonlWriter`）：短字段原样命
 同一判据命中 1，再驱动夹具本体清除、判据归零；夹具在 pytest 9 被包成 `FixtureFunctionDefinition`，取生成器本体
 时用 `isgeneratorfunction` 断言兜底——取不到就红，不许静默跳过这段。
 
+第三批（CH-512）的形态与前两批不同：六条判据读的都是**键名/字符是否出现在真实容器里**，而触发它们的缺陷形状在正常样本上压根不产生。于是补位有两个可复用的写法：① **注回真实对象而不是造一个合成 dict**——`IR.meta()` 把 `extra_meta` 平铺进交付面，所以往 `res.ir.extra_meta` 里加一个 `shard` 就能同时验证「否定面为 0」与「平铺通路是活的」（变异把 `**self.extra_meta` 摘掉，注入面立刻归零、判据红）；② **用同域的正常产物做命中基准**——`~~` 走 opt-in 档必须计 2、正文软换行必须计 1、`POST /tokens` 正常签发必须计 1 个 `token` 键，这些 > 0 的数证明判据的分子分母都在同一份产物上可数，剩下的 0 才是观测而不是恒真。
 ## 红线层优先复核（gate 且无同主语正断言）
 
 | 文件::测试 | 行 | 形态 | 被否定表达式 | 控制流内 |
@@ -84,12 +86,12 @@ sink 类**（`api.py` 用的就是 `RotatingJsonlWriter`）：短字段原样命
 | `tests/test_ch496_local.py::test_serve_startup_reports_bound_port` | 274 | not-in | `'app.run(host=' not in body` |  |
 | `tests/test_ch496_local.py::test_queue_chip_filter_requests_server_side_status` | 309 | not-in | `'renderQueue(QSTATE.tasks)' not in m.group(1)` |  |
 | `tests/test_ch497_local.py::test_b12_soak_harness_contract` | 120 | not-in | `'ensure_ascii=False' not in src` |  |
-| `tests/test_ch500_round17.py::test_form_encoded_role_admin_does_not_downgrade_to_reader` | 97 | not-in | `'token' not in (r.get_json() or {})` |  |
-| `tests/test_ch500_round17.py::test_external_link_label_newline_flattened` | 430 | not-in | `'\n' not in md.strip()` |  |
-| `tests/test_ch500_round17.py::test_render_strike_optin_emits_tilde_without_error` | 473 | not-in | `'~~' not in render(ir)` |  |
-| `tests/test_ch500_round17.py::test_shard_internal_anchor_absent_from_delivered_meta` | 527 | not-in | `'shard' not in res.ir.extra_meta` |  |
-| `tests/test_ch500_round17.py::test_shard_internal_anchor_absent_from_delivered_meta` | 528 | not-in | `'shard' not in res.ir.meta()` |  |
-| `tests/test_ch500_round17.py::test_shard_internal_anchor_absent_from_delivered_meta` | 531 | not-in | `'shard' not in meta` |  |
+| `tests/test_ch500_round17.py::test_form_encoded_role_admin_does_not_downgrade_to_reader` | 99 | not-in | `leak_hits = list(r.get_json() or {}).count("token")`（**CH-512 已改写为命中数判据 + 同主语正常签发面命中 1**） |  |
+| `tests/test_ch500_round17.py::test_external_link_label_newline_flattened` | 442 | not-in | `flat_hits = md.strip().count("\n")`（**CH-512 已改写为命中数判据 + 正文软换行命中 1**） |  |
+| `tests/test_ch500_round17.py::test_render_strike_optin_emits_tilde_without_error` | 493 | not-in | `off_hits = render(ir).count("~~")`（**CH-512 已改写为命中数判据 + 同一 IR 的 opt-in 档命中 2**） |  |
+| `tests/test_ch500_round17.py::test_shard_internal_anchor_absent_from_delivered_meta` | 555 | not-in | `leak_extra = list(clean_extra).count("shard")`（**CH-512 已补同主语注入面：注回 `extra_meta` 后 `meta()` 平铺必须命中 1**） |  |
+| `tests/test_ch500_round17.py::test_shard_internal_anchor_absent_from_delivered_meta` | 556 | not-in | `leak_flat = list(res.ir.meta()).count("shard")`（**CH-512 已补同主语注入面**） |  |
+| `tests/test_ch500_round17.py::test_shard_internal_anchor_absent_from_delivered_meta` | 568 | not-in | `leak_hits = list(meta).count("shard")`（**CH-512 已补空 dict 守卫：交付 `shard_count` 必须命中 1**） |  |
 | `tests/test_ch501_qa_auto.py::test_priority_partition_is_exact` | 245 | not-in | `('attribution', 'gate_verdict') not in keys` |  |
 | `tests/test_ch501_qa_auto.py::test_priority_partition_is_exact` | 246 | not-in | `('defect', 'split_table') not in keys` |  |
 | `tests/test_ch501_qa_auto.py::test_priority_partition_is_exact` | 261 | not-in | `'B-99' not in pr.b_rows(_DP)` |  |
@@ -167,12 +169,12 @@ sink 类**（`api.py` 用的就是 `RotatingJsonlWriter`）：短字段原样命
 | 35 | G | `tests/test_ch496_local.py::test_serve_startup_reports_bound_port` | 274 | not-in | `'app.run(host=' not in body` |  |  |
 | 36 | G | `tests/test_ch496_local.py::test_queue_chip_filter_requests_server_side_status` | 309 | not-in | `'renderQueue(QSTATE.tasks)' not in m.group(1)` |  |  |
 | 37 | G | `tests/test_ch497_local.py::test_b12_soak_harness_contract` | 120 | not-in | `'ensure_ascii=False' not in src` |  |  |
-| 38 | G | `tests/test_ch500_round17.py::test_form_encoded_role_admin_does_not_downgrade_to_reader` | 97 | not-in | `'token' not in (r.get_json() or {})` |  |  |
-| 39 | G | `tests/test_ch500_round17.py::test_external_link_label_newline_flattened` | 430 | not-in | `'\n' not in md.strip()` |  |  |
-| 40 | G | `tests/test_ch500_round17.py::test_render_strike_optin_emits_tilde_without_error` | 473 | not-in | `'~~' not in render(ir)` |  |  |
-| 41 | G | `tests/test_ch500_round17.py::test_shard_internal_anchor_absent_from_delivered_meta` | 527 | not-in | `'shard' not in res.ir.extra_meta` |  |  |
-| 42 | G | `tests/test_ch500_round17.py::test_shard_internal_anchor_absent_from_delivered_meta` | 528 | not-in | `'shard' not in res.ir.meta()` |  |  |
-| 43 | G | `tests/test_ch500_round17.py::test_shard_internal_anchor_absent_from_delivered_meta` | 531 | not-in | `'shard' not in meta` |  |  |
+| 38 | G | `tests/test_ch500_round17.py::test_form_encoded_role_admin_does_not_downgrade_to_reader` | 99 | not-in | `'token' not in (r.get_json() or {})` → 同一 `POST /tokens` 的正常签发面 `list(payload).count("token")` 须为 1 | CH-512 ✓（400 面 0 / 签发面 1 双写） |  |
+| 39 | G | `tests/test_ch500_round17.py::test_external_link_label_newline_flattened` | 442 | not-in | `'\n' not in md.strip()` → 同判据对「正文段落内软换行」计数须为 1 | CH-512 ✓（链接 0 / 正文 1 双写） |  |
+| 40 | G | `tests/test_ch500_round17.py::test_render_strike_optin_emits_tilde_without_error` | 493 | not-in | `'~~' not in render(ir)` → 同一 IR 的 `preserve_strike=True` 档须计 2 | CH-512 ✓（默认 0 / opt-in 2 双写） |  |
+| 41 | G | `tests/test_ch500_round17.py::test_shard_internal_anchor_absent_from_delivered_meta` | 555 | not-in | `'shard' not in res.ir.extra_meta` → 注回 `extra_meta` 后须计 1 | CH-512 ✓（干净 0 / 注入 1） |  |
+| 42 | G | `tests/test_ch500_round17.py::test_shard_internal_anchor_absent_from_delivered_meta` | 556 | not-in | `'shard' not in res.ir.meta()` → 注入 `extra_meta` 后经平铺须计 1（平铺失效即红） | CH-512 ✓（干净 0 / 注入 1） |  |
+| 43 | G | `tests/test_ch500_round17.py::test_shard_internal_anchor_absent_from_delivered_meta` | 568 | not-in | `'shard' not in meta` → 同份交付 meta 的 `shard_count` 须计 1（读到空 dict 就红） | CH-512 ✓（shard 0 / shard_count 1） |  |
 | 44 | G | `tests/test_ch501_qa_auto.py::test_priority_partition_is_exact` | 245 | not-in | `('attribution', 'gate_verdict') not in keys` |  |  |
 | 45 | G | `tests/test_ch501_qa_auto.py::test_priority_partition_is_exact` | 246 | not-in | `('defect', 'split_table') not in keys` |  |  |
 | 46 | G | `tests/test_ch501_qa_auto.py::test_priority_partition_is_exact` | 261 | not-in | `'B-99' not in pr.b_rows(_DP)` |  |  |

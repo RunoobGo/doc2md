@@ -94,7 +94,14 @@ def test_form_encoded_role_admin_does_not_downgrade_to_reader(api_client):
                     headers=_hdr(tokens))
     assert r.status_code == 400 and r.get_json()["code"] == "E4001"
     # 原缺陷：折叠成 {} → role 缺省 reader，回 200 并签出一张 reader 票
-    assert "token" not in (r.get_json() or {}), r.get_json()
+    # B-53 同主语正断言（CH-512）：同一判据走同一条 `POST /tokens` 的正常签发面，
+    # 键名 `token` 必须命中恰好 1 处——否则「400 里没有票」可能只是响应体压根没键。
+    leak_hits = list(r.get_json() or {}).count("token")
+    ok = client.post("/tokens", json={"role": "admin", "label": "ch512"}, headers=_hdr(tokens))
+    assert ok.status_code == 200, ok.get_data(as_text=True)[:200]
+    good_hits = list(ok.get_json()).count("token")
+    assert (leak_hits, good_hits) == (0, 1), (
+        f"token 泄漏判据无感：400 响应命中 {leak_hits} 处、正常签发面命中 {good_hits} 处（应为 0 / 1）")
 
 
 def test_true_empty_body_still_defaults_to_empty_object(api_client):
@@ -427,7 +434,15 @@ def test_external_link_label_newline_flattened():
             blocks=[Block(id="b1", type="paragraph", text="x",
                           links=[{"url": "https://e.com/a", "text": "第一行\n第二行"}])])
     md = render(ir)
-    assert "\n" not in md.strip(), repr(md)
+    # B-53 同主语正断言（CH-512）：同一计数判据必须**能**看见换行——正文段落里的
+    # 软换行是合法输出，它若也计 0，说明 `md` 是被掏空的字符串而不是渲染结果。
+    probe = render(IR(doc_id="p1", source_key="k", source_name="a.pdf", format="pdf",
+                      pages=1, blocks=[Block(id="b1", type="paragraph",
+                                             text="正文一行\n正文二行")]))
+    flat_hits = md.strip().count("\n")
+    raw_hits = probe.strip().count("\n")
+    assert (flat_hits, raw_hits) == (0, 1), (
+        f"换行压平判据无感：链接文字命中 {flat_hits} 处、正文软换行命中 {raw_hits} 处（应为 0 / 1）")
 
 
 # --- R17-PIPE-2：渲染红线接进生产路径 --------------------------------------
@@ -469,8 +484,15 @@ def test_render_strike_optin_emits_tilde_without_error():
     ir = IR(doc_id="p4", source_key="k", source_name="a.pdf", format="pdf", pages=1,
             blocks=[Block(id="b1", type="paragraph", text="作废",
                           marks={"strikethrough": True})])
-    assert "~~作废~~" in render(ir, preserve_strike=True)
-    assert "~~" not in render(ir)                          # 默认档仍降级为纯文本
+    # B-53 同主语正断言（CH-512）：同一份 IR、同一个 `~~` 计数判据，opt-in 档必须
+    # 恰好命中 2 处（成对删除线）。计数为 0 就说明「默认档没有 ~~」是恒真的空判据。
+    on = render(ir, preserve_strike=True)
+    off = render(ir)                                       # 默认档仍降级为纯文本
+    assert "~~作废~~" in on
+    on_hits = on.count("~~")
+    off_hits = off.count("~~")
+    assert (off_hits, on_hits) == (0, 2), (
+        f"删除线判据无感：默认档 ~~ 命中 {off_hits} 处、opt-in 档命中 {on_hits} 处（应为 0 / 2）")
 
 
 # --- R17-PIPE-3：ZIP 容器三种结局分别可判 ----------------------------------
@@ -524,12 +546,29 @@ def test_sniff_real_docx_still_returns_docx(tmp_path):
 def test_shard_internal_anchor_absent_from_delivered_meta(tmp_path, small_pdf):
     from doc2md.pipeline.convert import convert
     res = convert(small_pdf, out_dir=tmp_path / "out")
-    assert "shard" not in res.ir.extra_meta
-    assert "shard" not in res.ir.meta()
+    # B-53 同主语正断言（CH-512）：`shard` 是 convert 逐片写入的内部锚
+    # （`convert.py` 的 `ir.extra_meta["shard"]`），单片样本永远不触发它，所以三条
+    # 否定断言在干净样本上无法自证有牙齿。这里把缺陷形状注回**真实对象**：
+    # extra_meta 加一个 `shard` 后，`meta()` 的平铺必须把它带到交付面——两个计数
+    # 各 1，证明「平铺后没有」不是因为 `meta()` 压根不看 extra_meta。
+    clean_extra = res.ir.extra_meta
+    leak_extra = list(clean_extra).count("shard")
+    leak_flat = list(res.ir.meta()).count("shard")
+    res.ir.extra_meta = {**clean_extra, "shard": {"index": 0, "start": 0, "end": 0}}
+    inject_extra = list(res.ir.extra_meta).count("shard")
+    inject_flat = list(res.ir.meta()).count("shard")
+    assert (leak_extra, leak_flat) == (0, 0), (
+        f"内部锚判据无感：单片样本 extra_meta/meta() 命中 {leak_extra}/{leak_flat} 处（应为 0 / 0）")
+    assert (inject_extra, inject_flat) == (1, 1), (
+        f"`meta()` 平铺未生效：注入 extra_meta 后命中 {inject_extra}/{inject_flat} 处（应为 1 / 1）")
+    res.ir.extra_meta = clean_extra
     with zipfile.ZipFile(res.zip_path) as z:
         meta = json.loads(z.read(f"{res.doc_id}/ir.json").decode("utf-8"))["meta"]
-    assert "shard" not in meta, sorted(meta)
-    assert "shard_count" in meta, "文档级口径保留"
+    kept_hits = list(meta).count("shard_count")
+    leak_hits = list(meta).count("shard")
+    assert (leak_hits, kept_hits) == (0, 1), (
+        f"交付 meta 判据无感：shard 命中 {leak_hits} 处、文档级口径 shard_count 命中 "
+        f"{kept_hits} 处（应为 0 / 1；shard_count 为 0 说明读到的是空 dict，前一条否定恒真）")
 
 
 # --- R17-PIPE-5：边距剔除后仍带版式探测字段 --------------------------------
