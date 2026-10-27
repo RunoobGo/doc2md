@@ -39,6 +39,7 @@
 | CH-512（第三批） | `tests/test_ch500_round17.py` | 6（全为 gate：#38/#39/#40/#41/#42/#43） | 102 |
 | CH-513（第四批） | `tests/test_ch476_fixes.py` | 6（全为 gate：#9/#10/#11/#12/#13/#15） | 96 |
 | CH-514（第五批） | `tests/test_llm_p0_contract.py` | 5（全为 gate：#68/#69/#70/#71/#72） | 91 |
+| CH-515（第六批） | `tests/test_ch501_qa_auto.py` | 4（全为 gate：#44/#45/#46/#47） | **87** |
 
 首批实测出一条**判据本身失真**的形态：#89 原口径 `json.dumps(body)` 用默认
 `ensure_ascii=True`，中文查询被写成 `\uXXXX`，`'例外' not in ...` 对任何中文查询
@@ -56,6 +57,7 @@ sink 类**（`api.py` 用的就是 `RotatingJsonlWriter`）：短字段原样命
 第三批（CH-512）的形态与前两批不同：六条判据读的都是**键名/字符是否出现在真实容器里**，而触发它们的缺陷形状在正常样本上压根不产生。于是补位有两个可复用的写法：① **注回真实对象而不是造一个合成 dict**——`IR.meta()` 把 `extra_meta` 平铺进交付面，所以往 `res.ir.extra_meta` 里加一个 `shard` 就能同时验证「否定面为 0」与「平铺通路是活的」（变异把 `**self.extra_meta` 摘掉，注入面立刻归零、判据红）；② **用同域的正常产物做命中基准**——`~~` 走 opt-in 档必须计 2、正文软换行必须计 1、`POST /tokens` 正常签发必须计 1 个 `token` 键，这些 > 0 的数证明判据的分子分母都在同一份产物上可数，剩下的 0 才是观测而不是恒真。
 第四批（CH-513）暴露出**第三种恒真形态**，与前两批都不同：#9 原判据读 `SELECT code FROM events`，而删除竞态路径**刻意不落任何事件**（`mark` 返回 False 即放弃留痕，见 `api.py` 该分支的注释）——空表上「没有 `job_done`」对任何实现都真。这类判据的正例不能靠注入缺陷形状，只能**给同一张表补一条正常完成的作业**：正常作业必须写出 1 条 `job_done`、同一判据在竞态轮必须仍是 0，两个数进同一条消息。同批另外五条用**源产物自身**当命中基准——`w:delText` 在夹具与黄金样本的 `word/document.xml` 里各计 1（正文计 0 才叫「接受口径」，源里压根没有则那个 0 是空话）、`page_break` 判据用一份真分页 DOCX 命中 1 证明检测器是活的、块级 `flags.has_revision` 用「带信号段落数 == 3」证明写痕通路存在。方法论收获：**判据的三个可数面——被检产物、源产物、同域正常产物——任取其一命中 > 0 就足以把「看不见」与「干净」分开**；三者都取不到，才说明这条否定断言没有观测对象。
 第五批（CH-514）不再是「找不到命中面」，而是**补位夹具自己没通过产品的准入门槛**：#70 的第一版正例把一条 47 字的标题放进同批，判据却恒红——`_candidate_score` 对标题的入门条件是 `len(t) > 60`，不足 60 字的标题压根不进候选，于是「补的正例」命中仍是 0。教训一：**先把命中基准跑出来再写断言**（本轮用一段独立脚本打印每条夹具的分数与 `op_schema`，确认 > 0 才落到测试里）。教训二：**命中数按实现的真实口径算，不按直觉算**——#69 的 `"marker"` 天然出现两处（`"required": ["target", "marker"]` 的表元素 + 独立的 `"marker"` 说明键），写成「应为 0 / 1」会把正确实现打红，基准是 2。教训三：#70/#71/#72 三条否定合并成一条 `assert (narrow, wide) == ([0,0,0], [1,1,1])`，变异面必须逐 op 独立（`_ALLOWED_BY_TYPE` 按类型摘一个 op、`_allowed_ops_for` 摘掉表边界过滤），才能证明三个位置**各自**有牙齿而不是共享一次红。
+第六批（CH-515）立出**判据归属**这条纪律：#44/#45/#46 三条否定所在的测试里，本来就站着更强的同夹具判据（CH-501 的 `_input_keys` 异源恒等式、精确条目数 7、精确拟新号 `B-46`），变异一跑，红永远落在那几条老断言上——补上去的成对判据**根本没被执行到**，看起来"批次全绿"却拿不到归属证据。修法不是删掉老判据，而是**把成对判据排到它们之前**（`#44/#45` 提到 `assert ident["ok"]` 前、`#46` 提到 `hr["b_draft"]` 前），M-a/M-b 随即落在新行 257、M-c 落在新行 287。第二个收获是补位方向本身：恒等式与精确条目数只看得到「不该出项的记录漏进来」，看不到「该出项的记录压根不出项」——两者在单夹具上都可能是 0，所以放行轮（把 `c.pdf` 两条记录改回 `status="ok"`、其余输入一字不动）才是这条否定的另一半：两个键必须各命中 1、条目账必须 7→9，M-a2/M-b2（在 `collect` 里按 kind/rule 名单跳过这两个键）只有补位之后才会红。#47 沿用 CH-514 的教训一，先把 `W={'impact':0.6,'frequency':0.4}` 与 `score_item(1,0)=0.6 / score_item(0,1)=0.4` 跑出来再写断言，`fixability` 命中 0 与「两维各自单独打满仍落出严格介于 0 与 1 的分」命中 2 进同一条消息。第三个收获是**对照变异**：另设一条「`b_rows` 锚点失效返回 `{}`」的变异没有落在本批新判据上，而是被既有断言先抓住——line 233 打 `ValueError: §12.7 锚点缺失：解析不到任何 | B-nn | 行`，另有 342/372/520 三条同时红，说明「锚点解析成功再比值」这条 CH-477 立的纪律本身早有牙齿，本批不为它补位、也不把它记成本批的变异证据。六次变异（摘归因层 `status` 过滤 / 摘缺陷层 `status` 过滤 / 跳过 `gate_verdict` 出项 / 跳过 `split_table` 出项 / `b_rows` 改成全文扫描 / `W` 加 `fixability: 0.0`）各自转红，连同对照变异共七次还原后 `tests/qa/prioritize.py` md5 与改前逐字节一致（`855e9291…`）。
 
 ## 红线层优先复核（gate 且无同主语正断言）
 
@@ -97,10 +99,10 @@ sink 类**（`api.py` 用的就是 `RotatingJsonlWriter`）：短字段原样命
 | `tests/test_ch500_round17.py::test_shard_internal_anchor_absent_from_delivered_meta` | 555 | not-in | `leak_extra = list(clean_extra).count("shard")`（**CH-512 已补同主语注入面：注回 `extra_meta` 后 `meta()` 平铺必须命中 1**） |  |
 | `tests/test_ch500_round17.py::test_shard_internal_anchor_absent_from_delivered_meta` | 556 | not-in | `leak_flat = list(res.ir.meta()).count("shard")`（**CH-512 已补同主语注入面**） |  |
 | `tests/test_ch500_round17.py::test_shard_internal_anchor_absent_from_delivered_meta` | 568 | not-in | `leak_hits = list(meta).count("shard")`（**CH-512 已补空 dict 守卫：交付 `shard_count` 必须命中 1**） |  |
-| `tests/test_ch501_qa_auto.py::test_priority_partition_is_exact` | 245 | not-in | `('attribution', 'gate_verdict') not in keys` |  |
-| `tests/test_ch501_qa_auto.py::test_priority_partition_is_exact` | 246 | not-in | `('defect', 'split_table') not in keys` |  |
-| `tests/test_ch501_qa_auto.py::test_priority_partition_is_exact` | 261 | not-in | `'B-99' not in pr.b_rows(_DP)` |  |
-| `tests/test_ch501_qa_auto.py::test_fixability_does_not_downgrade_grade` | 269 | not-in | `'fixability' not in pr.W` |  |
+| `tests/test_ch501_qa_auto.py::test_priority_partition_is_exact` | 257 | not-in | `('attribution', 'gate_verdict') not in keys`（**CH-515 已并入成对判据：把 c.pdf 记录改回 `status="ok"` 的放行轮必须命中 1**） |  |
+| `tests/test_ch501_qa_auto.py::test_priority_partition_is_exact` | 257 | not-in | `('defect', 'split_table') not in keys`（**CH-515 与 #44 同一条 `((0, 0), (1, 1))`；条目账 7→9 另立一数**） |  |
+| `tests/test_ch501_qa_auto.py::test_priority_partition_is_exact` | 287 | not-in | `'B-99' not in pr.b_rows(_DP)`（**CH-515 已补同主语段内面：`b_rows(_DP)` 必须仍含 B-43/B-44/B-45 = 3**） |  |
+| `tests/test_ch501_qa_auto.py::test_fixability_does_not_downgrade_grade` | 311 | not-in | `'fixability' not in pr.W`（**CH-515 已补同主语权重面：`W` 的两维各自单独打满必须落出中间分 = 2**） |  |
 | `tests/test_ch503_docs_panel.py::test_doclist_is_served_by_the_docs_route` | 73 | not-in | `'QSTATE.tasks' not in src.split('async function loadDocs')[1]` |  |
 | `tests/test_ch503_docs_panel.py::test_bare_doc_field_interpolation_is_caught_by_the_scan` | 116 | not-search | `not _BARE_DOC.search(good)` |  |
 | `tests/test_ch503_docs_panel.py::test_docs_empty_state_names_only_the_library_writing_faces` | 245 | not-in | `'save_ir' not in body` |  |
@@ -180,10 +182,10 @@ sink 类**（`api.py` 用的就是 `RotatingJsonlWriter`）：短字段原样命
 | 41 | G | `tests/test_ch500_round17.py::test_shard_internal_anchor_absent_from_delivered_meta` | 555 | not-in | `'shard' not in res.ir.extra_meta` → 注回 `extra_meta` 后须计 1 | CH-512 ✓（干净 0 / 注入 1） |  |
 | 42 | G | `tests/test_ch500_round17.py::test_shard_internal_anchor_absent_from_delivered_meta` | 556 | not-in | `'shard' not in res.ir.meta()` → 注入 `extra_meta` 后经平铺须计 1（平铺失效即红） | CH-512 ✓（干净 0 / 注入 1） |  |
 | 43 | G | `tests/test_ch500_round17.py::test_shard_internal_anchor_absent_from_delivered_meta` | 568 | not-in | `'shard' not in meta` → 同份交付 meta 的 `shard_count` 须计 1（读到空 dict 就红） | CH-512 ✓（shard 0 / shard_count 1） |  |
-| 44 | G | `tests/test_ch501_qa_auto.py::test_priority_partition_is_exact` | 245 | not-in | `('attribution', 'gate_verdict') not in keys` |  |  |
-| 45 | G | `tests/test_ch501_qa_auto.py::test_priority_partition_is_exact` | 246 | not-in | `('defect', 'split_table') not in keys` |  |  |
-| 46 | G | `tests/test_ch501_qa_auto.py::test_priority_partition_is_exact` | 261 | not-in | `'B-99' not in pr.b_rows(_DP)` |  |  |
-| 47 | G | `tests/test_ch501_qa_auto.py::test_fixability_does_not_downgrade_grade` | 269 | not-in | `'fixability' not in pr.W` |  |  |
+| 44 | G | `tests/test_ch501_qa_auto.py::test_priority_partition_is_exact` | 257 | not-in | `('attribution', 'gate_verdict') not in keys` |  | CH-515 ✓ |
+| 45 | G | `tests/test_ch501_qa_auto.py::test_priority_partition_is_exact` | 257 | not-in | `('defect', 'split_table') not in keys` |  | CH-515 ✓ |
+| 46 | G | `tests/test_ch501_qa_auto.py::test_priority_partition_is_exact` | 287 | not-in | `'B-99' not in pr.b_rows(_DP)` |  | CH-515 ✓ |
+| 47 | G | `tests/test_ch501_qa_auto.py::test_fixability_does_not_downgrade_grade` | 311 | not-in | `'fixability' not in pr.W` |  | CH-515 ✓ |
 | 48 | G | `tests/test_ch503_docs_panel.py::test_doclist_is_served_by_the_docs_route` | 73 | not-in | `'QSTATE.tasks' not in src.split('async function loadDocs')[1]` |  |  |
 | 49 | G | `tests/test_ch503_docs_panel.py::test_bare_doc_field_interpolation_is_caught_by_the_scan` | 116 | not-search | `not _BARE_DOC.search(good)` |  |  |
 | 50 | G | `tests/test_ch503_docs_panel.py::test_docs_empty_state_names_only_the_library_writing_faces` | 245 | not-in | `'save_ir' not in body` |  |  |

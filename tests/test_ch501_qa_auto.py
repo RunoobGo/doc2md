@@ -232,6 +232,35 @@ def test_priority_partition_is_exact():
     ev = {"n_ok": 2, "gate_failures": [{"source": "a.pdf", "failed": ["表格列数"]}]}
     out = pr.prioritize(attribution=attribution, defects=defects, trace=tr,
                         eval_summary=ev, dev_plan=_DP)
+    # status=rejected 的记录整条排除：它们的键既不出项，也不改变条目总数。
+    # 同主语对照（B-53 / CH-515 #44–#45）：`status` 过滤失效与「压根没有这类记录」
+    # 给出同一个 0。所以正例只能把 c.pdf 那两条记录改回 `status="ok"`、其余输入一字
+    # 不动，再数同两个键——必须各出 1 项，且条目总数随之 7→9（排除是「少一条」而不是
+    # 「少一层」）。放行轮的恒等式也要成立，否则正例只是撞上了另一条通路。
+    # 本块排在恒等式与精确条目数之前：那两条更强的同夹具判据会把「漏进来」的方向
+    # 先摘走，只有在这里数才有归属。
+    def _flip(status_c: str) -> dict:
+        def rep(recs):
+            return [{**r, "status": status_c} if r["source"] == "c.pdf" else r
+                    for r in recs]
+        return pr.prioritize(attribution={**attribution, "records": rep(attribution["records"])},
+                             defects={**defects, "records": rep(defects["records"])},
+                             trace=tr, eval_summary=ev, dev_plan=_DP)
+
+    out_ok = _flip("ok")
+    pair = (("attribution", "gate_verdict"), ("defect", "split_table"))
+    neg_hits = tuple(sum(1 for i in out["items"] if (i["origin"], i["key"]) == k)
+                     for k in pair)
+    pos_hits = tuple(sum(1 for i in out_ok["items"] if (i["origin"], i["key"]) == k)
+                     for k in pair)
+    assert out_ok["identity"]["ok"], out_ok["identity"]
+    assert (neg_hits, pos_hits) == ((0, 0), (1, 1)), (
+        f"rejected 记录排除判据无感：拒收轮两个键命中 {neg_hits}、放行轮命中 {pos_hits}"
+        f"（应为 (0, 0) / (1, 1)；放行轮为 0 说明 `status` 过滤把该出项的记录也一起摘掉，"
+        f"前两条否定只是空话）")
+    assert (out["identity"]["n_items"], out_ok["identity"]["n_items"]) == (7, 9), (
+        f"拒收排除的条目账不平：拒收轮 {out['identity']['n_items']} 项、"
+        f"放行轮 {out_ok['identity']['n_items']} 项（应为 7 / 9，差 2 = c.pdf 两条记录）")
     ident = out["identity"]
     assert ident["ok"], ident
     # 3 个偏差类型（含残差伪类型）+ 1 条规则 + 2 个 trace 项（FR_P0 / orphans）
@@ -240,15 +269,24 @@ def test_priority_partition_is_exact():
     assert ident["by_input"] == 7, ident
     assert out["origins"] == {"attribution": 3, "defect": 1, "trace": 2, "eval": 1}
     assert sum(out["counts"].values()) == 7
-    # status=rejected 的记录整条排除：它们的键既不出项，也不改变条目总数
-    keys = {(i["origin"], i["key"]) for i in out["items"]}
-    assert ("attribution", "gate_verdict") not in keys, "rejected 归因记录漏进了候选"
-    assert ("defect", "split_table") not in keys, "rejected 缺陷记录漏进了候选"
     # 阻断覆盖：table_split 分数不够 P0，但它是 blocking ⇒ 仍必须 P0，且关联 B-43
     ts = next(i for i in out["items"] if i["key"] == "table_split")
     assert ts["score"] < pr.P0_FLOOR, ts
     assert ts["priority"] == "P0" and ts["blocking"] is True
     assert ts["b_linked"] == "B-43"
+    # §12.8 之后的 B-99 是段外诱饵：只有段内扫描才仍得出 B-46 / b_next=47；
+    # 全文扫描会把它当最大号（B-100）并写进草稿号。
+    # 同主语对照（B-53 / CH-515 #46）：`b_rows` 在标题锚点失效时返回 `{}`，
+    # 「B-99 不在里面」对空表同样成立——所以正例必须数同一个 `b_rows(_DP)` 里
+    # 段内的 B-43/B-44/B-45：三个都在（3）才证明段内扫描是活的，那个 0 才是观测。
+    # 本块排在拟新号断言之前：段外诱饵一旦漏进最大号，`b_draft` 会先替它红，
+    # 归属就落到不了这条判据上。
+    rows = pr.b_rows(_DP)
+    out_hits = sum(1 for b in ("B-99",) if b in rows)
+    in_hits = sum(1 for b in ("B-43", "B-44", "B-45") if b in rows)
+    assert (out_hits, in_hits) == (0, 3), (
+        f"b_rows 段内锚定判据无感：段外诱饵命中 {out_hits}、段内三行命中 {in_hits}"
+        f"（应为 0 / 3；段内为 0 说明 §12.7 压根没扫到行，前一条否定只是空表恒真）")
     # 拟新号只给「非本机可自证且未登记」的项：B-43 已登记 ⇒ 不占新号；
     # heading_residual 是 human 且无关联 ⇒ 拿到 _DP 最大号 +1 的草稿号
     assert ts["b_draft"] == ""
@@ -256,9 +294,6 @@ def test_priority_partition_is_exact():
     assert hr["disposition"] == "human" and hr["b_linked"] == "", hr
     assert hr["b_draft"] == "B-46", hr
     assert out["b_next"] == 47
-    # §12.8 之后的 B-99 是段外诱饵：只有段内扫描才仍得出 B-46 / b_next=47；
-    # 全文扫描会把它当最大号（B-100）并写进草稿号。
-    assert "B-99" not in pr.b_rows(_DP), "b_rows 扫出了 §12.7 段外的 B 行——锚点被弱化"
 
 
 @pytest.mark.gate
@@ -266,7 +301,17 @@ def test_fixability_does_not_downgrade_grade():
     """第十七轮纪律：分档不看修复成本——成本只改同档内的顺序与处置路径。"""
     pr = _load("prioritize")
     assert abs(sum(pr.W.values()) - 1.0) < 1e-9, pr.W
-    assert "fixability" not in pr.W
+    # 同主语对照（B-53 / CH-515 #47）：权重表若是空的（或只剩一个键），
+    # 「fixability 不在表里」同样成立——那条否定就只是空表恒真。正例数的是同一张表里
+    # **真实参与算分**的键：把 impact / frequency 各自单独打满、另一维归零，两次都必须
+    # 落出严格介于 0 与 1 之间的分（0.6 / 0.4），证明两个权重都是活的。
+    zero = sum(1 for k in ("fixability",) if k in pr.W)
+    live = sum(1 for v in (pr.score_item(1.0, 0.0), pr.score_item(0.0, 1.0))
+               if 0.0 < v < 1.0)
+    assert (zero, live) == (0, 2), (
+        f"权重表判据无感：fixability 命中 {zero} 个键、单维打满仍落出中间分的权重 {live} 个"
+        f"（应为 0 / 2；live 不足 2 说明 `W` 残缺或压根不进 `score_item`，"
+        f"前一条否定只是空表恒真）")
     hard = pr.make_item("attribution", "k", "t", "-", 1.0, 1.0, pr.FIX_EXTERNAL,
                         "loss", False, 0.5, 3, "ev", "")
     easy = pr.make_item("attribution", "k", "t", "-", 1.0, 1.0, pr.FIX_LOCAL,
