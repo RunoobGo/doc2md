@@ -185,9 +185,19 @@ def test_deletion_audit_survives_a_corrupt_cascade_row(api_client):
     r = client.get("/audit/deletions", headers={"X-Doc2md-Token": tokens["admin"]})
     assert r.status_code == 200, (r.status_code, r.get_data(as_text=True)[:300])
     rows = {d["doc_id"]: d for d in r.get_json()["deletions"]}
+    # CH-518 成对判据（B-53 #58）：「原始列名不得漏进响应体」前置到降级值判据之前。
+    # 净化写成 `d.get("cascade_json")`（漏出原键）或把整行抹平（只剩 `cascade`）时，
+    # 后面两条 `["cascade"]` 判据会先以 KeyError 抢占红——成对判据排在前才有归属证据
+    # （CH-515 的判据归属纪律）。命中基准取同一容器里的 6 个公开键：否定面读的是集合
+    # 成员，正例就必须数同一个集合里必须存在的成员数，两个数进同一条失败消息。
+    pub = ("doc_id", "source_key", "actor", "ts", "kind", "cascade")
+    leak = list(rows["d-bad"]).count("cascade_json")
+    pub_hits = sum(1 for k in pub if k in rows["d-bad"])
+    assert (leak, pub_hits) == (0, len(pub)), (
+        f"响应体净化判据无感：原始列名漏出 {leak} 处、公开键命中 {pub_hits}/{len(pub)} 处"
+        f"（应为 0 / {len(pub)}；公开键数低于基准说明容器被抹平，那条否定就在空壳上恒真）")
     assert rows["d-bad"]["cascade"] == {}, rows["d-bad"]
     assert rows["d-ok"]["cascade"] == {"blocks": 3}, rows["d-ok"]
-    assert "cascade_json" not in rows["d-bad"], "原始列名不该漏进响应体"
 
 
 # --- R19-ARCH-6：close 只清本线程槽位 ------------------------------------------
@@ -284,6 +294,17 @@ def test_matrix_has_no_dead_action():
     """`MATRIX` 的键与实际用到的 action 字面量必须**双向**相等。"""
     used = _used_actions()
     assert used, "一个 action 字面量都没扫到——AST 口径漂移即视为红线失效"
+    # CH-518 成对判据（B-53 #59）：死键复活的字面判据前置到双向相等之前——把 `rerun`
+    # 加回 `MATRIX` 时 `dead` 同样会红，红落在本条才算这条否定自己的牙齿（CH-515 的
+    # 判据归属纪律）。命中基准取**同一容器**里真正承载重跑的键：产品的重跑路径是
+    # `POST /jobs` 带 force → `submit_job`（本轮 docstring 的错就是把「重跑」记成
+    # `rerun`），该键一旦不在矩阵里，所有作业提交面一律 403。
+    dead_key = list(auth.MATRIX).count("rerun")
+    rerun_face = list(auth.MATRIX).count("submit_job")
+    assert (dead_key, rerun_face) == (0, 1), (
+        f"死键判据无感：`rerun` 在矩阵里命中 {dead_key} 处、`submit_job` 命中 {rerun_face} 处"
+        "（应为 0 / 1；`submit_job` 为 0 说明矩阵里根本没有重跑的真实口径，"
+        "后一条字面否定就在空集合上恒真）")
     dead = set(auth.MATRIX) - used
     assert not dead, (
         f"权限矩阵里的死键 {sorted(dead)}：没有任何 `need(...)` / `auth.check(...)` 会查到它。"
@@ -293,7 +314,6 @@ def test_matrix_has_no_dead_action():
     assert not undeclared, (
         f"代码里用到的 action {sorted(undeclared)} 不在矩阵里——`check` 会一律 403，"
         "端点等于永久不可用")
-    assert "rerun" not in auth.MATRIX, "R19-API-5 删掉的死键复活了"
 
 
 def test_unknown_action_is_still_forbidden(store):
@@ -372,9 +392,16 @@ def test_gui3_duration_column_has_one_origin():
     durs = re.findall(r"dur = fmtDur\((.+?)\);", fn)
     assert len(durs) == 2, f"「耗时」应有 running 与终态两个赋值点：{durs}"
     assert durs[0] == "now - started", f"running 行的耗时口径被顺手改掉：{durs[0]}"
-    assert "finished - created" not in durs[1], (
-        f"终态行的「耗时」仍从 created 起算（{durs[1]}），与「排队等待」列重复计同一段时间")
-    assert "started" in durs[1], f"终态耗时应从认领时刻起算：{durs[1]}"
+    # CH-518 成对判据（B-53 #60）：终态那支的否定与「从认领时刻起算」的同主语命中并进
+    # 同一条消息。只写前一条时，`finished - (started || created)` 被换成一个既不含
+    # `finished - created` 也不含 `started` 的写法（如 `finished - ts`）同样全绿——
+    # 那一刻判据看见的不是「口径对了」，而是「这一支换了别的说法」。
+    stale = durs[1].count("finished - created")
+    claim = durs[1].count("started")
+    assert (stale, claim) == (0, 1), (
+        f"终态耗时口径判据无感：`finished - created` 命中 {stale} 处、认领时刻 `started` "
+        f"命中 {claim} 处（应为 0 / 1；后者为 0 说明这一支已不从认领起算，"
+        "前一条否定只是看见了一个别的写法）")
 
 
 def test_gui4_token_input_is_debounced_and_deduped():
@@ -495,7 +522,15 @@ def test_content_type_error_names_the_field(api_client):
                     content_type="application/x-www-form-urlencoded", headers=h)
     assert r.status_code == 400, (r.status_code, r.get_data(as_text=True)[:300])
     body = r.get_json()
+    # CH-518 成对判据（B-53 #61）：「响应体不得出现 token」前置到三条契约键判据之前，
+    # 并把命中基准取成**同一容器**里附录 C 承诺的 `code` / `message` / `detail` 三键。
+    # 前面那三条读的是具体值，响应面整个塌成空 dict 时它们先以 KeyError 抢占红，本条
+    # 否定排在其后就没有归属；两个数同消息才分得开「不回显凭据」与「看不见响应体」。
+    leak = list(body).count("token")
+    faces = sum(1 for k in ("code", "message", "detail") if k in body)
+    assert (leak, faces) == (0, 3), (
+        f"错误响应体口径判据无感：`token` 漏出 {leak} 处、契约键命中 {faces}/3 处"
+        "（应为 0 / 3；契约键不足 3 说明响应面本身塌了，那条否定就在空壳上恒真）")
     assert body["code"] == "E4001", body
     assert body.get("detail", {}).get("field") == "Content-Type", body
     assert body["detail"].get("got") == "application/x-www-form-urlencoded", body["detail"]
-    assert "token" not in body, body

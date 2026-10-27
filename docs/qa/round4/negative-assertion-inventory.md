@@ -49,7 +49,8 @@
 | CH-513（第四批） | `tests/test_ch476_fixes.py` | 6（全为 gate：#9/#10/#11/#12/#13/#15） | 96 |
 | CH-514（第五批） | `tests/test_llm_p0_contract.py` | 5（全为 gate：#68/#69/#70/#71/#72） | 91 |
 | CH-515（第六批） | `tests/test_ch501_qa_auto.py` | 4（全为 gate：#44/#45/#46/#47） | **87** |
-| CH-516（第七批） | `tests/test_ch504_qa_caliber.py` | 4（全为 gate：#54/#55/#56/#57） | **83** |
+| CH-516（第七批） | `tests/test_ch504_qa_caliber.py` | 4（全为 gate：#54/#55/#56/#57） | 83 |
+| CH-518（第八批） | `tests/test_ch504_service_faces.py` | 4（全为 gate：#58/#59/#60/#61） | **79** |
 
 首批实测出一条**判据本身失真**的形态：#89 原口径 `json.dumps(body)` 用默认
 `ensure_ascii=True`，中文查询被写成 `\uXXXX`，`'例外' not in ...` 对任何中文查询
@@ -70,6 +71,24 @@ sink 类**（`api.py` 用的就是 `RotatingJsonlWriter`）：短字段原样命
 第六批（CH-515）立出**判据归属**这条纪律：#44/#45/#46 三条否定所在的测试里，本来就站着更强的同夹具判据（CH-501 的 `_input_keys` 异源恒等式、精确条目数 7、精确拟新号 `B-46`），变异一跑，红永远落在那几条老断言上——补上去的成对判据**根本没被执行到**，看起来"批次全绿"却拿不到归属证据。修法不是删掉老判据，而是**把成对判据排到它们之前**（`#44/#45` 提到 `assert ident["ok"]` 前、`#46` 提到 `hr["b_draft"]` 前），M-a/M-b 随即落在新行 257、M-c 落在新行 287。第二个收获是补位方向本身：恒等式与精确条目数只看得到「不该出项的记录漏进来」，看不到「该出项的记录压根不出项」——两者在单夹具上都可能是 0，所以放行轮（把 `c.pdf` 两条记录改回 `status="ok"`、其余输入一字不动）才是这条否定的另一半：两个键必须各命中 1、条目账必须 7→9，M-a2/M-b2（在 `collect` 里按 kind/rule 名单跳过这两个键）只有补位之后才会红。#47 沿用 CH-514 的教训一，先把 `W={'impact':0.6,'frequency':0.4}` 与 `score_item(1,0)=0.6 / score_item(0,1)=0.4` 跑出来再写断言，`fixability` 命中 0 与「两维各自单独打满仍落出严格介于 0 与 1 的分」命中 2 进同一条消息。第三个收获是**对照变异**：另设一条「`b_rows` 锚点失效返回 `{}`」的变异没有落在本批新判据上，而是被既有断言先抓住——line 233 打 `ValueError: §12.7 锚点缺失：解析不到任何 | B-nn | 行`，另有 342/372/520 三条同时红，说明「锚点解析成功再比值」这条 CH-477 立的纪律本身早有牙齿，本批不为它补位、也不把它记成本批的变异证据。六次变异（摘归因层 `status` 过滤 / 摘缺陷层 `status` 过滤 / 跳过 `gate_verdict` 出项 / 跳过 `split_table` 出项 / `b_rows` 改成全文扫描 / `W` 加 `fixability: 0.0`）各自转红，连同对照变异共七次还原后 `tests/qa/prioritize.py` md5 与改前逐字节一致（`855e9291…`）。
 
 第七批（CH-516）回到**空集恒真**这个最早的头号形态，并把它钉成两个可复算的具体缺陷面：`tests/test_ch504_qa_caliber.py`（CH-504 的 R19-QA-1/2/3 口径红线）四条否定里，两条的观测对象是**派生容器**——`CONTRACT_RULES = {r for r, c in LINT_CLASS.items() if c == "contract"}`，派生一断（变异置空集）`'MD040' not in CONTRACT_RULES` 依然全绿；另两条的观测对象是**证据串里的一个专有名词**——把 `MD040_DIALECT_REASON` 从串里摘掉，`'契约' not in ev` 依然全绿，因为一条不引任何依据的串本来就长这样。于是本批的命中基准取法明确为：**否定面读集合成员时，命中基准取「同一容器里必须存在的成员数」；读专有名词时，取「同一串里必须存在的另一个名词」**，两者都留在同一个容器/同一条串上，绝不另找一个不相干的键凑数。#57 沿用 CH-515 的判据归属：成对判据前置到精确串判据 `"另有 2 种未列" in ev` 之前，M-5（截断告知恒空）与 M-6（告知恒发）两个相反方向的变异才都落在新行 137——只写「恰好 5 种不得出现截断标记」这一半，M-5 是全绿的，看得见它的其实是排在它前面的精确串判据。七次变异（`MD040` 改回 `contract` / `CONTRACT_RULES` 置空 / 证据串写回「契约类」/ 证据串摘掉改档理由 / `duplicate_anchor` 定性从句换回已作废成因 / `more` 恒空 / `more` 恒发）各自转红，还原后 `tests/qa/mdscore.py`（`3a4b0f9e…`）与 `tests/qa/defect_scan.py`（`003ee557…`）md5 与改前逐字节一致。
+
+第八批（CH-518）的四条都在**服务面/权限面**，命中基准全部取在**同一个容器**上，并实测出正例的第三种
+取法：**当否定面读的是「原始列名/内部键有没有漏进响应体」，命中基准取同一容器里契约承诺的公开键数**——
+`/audit/deletions` 的行由 `dict(r)` 再 `pop("cascade_json")` 净化而来，变异把 `pop` 换成 `get` 时漏出 1 处
+（判据打 `(1, 6)` 红），而变异从 `SELECT` 里摘掉一个公开键（`actor`）时公开键掉到 5/6（`(0, 5)` 红）——
+后者是「响应面少了一列」的真实退化形态，只写「原列名不得出现」的话它全绿。#59 用的是**同容器的
+另一个键**：`rerun` 是 CH-504 删掉的死键，产品真正的重跑口径是 `POST /jobs` 带 force → `submit_job`，
+于是判据钉 `(0, 1)`——加回 `rerun` 打 `(1, 1)`、摘掉 `submit_job` 打 `(0, 0)`，后者同时说明「矩阵里压根
+没有重跑面」时前一条否定只是在空集合上恒真。#60 是 CH-516「读专有名词就取同一条串里的另一个名词」的
+继续：`durs[1]` 里 `finished - created` 与 `started` 并进一条 `(0, 1)`，变异成 `finished - ts` 时两个数
+打 `(0, 0)` 才红——原来那条「不含 finished - created」对这种写法完全无感。#61 把成对判据**前置**到
+`body["code"]` / `body["detail"]` 三条值判据之前：`errors.to_body()` 丢掉 `detail` 键时那三条会先红，
+前置后红落在新行 531 的 `(0, 2)` 上。本轮共跑九次变异（`pop`→`get` / SELECT 摘 `actor` / 加回
+`rerun` / 摘 `submit_job` / 耗时退回 `finished - created` / 耗时换成 `finished - ts` / `to_body` 回显
+`token` / `to_body` 丢 `detail` 八条落在本批新判据上，各自转红；另设「降级分支把整行抹平」作对照——它的红
+落在测试自己的行收集表达式（`{d["doc_id"]: ...}` 抛 KeyError）而非新判据，故不计入本批牙齿证据）。全部
+还原后 `doc2md/api.py`（`1657445f…`）、`doc2md/auth.py`、`doc2md/errors.py`、
+`doc2md/static/editor.html` 四个文件 md5 与改前逐字节一致。
 
 ## 红线层优先复核（gate 且无同主语正断言）
 
@@ -125,10 +144,10 @@ sink 类**（`api.py` 用的就是 `RotatingJsonlWriter`）：短字段原样命
 | `tests/test_ch504_qa_caliber.py::test_fence_no_lang_rule_still_fires_and_cites_dialect` | 91 | not-in | `'契约' not in ev`（**CH-516 已补同主语理由面：`MD040_DIALECT_REASON` 在同一证据串必须计 1，判据 `(0, 1)`**） |  |
 | `tests/test_ch504_qa_caliber.py::test_duplicate_anchor_evidence_reports_multiplicity_not_a_retracted_cause` | 120 | not-in | `'TOC 缓存结果被当正文标题' not in ev`（**CH-516 已补同主语的「不断言成因」限定面：必须计 1，判据 `(0, 1)`**） |  |
 | `tests/test_ch504_qa_caliber.py::test_duplicate_anchor_truncation_is_announced` | 137 | not-in | `'另有' not in ds.r_duplicate_anchor('', blocks5, None)[0].evidence`（**CH-516 已前置为成对判据：7 种面必须 1、恰好 5 种面必须 0，判据 `(1, 0)`**） |  |
-| `tests/test_ch504_service_faces.py::test_deletion_audit_survives_a_corrupt_cascade_row` | 190 | not-in | `'cascade_json' not in rows['d-bad']` |  |
-| `tests/test_ch504_service_faces.py::test_matrix_has_no_dead_action` | 296 | not-in | `'rerun' not in auth.MATRIX` |  |
-| `tests/test_ch504_service_faces.py::test_gui3_duration_column_has_one_origin` | 375 | not-in | `'finished - created' not in durs[1]` |  |
-| `tests/test_ch504_service_faces.py::test_content_type_error_names_the_field` | 501 | not-in | `'token' not in body` |  |
+| `tests/test_ch504_service_faces.py::test_deletion_audit_survives_a_corrupt_cascade_row` | 196 | not-in | `'cascade_json' not in rows['d-bad']`（**CH-518 已补同容器公开键面：`doc_id`/`source_key`/`actor`/`ts`/`kind`/`cascade` 必须计满 6，判据 `(0, 6)`**） |  |
+| `tests/test_ch504_service_faces.py::test_matrix_has_no_dead_action` | 304 | not-in | `'rerun' not in auth.MATRIX`（**CH-518 已补同矩阵的真实重跑键面：`submit_job` 必须计 1，判据 `(0, 1)`，并前置到 `dead`/`undeclared` 之前**） |  |
+| `tests/test_ch504_service_faces.py::test_gui3_duration_column_has_one_origin` | 401 | not-in | `'finished - created' not in durs[1]`（**CH-518 已并入同支认领时刻面：`started` 在同一支必须计 1，判据 `(0, 1)`**） |  |
+| `tests/test_ch504_service_faces.py::test_content_type_error_names_the_field` | 531 | not-in | `'token' not in body`（**CH-518 已补同容器契约键面：`code`/`message`/`detail` 必须计满 3，判据 `(0, 3)`，并前置到三条值判据之前**） |  |
 | `tests/test_ch505_contract_sync.py::_parse_section` | 110 | not-in | `key not in rows` | 是 |
 | `tests/test_ch505_contract_sync.py::test_appendix_c_parser_has_teeth` | 153 | not-in | `'409' not in rows['POST', '/jobs']['errors']` |  |
 | `tests/test_ch505_contract_sync.py::test_appendix_c_parser_has_teeth` | 154 | not-in | `'422' not in rows['POST', '/jobs']['errors']` |  |
@@ -208,10 +227,10 @@ sink 类**（`api.py` 用的就是 `RotatingJsonlWriter`）：短字段原样命
 | 55 | G | `tests/test_ch504_qa_caliber.py::test_fence_no_lang_rule_still_fires_and_cites_dialect` | 91 | not-in | `'契约' not in ev` |  | CH-516 ✓ |
 | 56 | G | `tests/test_ch504_qa_caliber.py::test_duplicate_anchor_evidence_reports_multiplicity_not_a_retracted_cause` | 120 | not-in | `'TOC 缓存结果被当正文标题' not in ev` |  | CH-516 ✓ |
 | 57 | G | `tests/test_ch504_qa_caliber.py::test_duplicate_anchor_truncation_is_announced` | 137 | not-in | `'另有' not in ds.r_duplicate_anchor('', blocks5, None)[0].evidence` |  | CH-516 ✓ |
-| 58 | G | `tests/test_ch504_service_faces.py::test_deletion_audit_survives_a_corrupt_cascade_row` | 190 | not-in | `'cascade_json' not in rows['d-bad']` |  |  |
-| 59 | G | `tests/test_ch504_service_faces.py::test_matrix_has_no_dead_action` | 296 | not-in | `'rerun' not in auth.MATRIX` |  |  |
-| 60 | G | `tests/test_ch504_service_faces.py::test_gui3_duration_column_has_one_origin` | 375 | not-in | `'finished - created' not in durs[1]` |  |  |
-| 61 | G | `tests/test_ch504_service_faces.py::test_content_type_error_names_the_field` | 501 | not-in | `'token' not in body` |  |  |
+| 58 | G | `tests/test_ch504_service_faces.py::test_deletion_audit_survives_a_corrupt_cascade_row` | 196 | not-in | `'cascade_json' not in rows['d-bad']` → 同一行的 6 个公开键必须计满 |  | CH-518 ✓（cascade_json 0 / 公开键 6） |
+| 59 | G | `tests/test_ch504_service_faces.py::test_matrix_has_no_dead_action` | 304 | not-in | `'rerun' not in auth.MATRIX` → 同矩阵的 `submit_job` 必须计 1 |  | CH-518 ✓（rerun 0 / submit_job 1） |
+| 60 | G | `tests/test_ch504_service_faces.py::test_gui3_duration_column_has_one_origin` | 401 | not-in | `'finished - created' not in durs[1]` → 同一支的 `started` 必须计 1 |  | CH-518 ✓（finished-created 0 / started 1） |
+| 61 | G | `tests/test_ch504_service_faces.py::test_content_type_error_names_the_field` | 531 | not-in | `'token' not in body` → 同一容器的 `code`/`message`/`detail` 必须计满 3 |  | CH-518 ✓（token 0 / 契约键 3） |
 | 62 | G | `tests/test_ch505_contract_sync.py::_parse_section` | 110 | not-in | `key not in rows` |  | 是 |
 | 63 | G | `tests/test_ch505_contract_sync.py::test_appendix_c_parser_has_teeth` | 153 | not-in | `'409' not in rows['POST', '/jobs']['errors']` |  |  |
 | 64 | G | `tests/test_ch505_contract_sync.py::test_appendix_c_parser_has_teeth` | 154 | not-in | `'422' not in rows['POST', '/jobs']['errors']` |  |  |
