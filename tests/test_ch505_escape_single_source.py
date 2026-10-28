@@ -17,6 +17,7 @@ S3 折实体（`entities=True`）。本文件钉四件事：
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -129,15 +130,31 @@ def test_pdf_literal_br_stays_literal():
 
 
 # ------------------------------------------------ ④ 单一来源（静态红线）
+@pytest.mark.gate
 def test_escape_implementations_have_a_single_source():
     """实体折转 / translate 表只许在 escapes.py；消费层不得自建副本。"""
     owners = sorted(p.name for p in PIPELINE.glob("*.py")
                     if "&amp;" in p.read_text(encoding="utf-8"))
     assert owners == ["escapes.py"], f"实体折转出现第二处实现：{owners}"
-    for name in ("s1_parse.py", "s3_structure.py", "s4_render.py"):
+    # 命中基准（B-53 第十六批）：否定面读「自建指纹」，正例面就在同一份源码里数
+    # 「对 escapes 的消费成员」——空壳文件或别名绕道会让后者归零；注释行不参与计数。
+    consumer_uses = {
+        "s1_parse.py": ("escape_entities",),
+        "s3_structure.py": ("escape_cell_markdown", "escape_entities"),
+        "s4_render.py": ("INLINE_ESCAPE", "escape_inline"),
+    }
+    for name, required in consumer_uses.items():
         text = (PIPELINE / name).read_text(encoding="utf-8")
-        assert "str.maketrans" not in text, f"{name} 自建 translate 表"
-        assert "&lt;" not in text, f"{name} 自建实体替换链"
+        code = [ln for ln in text.splitlines()
+                if not ln.lstrip().startswith(("#", "import ", "from "))]
+        hits = {}
+        for member in required:
+            pat = re.compile(rf"(?<![A-Za-z0-9_]){re.escape(member)}(?![A-Za-z0-9_])")
+            hits[member] = sum(1 for ln in code if pat.search(ln))
+        maptrans, lt = text.count("str.maketrans"), text.count("&lt;")
+        assert (maptrans, lt, [m for m in required if not hits[m]]) == (0, 0, []), (
+            f"{name} 单一来源判据无观测面：自建指纹 str.maketrans {maptrans} 处 / "
+            f"'&lt;' {lt} 处；同文件消费成员命中 {hits}（需 {list(required)} 全 > 0）")
     assert CELL_ESCAPE_TABLE is not None  # 表由 escapes 统一构造（导入面钉住）
 
 

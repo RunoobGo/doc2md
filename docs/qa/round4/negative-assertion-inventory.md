@@ -58,6 +58,7 @@
 | CH-523（第十三批） | `tests/test_ch505_contract_sync.py` | 3（全为 gate：#62/#63/#64） | **63** |
 | CH-524（第十四批） | `tests/test_ch475_fixes.py` | 2（全为 gate：#6/#8） | **61** |
 | CH-525（第十五批） | `tests/test_ch478_fixes.py` | 3（全为 gate：#17/#18/#19） | **58** |
+| CH-526（第十六批） | `tests/test_ch505_escape_single_source.py` | 2（全为 gate：#65/#66） | **56** |
 
 首批实测出一条**判据本身失真**的形态：#89 原口径 `json.dumps(body)` 用默认
 `ensure_ascii=True`，中文查询被写成 `\uXXXX`，`'例外' not in ...` 对任何中文查询
@@ -211,6 +212,23 @@ M-e2（正文第 3 段整行丢弃）落新行 70 的 `([], 13, 11)`；另设对
 md5 与改前逐字节一致：零产品改动，`PIPELINE_VERSION` 保持 2.22.0，gate 仍 **735**、全量仍 **1575**、
 覆盖率仍 **7,942 stmts / 678 miss**。剩余 **58** 条。
 
+第十六批（CH-526）两条在**同一测试函数的循环内**，旧写法逐文件断言「`str.maketrans` 不在源码里」「`&lt;` 不在
+源码里」，只否定了「自建实现」，却没有东西证明这三个消费文件**确实在消费 escapes 的共享实现**——把某个文件搬空成
+空壳，两条否定照样全绿。补位按 CH-521/CH-522 的「同容器必存成员数」取基准：`s1_parse.py` → `escape_entities`、
+`s3_structure.py` → `escape_cell_markdown` / `escape_entities`、`s4_render.py` → `INLINE_ESCAPE` / `escape_inline`，
+判据 `(str.maketrans 命中, '&lt;' 命中, 缺失消费成员列表) == (0, 0, [])`，成员用词边界正则在同一份源码里数，并
+**排除注释行与 import 行**——否则 import 行自己就把成员计满（CH-522「正例成员不得取自注释」在这里落到「不给
+import 行记账」）。本批实测出**正例面的牙齿要用行为等价变异来证明**：三条正例面变异 M-c/M-d/M-e 都是「别名导入 +
+调用点改名」，产物字节与全部功能判据不变，因此红只能落在新判据上；若用「删掉调用点」这类会改行为的变异，红会先
+被同文件的 `test_default_cell_path_matches_legacy_byte_for_byte` 抢走（判据归属）。变异：M-a（`s1_parse` 注入本地
+`str.maketrans` 表）落新行 155 的「str.maketrans 1 处」；M-b（`s3_structure` 注入字面 `&lt;`）落「'&lt;' 1 处」；
+M-c（`s1_parse` 别名导入 + 调用点改名）落 `{'escape_entities': 0}`；M-d（`s4_render` 两个名字全走别名）落两个成员
+归零；M-e（`s3_structure` 只把 `escape_cell_markdown` 走别名）落单成员归零；另设对照 C-1（`s1_parse` 加一行含
+`escape_entities` 的注释，保持全绿——证明注释行不参与计数）。还原后 `s1_parse.py`（`e890ff03…`）、
+`s3_structure.py`（`1f04782d…`）与 `s4_render.py`（`d59bc27d…`）md5 与改前逐字节一致：零产品改动，
+`PIPELINE_VERSION` 保持 2.22.0，gate 仍 **735**、全量仍 **1575**、覆盖率仍 **7,942 stmts / 678 miss**。
+剩余 **56** 条。
+
 ## 红线层优先复核（gate 且无同主语正断言）
 
 | 文件::测试 | 行 | 形态 | 被否定表达式 | 控制流内 |
@@ -272,8 +290,8 @@ md5 与改前逐字节一致：零产品改动，`PIPELINE_VERSION` 保持 2.22.
 | `tests/test_ch505_contract_sync.py::_parse_section` | 127 | not-in | `key in rows`（**CH-523 已补同容器双计数面：重复登记列表必须为空、解析键数与扫描端点行数都必须 == 契约常量 21，判据 `([], 21, 21)`**） | 是 |
 | `tests/test_ch505_contract_sync.py::test_appendix_c_parser_has_teeth` | 168 | not-in | `'409' not in _errs`（**CH-523 已并入同容器必存错误码面：`{400,404,413,415,503}` 命中 5/5，判据 `(5, False, False)`**） |  |
 | `tests/test_ch505_contract_sync.py::test_appendix_c_parser_has_teeth` | 168 | not-in | `'422' not in _errs`（**CH-523 已并入同一判据**） |  |
-| `tests/test_ch505_escape_single_source.py::test_escape_implementations_have_a_single_source` | 139 | not-in | `'str.maketrans' not in text` | 是 |
-| `tests/test_ch505_escape_single_source.py::test_escape_implementations_have_a_single_source` | 140 | not-in | `'&lt;' not in text` | 是 |
+| `tests/test_ch505_escape_single_source.py::test_escape_implementations_have_a_single_source` | 155 | not-in | `'str.maketrans' not in text`（**CH-526 已并入成对判据：自建指纹 0 + 同文件消费成员全部 > 0，判据 `(0, 0, [])`**） | 是 |
+| `tests/test_ch505_escape_single_source.py::test_escape_implementations_have_a_single_source` | 155 | not-in | `'&lt;' not in text`（**CH-526 已并入同一判据；消费成员按文件钉：s1 `escape_entities` / s3 `escape_cell_markdown`+`escape_entities` / s4 `INLINE_ESCAPE`+`escape_inline`**） | 是 |
 | `tests/test_llm_p0_contract.py::test_allowed_ops_hides_table_boundary_for_far_paragraph` | 120 | not-in | `far_hits/near_ops.count("mark_table_boundary")`（**CH-514 已补同主语正断言**：紧邻表的段落命中 1，判据 `(0, 1)`） |  |
 | `tests/test_llm_p0_contract.py::test_payload_carries_v25_schema_and_contract` | 198 | not-in | `clean_hits = user.count('"marker"')`（**CH-514 已补同主语正断言**：含 list_item 候选批命中 2，判据 `(0, 2)`） |  |
 | `tests/test_llm_p0_contract.py::test_payload_op_schema_is_narrowed_to_batch_candidates` | 231 | not-in | `narrow_hits = [only_para.count(op) …]`（**CH-514 已补同主语正断言**：标题+列表项+紧邻表段落同批 `wide_hits == [1, 1, 1]`，三行合判据） |  |
@@ -355,8 +373,8 @@ md5 与改前逐字节一致：零产品改动，`PIPELINE_VERSION` 保持 2.22.
 | 62 | G | `tests/test_ch505_contract_sync.py::_parse_section` | 127 | not-in | `key in rows`（**CH-523 已补同容器双计数面：`(dups, len(rows), n_lines) == ([], 21, 21)`**） |  | 是 |
 | 63 | G | `tests/test_ch505_contract_sync.py::test_appendix_c_parser_has_teeth` | 168 | not-in | `'409' not in _errs`（**CH-523 已并入同容器必存错误码面 5/5；判据 `(5, False, False)`**） |  |  |
 | 64 | G | `tests/test_ch505_contract_sync.py::test_appendix_c_parser_has_teeth` | 168 | not-in | `'422' not in _errs`（**CH-523 已并入同一判据**） |  |  |
-| 65 | G | `tests/test_ch505_escape_single_source.py::test_escape_implementations_have_a_single_source` | 139 | not-in | `'str.maketrans' not in text` |  | 是 |
-| 66 | G | `tests/test_ch505_escape_single_source.py::test_escape_implementations_have_a_single_source` | 140 | not-in | `'&lt;' not in text` |  | 是 |
+| 65 | G | `tests/test_ch505_escape_single_source.py::test_escape_implementations_have_a_single_source` | 155 | not-in | `'str.maketrans' not in text` → `assert (maptrans, lt, [缺失消费成员]) == (0, 0, [])`（**CH-526 已补同容器消费成员面：三文件各钉必须命中的 escapes 成员**） |  | 是 |
+| 66 | G | `tests/test_ch505_escape_single_source.py::test_escape_implementations_have_a_single_source` | 155 | not-in | `'&lt;' not in text`（**CH-526 已并入同一判据**） |  | 是 |
 | 67 | G | `tests/test_ch505_perms_coverage.py::test_harden_windows_reports_nonzero_exit_with_last_stderr_line` | 156 | not-in | `perms._cache_key(tmp_path) not in perms._HARDENED` | 155 |  |
 | 68 | G | `tests/test_llm_p0_contract.py::test_allowed_ops_hides_table_boundary_for_far_paragraph` | 120 | not-in | `far_hits = far_ops.count("mark_table_boundary")` → `assert (far_hits, near_hits) == (0, 1)` |  | CH-514 ✓ |
 | 69 | G | `tests/test_llm_p0_contract.py::test_payload_carries_v25_schema_and_contract` | 198 | not-in | `clean_hits = user.count('"marker"')` → `assert (clean_hits, marker_hits) == (0, 2)` |  | CH-514 ✓ |
