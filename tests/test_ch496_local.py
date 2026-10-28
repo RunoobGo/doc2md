@@ -239,9 +239,17 @@ def test_g4_rollback_ui_contract():
     assert 'method: "POST"' in src and "/rollback`" in src, "缺少回滚 POST 调用"
     assert "to_revision" in src, "回滚请求必须携带 to_revision"
 
+    # 容器身份面与否定面同条消息：成员命中证明取到的是真函数体（不是空壳切片），
+    # innerHTML 计 0 才是 XSS 红线本身——两个数缺一个，切错容器时否定断言恒真。
+    _members = {"showHistory": ("textContent", "createElement", "appendChild"),
+                "rollbackTo": ("/rollback", "to_revision", "fetch(")}
     for name in ("showHistory", "rollbackTo"):
         body = _function_body(src, name)
-        assert "innerHTML" not in body, f"{name} 不得拼接 innerHTML（G4' XSS 红线）"
+        _hits = sum(m in body for m in _members[name])
+        assert (_hits, body.count("innerHTML")) == (len(_members[name]), 0), (
+            f"{name} 容器判据失准：DOM/回滚成员命中 {_hits}/{len(_members[name])}"
+            f"（缺 {[m for m in _members[name] if m not in body]}），"
+            f"innerHTML 命中 {body.count('innerHTML')} 次（应为 0；G4' XSS 红线）")
     # 列表渲染（唯一写入审计文本的入口）必须用 textContent；rollbackTo 只提交，
     # 成功后复用 showHistory 重绘。
     assert "textContent" in _function_body(src, "showHistory")
@@ -271,7 +279,15 @@ def test_serve_startup_reports_bound_port():
     assert m is not None, "cli.cmd_serve 结构漂移"
     body = m.group(0)
     assert "make_server(" in body and "server.server_port" in body
-    assert "app.run(host=" not in body, "启动行必须使用实际绑定端口，而不是请求端口"
+    # 「先绑定、再报告」的三个成员与「请求端口直跑」的否定同条消息：容器切空时
+    # 只会剩 0/3，读的人立刻知道是切片失准而不是启动行合规。
+    _members = ("make_server(", "server.server_port", "print(")
+    _hits = sum(m in body for m in _members)
+    assert (_hits, body.count("app.run(host=")) == (len(_members), 0), (
+        f"cmd_serve 容器判据失准：绑定/报告成员命中 {_hits}/{len(_members)}"
+        f"（缺 {[m for m in _members if m not in body]}），"
+        f"app.run(host= 命中 {body.count('app.run(host=')} 次（应为 0）"
+        "——启动行必须使用实际绑定端口，而不是请求端口")
 
 
 @pytest.mark.gate
@@ -306,4 +322,12 @@ def test_queue_chip_filter_requests_server_side_status():
     m = re.search(r"b\.onclick = \(\) => \{(.*?)\};", src, re.S)
     assert m is not None, "renderCounts 的 chip 点击处理漂移"
     assert "loadQueue()" in m.group(1), "chip 点击须重新拉取（过滤交给服务端）"
-    assert "renderQueue(QSTATE.tasks)" not in m.group(1), "不得退回纯客户端过滤"
+    # 服务端过滤成员与「退回纯客户端过滤」的否定同条消息：组内命中 < 3 即切片
+    # 取窄（正则失配只剩空串），此时旧的 `not in` 无论产品怎么改都恒真。
+    _members = ("QSTATE.filter = ", "loadQueue()", "(QSTATE.filter === st")
+    _hits = sum(t in m.group(1) for t in _members)
+    assert (_hits, m.group(1).count("renderQueue(QSTATE.tasks)")) == (len(_members), 0), (
+        f"chip 点击容器判据失准：服务端过滤成员命中 {_hits}/{len(_members)}"
+        f"（缺 {[t for t in _members if t not in m.group(1)]}），"
+        f"renderQueue(QSTATE.tasks) 命中 {m.group(1).count('renderQueue(QSTATE.tasks)')} 次"
+        "（应为 0）——不得退回纯客户端过滤")

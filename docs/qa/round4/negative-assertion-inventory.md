@@ -54,6 +54,7 @@
 | CH-519（第九批） | `tests/test_ch473_fixes.py` | 4（全为 gate：#2/#3/#4/#5） | **75** |
 | CH-520（第十批） | `tests/test_ch503_furniture_wrap.py` | 3（全为 gate：#51/#52/#53） | **72** |
 | CH-521（第十一批） | `tests/test_ch503_docs_panel.py` | 3（全为 gate：#48/#49/#50） | **69** |
+| CH-522（第十二批） | `tests/test_ch496_local.py` | 3（全为 gate：#34/#35/#36） | **66** |
 
 首批实测出一条**判据本身失真**的形态：#89 原口径 `json.dumps(body)` 用默认
 `ensure_ascii=True`，中文查询被写成 `\uXXXX`，`'例外' not in ...` 对任何中文查询
@@ -147,6 +148,21 @@ C-1（loadDocs 体内加无害注释，保持绿）。还原后 `doc2md/static/e
 （`bfea7fdb…`）md5 与改前逐字节一致：零产品改动，`PIPELINE_VERSION` 保持 2.22.0，gate 仍 **735**、全量仍 **1575**、
 覆盖率仍 **7,942 stmts / 678 miss**。剩余 **69** 条。
 
+第十二批（CH-522）三条同为**静态判据**，命中基准取「同一容器里必存的成员数」，两处容器不是函数体而是
+**同一页面里的两个函数**与**onclick 切片**：#34 把 editor.html 的 `showHistory` / `rollbackTo` 各自收口，逐容器数
+「DOM/回滚成员 3/3 + `innerHTML` 0」（旧写法只切 `showHistory` 一个函数，`rollbackTo` 搬到别处后负例面照样绿）；
+#35 在 `cmd_serve` 容器内数「绑定/报告成员 3/3 + `app.run(host=` 0」；#36 在 chip 的 onclick 切片里数
+「服务端过滤成员 3/3 + `renderQueue(QSTATE.tasks)` 0」。本批实测出**正例成员不得取自注释**：chip 切片里 `status=`
+只出现在一行注释中，拿它当成员等于让注释替实现作证，改取 `QSTATE.filter = ` / `loadQueue()` /
+`(QSTATE.filter === st` 三个实现串。七个变异 M-a（showHistory 注入 `innerHTML`）与 M-b（rollbackTo 注入 `innerHTML`）
+各落新行 249 的 `(3, 1)`；M-c（全文件 12 处 `document.createElement(` 改名，制造成员缺失）落新行 249 的 `(2, 0)`；
+M-e（cmd_serve 注入 `app.run(host=`）落新行 286 的 `(3, 1)`；M-f（onclick 切片注入 `renderQueue(QSTATE.tasks)`）落
+新行 329 的 `(3, 1)`；M-d（cmd_serve 的 `make_server(` 改名）与 M-g（切片里 `loadQueue()` 改名）分别先被同函数里既有的
+正例断言拦在旧行 281 / 327——按第六批纪律记**判据归属**、不计入本批牙齿证据，同时说明新判据与旧正例同侧
+但不抢归属；另设对照 C-1（两处函数体内加无害注释，保持绿）。还原后 `doc2md/static/editor.html`（`b8fe2d0e…`）与
+`doc2md/cli.py`（`bfea7fdb…`）md5 与改前逐字节一致：零产品改动，`PIPELINE_VERSION` 保持 2.22.0，gate 仍 **735**、
+全量仍 **1575**、覆盖率仍 **7,942 stmts / 678 miss**。剩余 **66** 条。
+
 ## 红线层优先复核（gate 且无同主语正断言）
 
 | 文件::测试 | 行 | 形态 | 被否定表达式 | 控制流内 |
@@ -177,9 +193,9 @@ C-1（loadDocs 体内加无害注释，保持绿）。还原后 `doc2md/static/e
 | `tests/test_ch492_fixes.py::test_truncated_pdf_detail_has_no_password_flag` | 71 | not-in | `'password_required' not in ei.value.detail` |  |
 | `tests/test_ch495_pipeline.py::test_nested_textbox_paragraph_appears_once` | 68 | not-in | `'NESTED-FB' not in texts` |  |
 | `tests/test_ch495_watch_commit.py::test_watch_tombstone_blocks_commit` | 111 | not-in | `{'code': 'job_done'} not in events` |  |
-| `tests/test_ch496_local.py::test_g4_rollback_ui_contract` | 244 | not-in | `'innerHTML' not in body` | 是 |
-| `tests/test_ch496_local.py::test_serve_startup_reports_bound_port` | 274 | not-in | `'app.run(host=' not in body` |  |
-| `tests/test_ch496_local.py::test_queue_chip_filter_requests_server_side_status` | 309 | not-in | `'renderQueue(QSTATE.tasks)' not in m.group(1)` |  |
+| `tests/test_ch496_local.py::test_g4_rollback_ui_contract` | 249 | not-in | `'innerHTML' not in body`（**CH-522 已补同容器必存成员面：showHistory / rollbackTo 两容器各 3 名成员必须计满且 innerHTML 计 0，判据 `(3, 0)`**） | 是 |
+| `tests/test_ch496_local.py::test_serve_startup_reports_bound_port` | 286 | not-in | `'app.run(host=' not in body`（**CH-522 已补同容器必存成员面：cmd_serve 绑定/报告成员 3/3 必须计满，判据 `(3, 0)`**） |  |
+| `tests/test_ch496_local.py::test_queue_chip_filter_requests_server_side_status` | 329 | not-in | `'renderQueue(QSTATE.tasks)' not in m.group(1)`（**CH-522 已补 chip onclick 容器成员面：服务端过滤成员 3/3 必须计满，判据 `(3, 0)`**） |  |
 | `tests/test_ch497_local.py::test_b12_soak_harness_contract` | 120 | not-in | `'ensure_ascii=False' not in src` |  |
 | `tests/test_ch500_round17.py::test_form_encoded_role_admin_does_not_downgrade_to_reader` | 99 | not-in | `leak_hits = list(r.get_json() or {}).count("token")`（**CH-512 已改写为命中数判据 + 同主语正常签发面命中 1**） |  |
 | `tests/test_ch500_round17.py::test_external_link_label_newline_flattened` | 442 | not-in | `flat_hits = md.strip().count("\n")`（**CH-512 已改写为命中数判据 + 正文软换行命中 1**） |  |
@@ -260,9 +276,9 @@ C-1（loadDocs 体内加无害注释，保持绿）。还原后 `doc2md/static/e
 | 31 | G | `tests/test_ch495_pipeline.py::test_nested_textbox_paragraph_appears_once` | 68 | not-in | `'NESTED-FB' not in texts` |  |  |
 | 32 | G | `tests/test_ch495_pipeline.py::test_nested_textbox_paragraph_appears_once` | 71 | not-any | `not any(('NESTED' in t and t != 'NESTED' for t in texts))` | 67 |  |
 | 33 | G | `tests/test_ch495_watch_commit.py::test_watch_tombstone_blocks_commit` | 111 | not-in | `{'code': 'job_done'} not in events` |  |  |
-| 34 | G | `tests/test_ch496_local.py::test_g4_rollback_ui_contract` | 244 | not-in | `'innerHTML' not in body` |  | 是 |
-| 35 | G | `tests/test_ch496_local.py::test_serve_startup_reports_bound_port` | 274 | not-in | `'app.run(host=' not in body` |  |  |
-| 36 | G | `tests/test_ch496_local.py::test_queue_chip_filter_requests_server_side_status` | 309 | not-in | `'renderQueue(QSTATE.tasks)' not in m.group(1)` |  |  |
+| 34 | G | `tests/test_ch496_local.py::test_g4_rollback_ui_contract` | 249 | not-in | `'innerHTML' not in body` → `assert (_hits, body.count("innerHTML")) == (len(_members[name]), 0)`，两容器各 3 成员 | CH-522 ✓（showHistory / rollbackTo 各 3 名成员计满） | 是 |
+| 35 | G | `tests/test_ch496_local.py::test_serve_startup_reports_bound_port` | 286 | not-in | `'app.run(host=' not in body` → `assert (_hits, body.count('app.run(host=')) == (3, 0)` | CH-522 ✓（make_server / server_port / print 三成员） |  |
+| 36 | G | `tests/test_ch496_local.py::test_queue_chip_filter_requests_server_side_status` | 329 | not-in | `'renderQueue(QSTATE.tasks)' not in m.group(1)` → `assert (_hits, m.group(1).count('renderQueue(QSTATE.tasks)')) == (3, 0)` | CH-522 ✓（QSTATE.filter / loadQueue / 过滤比较三成员） |  |
 | 37 | G | `tests/test_ch497_local.py::test_b12_soak_harness_contract` | 120 | not-in | `'ensure_ascii=False' not in src` |  |  |
 | 38 | G | `tests/test_ch500_round17.py::test_form_encoded_role_admin_does_not_downgrade_to_reader` | 99 | not-in | `'token' not in (r.get_json() or {})` → 同一 `POST /tokens` 的正常签发面 `list(payload).count("token")` 须为 1 | CH-512 ✓（400 面 0 / 签发面 1 双写） |  |
 | 39 | G | `tests/test_ch500_round17.py::test_external_link_label_newline_flattened` | 442 | not-in | `'\n' not in md.strip()` → 同判据对「正文段落内软换行」计数须为 1 | CH-512 ✓（链接 0 / 正文 1 双写） |  |
