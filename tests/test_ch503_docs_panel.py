@@ -70,8 +70,22 @@ def test_doclist_is_served_by_the_docs_route():
         "文档清单未走 /docs 的服务端窗口（limit/offset 都得由数据面给）")
     # 队列面板仍然是 /jobs（它本来就是任务口径），且文档清单不复用 tasks 数组
     assert 'api("/jobs?limit=50"' in src, "队列面板的数据面被改动了"
-    assert "QSTATE.tasks" not in src.split("async function loadDocs")[1], (
-        "loadDocs 里出现了 QSTATE.tasks——文档清单不得从队列推断")
+    # 成对判据（B-53 / CH-521）：负例面「容器里没有 QSTATE.tasks」必须配同容器正例面
+    # 「容器确实是 loadDocs 的本体」。旧写法 `src.split("async function loadDocs")[1]`
+    # 取到的是该函数之后的**整段文件**——函数改名或搬空后负例面照样绿（尾段里本来
+    # 也没有队列数组），而判据想说的「这篇函数不读队列」从未被验证。收口锚点改用
+    # 下一个顶层函数 `dAutoToggle`，并要求切分真的发生过：边界失准即红，而不是静默
+    # 退回整段尾文。两个面的命中数都打进失败消息。
+    _parts = src.split("async function loadDocs")
+    assert len(_parts) == 2, f"loadDocs 入口漂移（切分命中 {len(_parts) - 1} 次，应 1 次）"
+    _fn, _sep, _ = _parts[1].partition("\nfunction dAutoToggle")
+    assert _sep, "loadDocs 的收尾锚点 `function dAutoToggle` 漂移——容器边界失准"
+    _members = ("api(`/docs?limit=", "DSTATE.hasMore", "DSTATE.rows", "renderDocs()")
+    _hits = sum(m in _fn for m in _members)
+    assert (_hits, _fn.count("QSTATE.tasks")) == (len(_members), 0), (
+        f"loadDocs 容器判据失准：依赖成员命中 {_hits}/{len(_members)}"
+        f"（缺 {[m for m in _members if m not in _fn]}），"
+        f"QSTATE.tasks 命中 {_fn.count('QSTATE.tasks')} 次（应为 0）")
 
 
 # --- ② 转义面（含负夹具） ---------------------------------------------------
@@ -113,7 +127,14 @@ def test_bare_doc_field_interpolation_is_caught_by_the_scan():
     bad = '`<td>${d.source_name}</td><td>${esc(d.format)}</td>`'
     assert _BARE_DOC.search(bad), "扫描器对已知的裸插形态无感——红线是空的"
     good = '`<td>${esc(d.source_name)}</td><td>${esc(d.format)}</td>`'
-    assert not _BARE_DOC.search(good), "扫描器把转义形态也判成违规——口径写坏了"
+    # 成对判据（B-53 / CH-521）：**同一份夹具**，只把 esc() 摘掉，扫描器必须从 0 命中
+    # 变成 2 命中。旧写法只断言「good 不命中」——字段名或别名写歪时扫描器对任何输入
+    # 都不命中，负例面恒真；同主语正例面把「不命中」钉成「因为转义才不命中」。
+    _stripped = re.sub(r"esc\(([^()]*)\)", r"\1", good)
+    _esc_hits, _raw_hits = len(_BARE_DOC.findall(good)), len(_BARE_DOC.findall(_stripped))
+    assert (_esc_hits, _raw_hits) == (0, 2), (
+        f"转义形态判据失准：esc 版命中 {_esc_hits} 次（应 0），摘掉 esc 后命中 "
+        f"{_raw_hits} 次（应 2）——扫描器对这份夹具本该恰好命中两个字段")
     # 语句级：尾段裸插必须仍被取出并命中；首段转义不能替尾段担保
     tail_bad = ('tr.innerHTML =\n'
                 '  `<td>${esc(d.doc_id)}</td>` +\n'
@@ -241,6 +262,17 @@ def test_docs_empty_state_names_only_the_library_writing_faces():
         "空态文案未声明 `doc2md convert` 不落库——面板条目等不到，指引成了假承诺")
 
     cli = (EDITOR.parents[2] / "doc2md" / "cli.py").read_text(encoding="utf-8")
-    body = cli.split("def cmd_convert")[1].split("\ndef ")[0]
-    assert "save_ir" not in body, (
-        "cmd_convert 现在开始落库了——同步更新空态文案与本用例判据，别单方面过时")
+    parts = cli.split("def cmd_convert")
+    assert len(parts) == 2, f"cmd_convert 入口漂移（切分命中 {len(parts) - 1} 次，应 1 次）"
+    body = parts[1].split("\ndef ")[0]
+    # 成对判据（B-53 / CH-521）：负例面「函数体不碰 save_ir」必须配同容器正例面
+    # 「这确实是 cmd_convert 的本体」——函数被搬空或切成空串时，负例面恒真。
+    # 正例面的基准取「产出面四个必存成员」；`save_ir` 在本文件别处（`_watch_commit` /
+    # `cmd_watch`）确实存在，所以 0 命中说的是「这条路径不落库」，不是符号不存在。
+    _members = ("run_batch(", "skip_existing_hit(", "convert(", "_apply_format(")
+    _hits = sum(m in body for m in _members)
+    assert (_hits, body.count("save_ir")) == (len(_members), 0), (
+        f"cmd_convert 容器判据失准：产出面成员命中 {_hits}/{len(_members)}"
+        f"（缺 {[m for m in _members if m not in body]}），"
+        f"save_ir 命中 {body.count('save_ir')} 次（应为 0；文件别处 save_ir 共 "
+        f"{cli.count('save_ir')} 次，符号本身存在）")

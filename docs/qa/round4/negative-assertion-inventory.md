@@ -53,6 +53,7 @@
 | CH-518（第八批） | `tests/test_ch504_service_faces.py` | 4（全为 gate：#58/#59/#60/#61） | **79** |
 | CH-519（第九批） | `tests/test_ch473_fixes.py` | 4（全为 gate：#2/#3/#4/#5） | **75** |
 | CH-520（第十批） | `tests/test_ch503_furniture_wrap.py` | 3（全为 gate：#51/#52/#53） | **72** |
+| CH-521（第十一批） | `tests/test_ch503_docs_panel.py` | 3（全为 gate：#48/#49/#50） | **69** |
 
 首批实测出一条**判据本身失真**的形态：#89 原口径 `json.dumps(body)` 用默认
 `ensure_ascii=True`，中文查询被写成 `\uXXXX`，`'例外' not in ...` 对任何中文查询
@@ -131,6 +132,21 @@ M-f 夹具里主语串整体消失（`_banded` 前缀探针） → 三条打「�
 零产品改动，`PIPELINE_VERSION` 保持 2.22.0，gate 仍 **735**、全量仍 **1575**、覆盖率仍
 **7,942 stmts / 678 miss**。剩余 **72** 条。
 
+第十一批（CH-521）三条都在**静态判据**上，命中基准取「同一容器里必存的成员数」，并实测出**锚点变异的自证陷阱**：
+把收尾锚点 `function dAutoToggle` 改名成 `dAutoToggleRenamed` 时，`partition("\nfunction dAutoToggle")` 仍在前缀处
+切开——**保前缀改名不是切断锚点**，这条变异以 rc=0 通过，只能作对照、不能记成牙齿证据；要真正打破边界必须整行
+删除或改写锚点（M-c' 随即打在 `assert _sep` 的 `assert ''` 上）。三条的配对形态：#48 在 loadDocs 容器内数
+「依赖成员 4/4 + `QSTATE.tasks` 0」——旧写法 `src.split("async function loadDocs")[1]` 取到的是该函数之后的
+**整段文件**，函数搬空后负例面照样绿；#49 用**同一份夹具只摘 `esc()`** 把「0 命中」钉成「因为转义才 0 命中」
+（摘掉后必须恰好 2 命中，M-d' 把 `format` 从字段集里拿掉时只打新行 135、`bad` 面仍绿，隔离出正例面的归属）；
+#50 在 cmd_convert 容器内数「产出面成员 4/4 + `save_ir` 0」，同轮实测 `save_ir` 在本文件别处共 5 次——「0」说的是
+这条路径不落库，不是符号不存在。六个变异 M-a（loadDocs 注入 `QSTATE.tasks`，落新行 85）/ M-b（删
+`DSTATE.hasMore`，落新行 85 的 3/4）/ M-c'（整行删除锚点，落 `assert _sep`）/ M-d'（字段集漏 format，落新行 135）/
+M-e（cmd_convert 调 `save_ir` 落库，落新行 274）/ M-f（`run_batch` 成员改名，同落新行 274）各自转红，另设对照
+C-1（loadDocs 体内加无害注释，保持绿）。还原后 `doc2md/static/editor.html`（`b8fe2d0e…`）与 `doc2md/cli.py`
+（`bfea7fdb…`）md5 与改前逐字节一致：零产品改动，`PIPELINE_VERSION` 保持 2.22.0，gate 仍 **735**、全量仍 **1575**、
+覆盖率仍 **7,942 stmts / 678 miss**。剩余 **69** 条。
+
 ## 红线层优先复核（gate 且无同主语正断言）
 
 | 文件::测试 | 行 | 形态 | 被否定表达式 | 控制流内 |
@@ -175,9 +191,9 @@ M-f 夹具里主语串整体消失（`_banded` 前缀探针） → 三条打「�
 | `tests/test_ch501_qa_auto.py::test_priority_partition_is_exact` | 257 | not-in | `('defect', 'split_table') not in keys`（**CH-515 与 #44 同一条 `((0, 0), (1, 1))`；条目账 7→9 另立一数**） |  |
 | `tests/test_ch501_qa_auto.py::test_priority_partition_is_exact` | 287 | not-in | `'B-99' not in pr.b_rows(_DP)`（**CH-515 已补同主语段内面：`b_rows(_DP)` 必须仍含 B-43/B-44/B-45 = 3**） |  |
 | `tests/test_ch501_qa_auto.py::test_fixability_does_not_downgrade_grade` | 311 | not-in | `'fixability' not in pr.W`（**CH-515 已补同主语权重面：`W` 的两维各自单独打满必须落出中间分 = 2**） |  |
-| `tests/test_ch503_docs_panel.py::test_doclist_is_served_by_the_docs_route` | 73 | not-in | `'QSTATE.tasks' not in src.split('async function loadDocs')[1]` |  |
-| `tests/test_ch503_docs_panel.py::test_bare_doc_field_interpolation_is_caught_by_the_scan` | 116 | not-search | `not _BARE_DOC.search(good)` |  |
-| `tests/test_ch503_docs_panel.py::test_docs_empty_state_names_only_the_library_writing_faces` | 245 | not-in | `'save_ir' not in body` |  |
+| `tests/test_ch503_docs_panel.py::test_doclist_is_served_by_the_docs_route` | 85 | not-in | `'QSTATE.tasks' not in src.split('async function loadDocs')[1]`（**CH-521 已补同容器必存成员面：loadDocs 体收口到 `dAutoToggle` 锚点，依赖成员 4/4 必须计满且 `QSTATE.tasks` 计 0，判据 `(4, 0)`**） |  |
+| `tests/test_ch503_docs_panel.py::test_bare_doc_field_interpolation_is_caught_by_the_scan` | 135 | not-search | `not _BARE_DOC.search(good)`（**CH-521 已补同夹具正例面：只摘 `esc()` 的同一串必须命中 2，判据 `(0, 2)`**） |  |
+| `tests/test_ch503_docs_panel.py::test_docs_empty_state_names_only_the_library_writing_faces` | 274 | not-in | `'save_ir' not in body`（**CH-521 已补同容器必存成员面：cmd_convert 产出面成员 4/4 必须计满，判据 `(4, 0)`**） |  |
 | `tests/test_ch503_furniture_wrap.py::test_real_furniture_after_hard_end_is_still_stripped` | 83 | not-in | `'机密文件请勿外传。' not in kept`（**CH-520 已补输入全集同主语计数面：该串在输入必须计 2，判据 `(2, 0)`**） |  |
 | `tests/test_ch503_furniture_wrap.py::test_first_line_of_document_has_no_wrap_anchor` | 101 | not-in | `'准流程。' not in _texts(stripped)`（**CH-520 已补输入计数 `(2, 0)`，并另加同夹具正文存活面 `(2, 2)`（新行 109）挡「整带清空黑洞」形态**） |  |
 | `tests/test_ch503_furniture_wrap.py::test_running_header_without_terminal_punctuation_is_stripped` | 158 | not-in | `'综合长文档测试 内部测试样本' not in kept`（**CH-520 已补输入全集同主语计数面：重复计数的前提必须真到 2，判据 `(2, 0)`**） |  |
@@ -258,9 +274,9 @@ M-f 夹具里主语串整体消失（`_banded` 前缀探针） → 三条打「�
 | 45 | G | `tests/test_ch501_qa_auto.py::test_priority_partition_is_exact` | 257 | not-in | `('defect', 'split_table') not in keys` |  | CH-515 ✓ |
 | 46 | G | `tests/test_ch501_qa_auto.py::test_priority_partition_is_exact` | 287 | not-in | `'B-99' not in pr.b_rows(_DP)` |  | CH-515 ✓ |
 | 47 | G | `tests/test_ch501_qa_auto.py::test_fixability_does_not_downgrade_grade` | 311 | not-in | `'fixability' not in pr.W` |  | CH-515 ✓ |
-| 48 | G | `tests/test_ch503_docs_panel.py::test_doclist_is_served_by_the_docs_route` | 73 | not-in | `'QSTATE.tasks' not in src.split('async function loadDocs')[1]` |  |  |
-| 49 | G | `tests/test_ch503_docs_panel.py::test_bare_doc_field_interpolation_is_caught_by_the_scan` | 116 | not-search | `not _BARE_DOC.search(good)` |  |  |
-| 50 | G | `tests/test_ch503_docs_panel.py::test_docs_empty_state_names_only_the_library_writing_faces` | 245 | not-in | `'save_ir' not in body` |  |  |
+| 48 | G | `tests/test_ch503_docs_panel.py::test_doclist_is_served_by_the_docs_route` | 85 | not-in | `'QSTATE.tasks' not in …` → 同容器依赖成员 4/4 必计满，判据 `(4, 0)` | CH-521 ✓（成员 4 / QSTATE.tasks 0） | CH-521 ✓ |
+| 49 | G | `tests/test_ch503_docs_panel.py::test_bare_doc_field_interpolation_is_caught_by_the_scan` | 135 | not-search | `not _BARE_DOC.search(good)` → 同一串摘掉 `esc()` 必须命中 2，判据 `(0, 2)` | CH-521 ✓（esc 0 / 裸插 2） |  |
+| 50 | G | `tests/test_ch503_docs_panel.py::test_docs_empty_state_names_only_the_library_writing_faces` | 274 | not-in | `'save_ir' not in body` → 同容器产出面成员 4/4 必计满，判据 `(4, 0)` | CH-521 ✓（成员 4 / save_ir 0） |  |
 | 51 | G | `tests/test_ch503_furniture_wrap.py::test_real_furniture_after_hard_end_is_still_stripped` | 83 | not-in | `'机密文件请勿外传。' not in kept` → 输入全集/幸存者同主语计数 `(2, 0)` | CH-520 ✓（输入全集该串 2 处） |  |
 | 52 | G | `tests/test_ch503_furniture_wrap.py::test_first_line_of_document_has_no_wrap_anchor` | 101 | not-in | `'准流程。' not in _texts(stripped)` → 输入全集/幸存者同主语计数 `(2, 0)` + 同夹具正文存活 `(2, 2)`（新行 109） | CH-520 ✓（输入 2 处 + 两条正文行存活） |  |
 | 53 | G | `tests/test_ch503_furniture_wrap.py::test_running_header_without_terminal_punctuation_is_stripped` | 158 | not-in | `'综合长文档测试 内部测试样本' not in kept` → 输入全集/幸存者同主语计数 `(2, 0)` | CH-520 ✓（输入全集该串 2 处 = 重复计数前提） |  |
