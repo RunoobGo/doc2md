@@ -61,6 +61,9 @@ _TRACKERS = (
 _NEGATION = re.compile(r"(?:无|不可达|不返回|不送出)\s*(?:HTTP\s*)?\**\s*(\d{3})")
 
 ROLES = ("reader", "editor", "admin")
+# 附录 C 契约的端点行数：扫描到的端点行与解析出的键数都必须等于它，
+# 否则「不得重复登记」这条否定对空集合恒真（B-53 成对判据的命中基准）。
+EXPECTED_ENDPOINT_ROWS = 21
 
 
 def _section() -> str:
@@ -99,15 +102,19 @@ def _codes(text: str) -> list[str]:
 def _parse_section(section: str) -> dict[tuple[str, str], dict]:
     """`{(方法, 路径): {role, success, errors}}`；解析异常即红线失效。"""
     rows: dict[tuple[str, str], dict] = {}
+    dups: list[tuple[str, str]] = []
+    n_lines = 0
     for line in section.splitlines():
         if not line.startswith("| `"):
             continue
+        n_lines += 1
         cells = [c.strip() for c in line.strip().strip("|").split("|")]
         assert len(cells) == 5, f"附录 C 行不是 5 列（格式漂移）：{line[:90]}"
         m = ROW_RE.match(line)
         assert m is not None, f"附录 C 端点格无法解析：{line[:90]}"
         key = (m.group(1), m.group(2))
-        assert key not in rows, f"附录 C 重复登记端点：{key}"
+        if key in rows:
+            dups.append(key)
         rm = ROLE_RE.match(cells[1])
         role = rm.group(1) if rm else None
         if role is None:
@@ -117,6 +124,11 @@ def _parse_section(section: str) -> dict[tuple[str, str], dict]:
         errors = {c for c in _codes(cells[4]) if c[0] in "45"}
         assert success, f"{key} 未解析到任何成功码（成功列锚点失效）"
         rows[key] = {"role": role, "success": success, "errors": errors}
+    assert (dups, len(rows), n_lines) == (
+        [], EXPECTED_ENDPOINT_ROWS, EXPECTED_ENDPOINT_ROWS), (
+        f"附录 C 端点登记自证失败：重复登记 {dups}（应为空），"
+        f"解析出 {len(rows)} 行 / 扫描到 {n_lines} 条端点行"
+        f"（后两个数均应为 {EXPECTED_ENDPOINT_ROWS}；解析丢行或锚点失效）")
     return rows
 
 
@@ -137,7 +149,6 @@ def test_appendix_c_parser_has_teeth() -> None:
         "文档里可见，否则红线在核一份读者看不到的契约")
 
     rows = _parse_section(section)
-    assert len(rows) == 21, f"附录 C 解析到 {len(rows)} 行，应为 21 行（锚点失效）"
     assert rows[("GET", "/")]["role"] is None
     assert rows[("GET", "/healthz")]["role"] is None
 
@@ -149,9 +160,15 @@ def test_appendix_c_parser_has_teeth() -> None:
     assert _codes("404；500 E5031（errors.py: E5031_StorageError.http=500；"
                   "本行原记 503）") == ["404", "500"]
 
-    # 当前契约不得再承诺 C-1 的 409 / 同型的 HTTP 422。
-    assert "409" not in rows[("POST", "/jobs")]["errors"]
-    assert "422" not in rows[("POST", "/jobs")]["errors"]
+    # 当前契约不得再承诺 C-1 的 409 / 同型的 HTTP 422；同一行必须仍登记实测
+    # 可达的五个错误码——否则两条字面否定对空错误集合恒真。
+    _errs = rows[("POST", "/jobs")]["errors"]
+    _want = frozenset({"400", "404", "413", "415", "503"})
+    _hits = len(_want & _errs)
+    assert (_hits, "409" in _errs, "422" in _errs) == (len(_want), False, False), (
+        f"POST /jobs 错误列自证失败：必存错误码命中 {_hits}/{len(_want)}"
+        f"（缺 {sorted(_want - _errs)}），409 命中 {int('409' in _errs)} 次、"
+        f"422 命中 {int('422' in _errs)} 次（应为 {len(_want)} / 0 / 0）")
 
     # 变异证明：把 C-1 的旧承诺塞回文档，解析器必须当场报出 409——
     # 红线若读不出它，下面的双向差也就抓不到「文档承诺不可达形态」。

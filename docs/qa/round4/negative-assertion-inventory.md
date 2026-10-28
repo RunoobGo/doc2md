@@ -55,6 +55,7 @@
 | CH-520（第十批） | `tests/test_ch503_furniture_wrap.py` | 3（全为 gate：#51/#52/#53） | **72** |
 | CH-521（第十一批） | `tests/test_ch503_docs_panel.py` | 3（全为 gate：#48/#49/#50） | **69** |
 | CH-522（第十二批） | `tests/test_ch496_local.py` | 3（全为 gate：#34/#35/#36） | **66** |
+| CH-523（第十三批） | `tests/test_ch505_contract_sync.py` | 3（全为 gate：#62/#63/#64） | **63** |
 
 首批实测出一条**判据本身失真**的形态：#89 原口径 `json.dumps(body)` 用默认
 `ensure_ascii=True`，中文查询被写成 `\uXXXX`，`'例外' not in ...` 对任何中文查询
@@ -163,6 +164,17 @@ M-e（cmd_serve 注入 `app.run(host=`）落新行 286 的 `(3, 1)`；M-f（oncl
 `doc2md/cli.py`（`bfea7fdb…`）md5 与改前逐字节一致：零产品改动，`PIPELINE_VERSION` 保持 2.22.0，gate 仍 **735**、
 全量仍 **1575**、覆盖率仍 **7,942 stmts / 678 miss**。剩余 **66** 条。
 
+第十三批（CH-523）三条全在**契约对账**文件里，两条形态各补出一点：#62 是**解析器内**的去重否定，命中基准取
+「同一段文本的扫描端点行数 + 解析键数 × 契约常量」——只配「键数 == 扫描行数」不够，空解析下 `([], 0) == ([], 0)`
+仍恒真，必须把两个计数都钉到契约常量 21（新模块常量 `EXPECTED_ENDPOINT_ROWS`，自检里另一处 `len(rows) == 21`
+并入同一判据）；#63/#64 是**同一容器的两条字面否定**（错误列不得出现 409 / 422），命中基准取该行实测可达的
+五个错误码 `{400,404,413,415,503}`，合并成 `(5, False, False)` 一条判据。变异：M-a（附录 C 重复登记一行）落新行 127
+的 `([('GET','/healthz')], 21, 22)`；M-b（`_parse_section` 里 `section = ""` 的空壳解析）落新行 127 的 `([], 0, 0)`——
+旧写法 `key not in rows` 对这种形态恒真；M-c（文档 `**无 409**` 改回 `409`）落新行 168 的 `(5, 1, 0)`；M-d（`**无 HTTP 422**`
+改 `**HTTP 422**`）落 `(5, 0, 1)`；M-e（错误列摘掉 `415`）落 `(4, 0, 0)`；另设对照 C-1（附录 C 加无害空格，保持绿）。
+还原后 `docs/dev-plan.md`（`b7590164…`）与测试文件（`b02cdf03…`）md5 与改前逐字节一致：零产品改动，
+`PIPELINE_VERSION` 保持 2.22.0，gate 仍 **735**、全量仍 **1575**、覆盖率仍 **7,942 stmts / 678 miss**。剩余 **63** 条。
+
 ## 红线层优先复核（gate 且无同主语正断言）
 
 | 文件::测试 | 行 | 形态 | 被否定表达式 | 控制流内 |
@@ -221,9 +233,9 @@ M-e（cmd_serve 注入 `app.run(host=`）落新行 286 的 `(3, 1)`；M-f（oncl
 | `tests/test_ch504_service_faces.py::test_matrix_has_no_dead_action` | 304 | not-in | `'rerun' not in auth.MATRIX`（**CH-518 已补同矩阵的真实重跑键面：`submit_job` 必须计 1，判据 `(0, 1)`，并前置到 `dead`/`undeclared` 之前**） |  |
 | `tests/test_ch504_service_faces.py::test_gui3_duration_column_has_one_origin` | 401 | not-in | `'finished - created' not in durs[1]`（**CH-518 已并入同支认领时刻面：`started` 在同一支必须计 1，判据 `(0, 1)`**） |  |
 | `tests/test_ch504_service_faces.py::test_content_type_error_names_the_field` | 531 | not-in | `'token' not in body`（**CH-518 已补同容器契约键面：`code`/`message`/`detail` 必须计满 3，判据 `(0, 3)`，并前置到三条值判据之前**） |  |
-| `tests/test_ch505_contract_sync.py::_parse_section` | 110 | not-in | `key not in rows` | 是 |
-| `tests/test_ch505_contract_sync.py::test_appendix_c_parser_has_teeth` | 153 | not-in | `'409' not in rows['POST', '/jobs']['errors']` |  |
-| `tests/test_ch505_contract_sync.py::test_appendix_c_parser_has_teeth` | 154 | not-in | `'422' not in rows['POST', '/jobs']['errors']` |  |
+| `tests/test_ch505_contract_sync.py::_parse_section` | 127 | not-in | `key in rows`（**CH-523 已补同容器双计数面：重复登记列表必须为空、解析键数与扫描端点行数都必须 == 契约常量 21，判据 `([], 21, 21)`**） | 是 |
+| `tests/test_ch505_contract_sync.py::test_appendix_c_parser_has_teeth` | 168 | not-in | `'409' not in _errs`（**CH-523 已并入同容器必存错误码面：`{400,404,413,415,503}` 命中 5/5，判据 `(5, False, False)`**） |  |
+| `tests/test_ch505_contract_sync.py::test_appendix_c_parser_has_teeth` | 168 | not-in | `'422' not in _errs`（**CH-523 已并入同一判据**） |  |
 | `tests/test_ch505_escape_single_source.py::test_escape_implementations_have_a_single_source` | 139 | not-in | `'str.maketrans' not in text` | 是 |
 | `tests/test_ch505_escape_single_source.py::test_escape_implementations_have_a_single_source` | 140 | not-in | `'&lt;' not in text` | 是 |
 | `tests/test_llm_p0_contract.py::test_allowed_ops_hides_table_boundary_for_far_paragraph` | 120 | not-in | `far_hits/near_ops.count("mark_table_boundary")`（**CH-514 已补同主语正断言**：紧邻表的段落命中 1，判据 `(0, 1)`） |  |
@@ -304,9 +316,9 @@ M-e（cmd_serve 注入 `app.run(host=`）落新行 286 的 `(3, 1)`；M-f（oncl
 | 59 | G | `tests/test_ch504_service_faces.py::test_matrix_has_no_dead_action` | 304 | not-in | `'rerun' not in auth.MATRIX` → 同矩阵的 `submit_job` 必须计 1 |  | CH-518 ✓（rerun 0 / submit_job 1） |
 | 60 | G | `tests/test_ch504_service_faces.py::test_gui3_duration_column_has_one_origin` | 401 | not-in | `'finished - created' not in durs[1]` → 同一支的 `started` 必须计 1 |  | CH-518 ✓（finished-created 0 / started 1） |
 | 61 | G | `tests/test_ch504_service_faces.py::test_content_type_error_names_the_field` | 531 | not-in | `'token' not in body` → 同一容器的 `code`/`message`/`detail` 必须计满 3 |  | CH-518 ✓（token 0 / 契约键 3） |
-| 62 | G | `tests/test_ch505_contract_sync.py::_parse_section` | 110 | not-in | `key not in rows` |  | 是 |
-| 63 | G | `tests/test_ch505_contract_sync.py::test_appendix_c_parser_has_teeth` | 153 | not-in | `'409' not in rows['POST', '/jobs']['errors']` |  |  |
-| 64 | G | `tests/test_ch505_contract_sync.py::test_appendix_c_parser_has_teeth` | 154 | not-in | `'422' not in rows['POST', '/jobs']['errors']` |  |  |
+| 62 | G | `tests/test_ch505_contract_sync.py::_parse_section` | 127 | not-in | `key in rows`（**CH-523 已补同容器双计数面：`(dups, len(rows), n_lines) == ([], 21, 21)`**） |  | 是 |
+| 63 | G | `tests/test_ch505_contract_sync.py::test_appendix_c_parser_has_teeth` | 168 | not-in | `'409' not in _errs`（**CH-523 已并入同容器必存错误码面 5/5；判据 `(5, False, False)`**） |  |  |
+| 64 | G | `tests/test_ch505_contract_sync.py::test_appendix_c_parser_has_teeth` | 168 | not-in | `'422' not in _errs`（**CH-523 已并入同一判据**） |  |  |
 | 65 | G | `tests/test_ch505_escape_single_source.py::test_escape_implementations_have_a_single_source` | 139 | not-in | `'str.maketrans' not in text` |  | 是 |
 | 66 | G | `tests/test_ch505_escape_single_source.py::test_escape_implementations_have_a_single_source` | 140 | not-in | `'&lt;' not in text` |  | 是 |
 | 67 | G | `tests/test_ch505_perms_coverage.py::test_harden_windows_reports_nonzero_exit_with_last_stderr_line` | 156 | not-in | `perms._cache_key(tmp_path) not in perms._HARDENED` | 155 |  |
