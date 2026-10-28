@@ -25,14 +25,14 @@ def numlist_ir(golden_dir):
 @pytest.mark.gate
 def test_same_size_numbered_items_are_list_items_not_headings(numlist_ir):
     """「1./2./3.」三行：字号==正文众数、无加粗 → 既不是标题也不被缝进段落。"""
+    items = ("1. 安装依赖", "2. 配置环境变量", "3. 启动服务")
     heads = {b.text for b in numlist_ir.blocks if b.type == "heading"}
-    for item in ("1. 安装依赖", "2. 配置环境变量", "3. 启动服务"):
-        assert item not in heads, f"{item} 复现了 R6-PIPE-1 的假 H1"
     kinds = {b.text: b.type for b in numlist_ir.blocks}
-    assert all(kinds.get(i) == "list_item" for i in ("1. 安装依赖",
-                                                     "2. 配置环境变量",
-                                                     "3. 启动服务")), \
-        f"编号行未落 list_item：{kinds}"
+    # 否定面（不落标题）与正例面（三件必落 list_item）同判据：空 IR 下两半都归零
+    _in_heads = [i for i in items if i in heads]
+    _as_list = [i for i in items if kinds.get(i) == "list_item"]
+    assert (_in_heads, _as_list) == ([], list(items)), (
+        f"R6-PIPE-1 判据不自证：编号行落标题 {_in_heads} / 落 list_item {_as_list}")
     # 缝合丢失的形态：三行粘成一个块（旧口径）——三件必须各自成块
     assert sum(1 for b in numlist_ir.blocks if b.type == "list_item") == 3
 
@@ -50,9 +50,12 @@ def test_real_heading_signals_still_fire(numlist_ir):
 def test_markdown_keeps_ordinal_for_numbered_items(numlist_ir):
     """有序列表落 Markdown 保留序号（GFM 有序表），不退化成符号 bullet。"""
     md = render(numlist_ir)
-    for line in ("1. 安装依赖", "2. 配置环境变量", "3. 启动服务"):
-        assert f"\n{line}\n" in f"\n{md}", md
-    assert "- 1. 安装依赖" not in md
+    items = ("1. 安装依赖", "2. 配置环境变量", "3. 启动服务")
+    # 同一主语（三行编号文本）两半：原样保留 3 行，退化 bullet 0 处
+    _ordered = sum(f"\n{md}\n".count(f"\n{it}\n") for it in items)
+    _bullet = md.count("- 1. 安装依赖")
+    assert (_ordered, _bullet) == (3, 0), (
+        f"有序序号判据不自证：原样保留 {_ordered}/3 行，退化 bullet {_bullet} 处")
 
 
 @pytest.mark.gate
@@ -61,8 +64,11 @@ def test_prose_lines_do_not_enter_the_ordered_branch(numlist_ir):
     prose = [b.text for b in numlist_ir.blocks if b.type == "paragraph"]
     assert any(t.startswith("本节说明本样本的用途") for t in prose)
     assert any(t.startswith("运行环境需要") for t in prose)
-    assert len([t for t in prose if t.startswith("正文第")]) == 12
-    assert not any("安装依赖" in t for t in prose)
+    # 空 IR 下「无泄漏」恒真：把容器规模 14、正文第 12 与被否定的命中 0 写进同一判据
+    _leak = [t for t in prose if "安装依赖" in t]
+    _zhengwen = sum(1 for t in prose if t.startswith("正文第"))
+    assert (_leak, len(prose), _zhengwen) == ([], 14, 12), (
+        f"正文面判据不自证：编号行漏进正文 {_leak} / 正文块 {len(prose)} / 正文第 {_zhengwen}")
 
 
 # ---------------------------------------------------------------- 判据本体

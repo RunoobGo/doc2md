@@ -57,6 +57,7 @@
 | CH-522（第十二批） | `tests/test_ch496_local.py` | 3（全为 gate：#34/#35/#36） | **66** |
 | CH-523（第十三批） | `tests/test_ch505_contract_sync.py` | 3（全为 gate：#62/#63/#64） | **63** |
 | CH-524（第十四批） | `tests/test_ch475_fixes.py` | 2（全为 gate：#6/#8） | **61** |
+| CH-525（第十五批） | `tests/test_ch478_fixes.py` | 3（全为 gate：#17/#18/#19） | **58** |
 
 首批实测出一条**判据本身失真**的形态：#89 原口径 `json.dumps(body)` 用默认
 `ensure_ascii=True`，中文查询被写成 `\uXXXX`，`'例外' not in ...` 对任何中文查询
@@ -191,6 +192,25 @@ M-e（cmd_serve 注入 `app.run(host=`）落新行 286 的 `(3, 1)`；M-f（oncl
 `doc2md/ops/logging.py`（`cf81f9ec…`）md5 与改前逐字节一致：零产品改动，`PIPELINE_VERSION` 保持 2.22.0，
 gate 仍 **735**、全量仍 **1575**、覆盖率仍 **7,942 stmts / 678 miss**。剩余 **61** 条。
 
+第十五批（CH-525）三条都在**编号行分类/渲染面**（黄金样本 `numlist_1p.pdf`），补位形态与前几批不同：这里不需要
+注入缺陷形状，**同页真值本身就是命中基准**——#17 把「三件编号行不落标题」与「三件必落 `list_item`」合成一条
+`(_in_heads, _as_list) == ([], list(items))`（空 IR 下两半同时归零、字面否定恒真）；#18 把「三行原样保留」与
+「退化 bullet 0 处」合成 `(_ordered, _bullet) == (3, 0)`，同一主语两个方向；#19 把「编号行不漏进正文」与容器规模
+「正文块 14 / 正文第 12」合成 `(_leak, len(prose), _zhengwen) == ([], 14, 12)`——这是 CH-523「解析器类钉契约
+常量」在**语料类**文件上的对应写法：0 只有钉在非零容器上才是观测。本批实测出**假绿变异**：把 `_is_ordered_item`
+的长度门与句末标点门一起摘掉（M-e），全部 gate 判据保持绿——不是判据没牙齿，而是黄金样本里压根没有「编号 +
+句末标点」的正文行，变异在语料上不可观测；这类变异不记牙齿、也不记判据归属，只记「语料不覆盖」。同一教训还
+有个操作面：M-e2 第一版探针写成 `startswith("正文第3")`，而样本实际文本是「正文第 3 段」（第后有空格），变异
+根本没执行——**变异不红时先证明变异真的生效（打印命中或改后跑一次 IR 断言），再讨论判据**。变异：M-a
+（`_is_ordered_item` 一律 False）落新行 34 的 `([], [])`、新行 57 的 `(0, 0)`、新行 70 的
+`(['1. 安装依赖2. 配置环境变量3. 启动服务'], 15, 12)`；M-b（`_heading_level` 第三回退恒判标题 = R6-PIPE-1 的
+原始病灶）落新行 34 的 `([三行], [])`、新行 57 的 `(0, 0)`，#19 保持绿 = 该形态不产生正文泄漏（判据归属）；M-c
+（渲染摘掉 `if m:` 走 bullet 分支）落新行 57 的 `(0, 1)`；M-d（渲染保留文本但丢序号）落新行 57 的 `(0, 0)`；
+M-e2（正文第 3 段整行丢弃）落新行 70 的 `([], 13, 11)`；另设对照 C-1（`_is_ordered_item` 前加无害注释，保持
+全绿）。还原后 `doc2md/pipeline/s3_structure.py`（`1f04782d…`）与 `doc2md/pipeline/s4_render.py`（`d59bc27d…`）
+md5 与改前逐字节一致：零产品改动，`PIPELINE_VERSION` 保持 2.22.0，gate 仍 **735**、全量仍 **1575**、
+覆盖率仍 **7,942 stmts / 678 miss**。剩余 **58** 条。
+
 ## 红线层优先复核（gate 且无同主语正断言）
 
 | 文件::测试 | 行 | 形态 | 被否定表达式 | 控制流内 |
@@ -207,8 +227,8 @@ gate 仍 **735**、全量仍 **1575**、覆盖率仍 **7,942 stmts / 678 miss**�
 | `tests/test_ch476_fixes.py::test_gap1_blocks_carry_has_revision_flag` | 1256 | not-in | `plain_hits = list(plain.flags).count("has_revision")`（**CH-513 已补同主语正断言**：同域带信号段落计 3，判据 `(0, 3)`） |  |
 | `tests/test_ch476_fixes.py::test_gap1_golden_revision_sample_end_to_end` | 1282 | not-in | `md_hits = r.markdown.count(must_not)`（**CH-513 已补同主语正断言**：黄金样本 `document.xml` 每条 `w:delText` 计 1，判据 `(0, 1)`） | 是 |
 | `tests/test_ch476_fixes.py::test_gap2_note_text_survives_and_never_glues_into_body` | 1434 | not-in | `note_pb_hits = sum(1 for b in ir.blocks if b.type == "page_break")`（**CH-513 已补同主语正断言**：同函数用真分页 DOCX 走同一判据计 1，`(0, 1)`） |  |
-| `tests/test_ch478_fixes.py::test_same_size_numbered_items_are_list_items_not_headings` | 30 | not-in | `item not in heads` | 是 |
-| `tests/test_ch478_fixes.py::test_markdown_keeps_ordinal_for_numbered_items` | 55 | not-in | `'- 1. 安装依赖' not in md` |  |
+| `tests/test_ch478_fixes.py::test_same_size_numbered_items_are_list_items_not_headings` | 34 | not-in | `item not in heads` → `assert (_in_heads, _as_list) == ([], list(items))`（**CH-525 已补同判据正例面**：三件必落 list_item） |  |
+| `tests/test_ch478_fixes.py::test_markdown_keeps_ordinal_for_numbered_items` | 57 | not-in | `'- 1. 安装依赖' not in md` → `assert (_ordered, _bullet) == (3, 0)`（**CH-525 已补同主语正例面**：三行原样保留） |  |
 | `tests/test_ch480_resident_assets.py::test_serve_stays_on_loopback_on_both_platforms` | 144 | not-in | `'--port' not in args` | 是 |
 | `tests/test_ch480_resident_assets.py::test_serve_stays_on_loopback_on_both_platforms` | 147 | not-in | `'--port' not in _find(act, 'Arguments').text` | 是 |
 | `tests/test_ch481_capture_clip.py::test_clip_oserror_recorded_not_raised` | 146 | not-in | `'before' not in ev['launchd-serve.err']` |  |
@@ -287,9 +307,9 @@ gate 仍 **735**、全量仍 **1575**、覆盖率仍 **7,942 stmts / 678 miss**�
 | 14 | G | `tests/test_ch476_fixes.py::test_gap1_plain_docx_unchanged_by_revision_path` | 1253 | not-any | `not any((ln.has_revision for ln in lines))` | 1252 |  |
 | 15 | G | `tests/test_ch476_fixes.py::test_gap2_note_text_survives_and_never_glues_into_body` | 1434 | not-in | `note_pb_hits = sum(1 for b in ir.blocks if b.type == "page_break")` → `assert (note_pb_hits, br_hits) == (0, 1)` |  | CH-513 ✓ |
 | 16 | G | `tests/test_ch476_fixes.py::test_gap2_docx_without_notes_gains_no_lines` | 1438 | not-any | `not any((ln.note_kind for ln in lines))` | 1437 |  |
-| 17 | G | `tests/test_ch478_fixes.py::test_same_size_numbered_items_are_list_items_not_headings` | 30 | not-in | `item not in heads` |  | 是 |
-| 18 | G | `tests/test_ch478_fixes.py::test_markdown_keeps_ordinal_for_numbered_items` | 55 | not-in | `'- 1. 安装依赖' not in md` |  |  |
-| 19 | G | `tests/test_ch478_fixes.py::test_prose_lines_do_not_enter_the_ordered_branch` | 65 | not-any | `not any(('安装依赖' in t for t in prose))` | 62 |  |
+| 17 | G | `tests/test_ch478_fixes.py::test_same_size_numbered_items_are_list_items_not_headings` | 34 | not-in | `item not in heads` → `assert (_in_heads, _as_list) == ([], list(items))`（**CH-525 已补同判据正例面：三件必落 list_item**） |  |  |
+| 18 | G | `tests/test_ch478_fixes.py::test_markdown_keeps_ordinal_for_numbered_items` | 57 | not-in | `'- 1. 安装依赖' not in md` → `assert (_ordered, _bullet) == (3, 0)`（**CH-525 已补同主语正例面：三行原样保留**） |  |  |
+| 19 | G | `tests/test_ch478_fixes.py::test_prose_lines_do_not_enter_the_ordered_branch` | 70 | not-any | `not any(('安装依赖' in t for t in prose))` → `assert (_leak, len(prose), _zhengwen) == ([], 14, 12)`（**CH-525 已钉容器规模与正文第计数**） |  |  |
 | 20 | G | `tests/test_ch480_resident_assets.py::test_serve_stays_on_loopback_on_both_platforms` | 144 | not-in | `'--port' not in args` |  | 是 |
 | 21 | G | `tests/test_ch480_resident_assets.py::test_serve_stays_on_loopback_on_both_platforms` | 147 | not-in | `'--port' not in _find(act, 'Arguments').text` |  | 是 |
 | 22 | G | `tests/test_ch481_capture_clip.py::test_clip_oserror_recorded_not_raised` | 146 | not-in | `'before' not in ev['launchd-serve.err']` |  |  |
