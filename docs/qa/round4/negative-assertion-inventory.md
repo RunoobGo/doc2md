@@ -52,6 +52,7 @@
 | CH-516（第七批） | `tests/test_ch504_qa_caliber.py` | 4（全为 gate：#54/#55/#56/#57） | 83 |
 | CH-518（第八批） | `tests/test_ch504_service_faces.py` | 4（全为 gate：#58/#59/#60/#61） | **79** |
 | CH-519（第九批） | `tests/test_ch473_fixes.py` | 4（全为 gate：#2/#3/#4/#5） | **75** |
+| CH-520（第十批） | `tests/test_ch503_furniture_wrap.py` | 3（全为 gate：#51/#52/#53） | **72** |
 
 首批实测出一条**判据本身失真**的形态：#89 原口径 `json.dumps(body)` 用默认
 `ensure_ascii=True`，中文查询被写成 `\uXXXX`，`'例外' not in ...` 对任何中文查询
@@ -111,6 +112,25 @@ search_blocks 3，实测取来而非推断）——把建表脚本写坏成缺�
 一致：产品语句零变化，`PIPELINE_VERSION` 保持 2.22.0，gate 仍 **735**、全量仍 **1575**、覆盖率仍
 **7,942 stmts / 678 miss**。剩余 **75** 条。
 
+第十批（CH-520）是本族批次里第一个**纯单元夹具**文件（手工构造 `RawPage`，不拉语料也不建库），三条否定读的都是
+「被剔除的那一行不该出现在幸存者列表里」。规则④在这里不必另造场景就能取到正例面：**同一主语在输入全集里的出现数**
+（三条实测都是 2），于是判据统一写成 `(输入, 幸存) == (2, 0)`。但本批实测出规则④的**残余漏洞**：`(2, 0)` 对
+「整带清空的黑洞实现」同样是绿的——把边距带连正文一起删光，两个数照样成立。所以正例面必须**两半**：输入计数
+证明这条否定有观测对象，同夹具的「不该被删的东西还在」证明剔除是**有条件的**。#52 原先除了那条否定什么都没有，
+故单独补一条正文存活面（`(2, 2)`，新行 109）；#51/#53 的同一函数里本来就有正文计数断言，本批不重复补。
+六个变异各自转红：M-a `_strip_page_furniture` 整体失效 → 三条落新行 83 / 101 / 158，消息打「剔除后剩 2 处」；
+M-b 整页清空黑洞 → **只有新行 109 的正文存活面响**（旧写法「`准流程。` 不在结果里」在这种形态下全绿）；
+M-c `_is_wrap_tail` 恒真（豁免面放宽到页眉） → 三条 + `test_is_wrap_tail_caliber` 红；
+M-d 夹具把 `_banded` 的 `top` 移出边距带（家具信号根本接触不到候选） → 三条红；
+M-e 夹具只留一页（重复计数到不了 2） → 三条红；
+M-f 夹具里主语串整体消失（`_banded` 前缀探针） → 三条打「在输入全集出现 **0** 处」，而**旧写法 `not in kept`
+在这个形态下恒真**——这正是本批判据要挡的空壳，也是规则④存在的理由。
+另设**对照变异** C-1（`_is_wrap_tail` 恒假）：红落在①侧（折行尾巴必须保留）的既有断言 63 / 126 / 参数化六档 /
+端到端四面上，不落本批任何新判据——按第六批立的纪律不计入本批牙齿证据，同时说明这三条成对判据只管②侧，
+没有越位去抢①侧的归属。还原后 `doc2md/pipeline/s3_structure.py`（`1f04782d…`）md5 与改前逐字节一致：
+零产品改动，`PIPELINE_VERSION` 保持 2.22.0，gate 仍 **735**、全量仍 **1575**、覆盖率仍
+**7,942 stmts / 678 miss**。剩余 **72** 条。
+
 ## 红线层优先复核（gate 且无同主语正断言）
 
 | 文件::测试 | 行 | 形态 | 被否定表达式 | 控制流内 |
@@ -158,9 +178,9 @@ search_blocks 3，实测取来而非推断）——把建表脚本写坏成缺�
 | `tests/test_ch503_docs_panel.py::test_doclist_is_served_by_the_docs_route` | 73 | not-in | `'QSTATE.tasks' not in src.split('async function loadDocs')[1]` |  |
 | `tests/test_ch503_docs_panel.py::test_bare_doc_field_interpolation_is_caught_by_the_scan` | 116 | not-search | `not _BARE_DOC.search(good)` |  |
 | `tests/test_ch503_docs_panel.py::test_docs_empty_state_names_only_the_library_writing_faces` | 245 | not-in | `'save_ir' not in body` |  |
-| `tests/test_ch503_furniture_wrap.py::test_real_furniture_after_hard_end_is_still_stripped` | 78 | not-in | `'机密文件请勿外传。' not in kept` |  |
-| `tests/test_ch503_furniture_wrap.py::test_first_line_of_document_has_no_wrap_anchor` | 89 | not-in | `'准流程。' not in _texts(stripped)` |  |
-| `tests/test_ch503_furniture_wrap.py::test_running_header_without_terminal_punctuation_is_stripped` | 132 | not-in | `'综合长文档测试 内部测试样本' not in kept` |  |
+| `tests/test_ch503_furniture_wrap.py::test_real_furniture_after_hard_end_is_still_stripped` | 83 | not-in | `'机密文件请勿外传。' not in kept`（**CH-520 已补输入全集同主语计数面：该串在输入必须计 2，判据 `(2, 0)`**） |  |
+| `tests/test_ch503_furniture_wrap.py::test_first_line_of_document_has_no_wrap_anchor` | 101 | not-in | `'准流程。' not in _texts(stripped)`（**CH-520 已补输入计数 `(2, 0)`，并另加同夹具正文存活面 `(2, 2)`（新行 109）挡「整带清空黑洞」形态**） |  |
+| `tests/test_ch503_furniture_wrap.py::test_running_header_without_terminal_punctuation_is_stripped` | 158 | not-in | `'综合长文档测试 内部测试样本' not in kept`（**CH-520 已补输入全集同主语计数面：重复计数的前提必须真到 2，判据 `(2, 0)`**） |  |
 | `tests/test_ch504_qa_caliber.py::test_md040_stays_visible_after_reclass` | 71 | not-in | `'MD040' not in mdscore.CONTRACT_RULES`（**CH-516 已补同主语命中面：派生集合的成员数必须 == 契约档数，判据 `(0, 8)`**） |  |
 | `tests/test_ch504_qa_caliber.py::test_fence_no_lang_rule_still_fires_and_cites_dialect` | 91 | not-in | `'契约' not in ev`（**CH-516 已补同主语理由面：`MD040_DIALECT_REASON` 在同一证据串必须计 1，判据 `(0, 1)`**） |  |
 | `tests/test_ch504_qa_caliber.py::test_duplicate_anchor_evidence_reports_multiplicity_not_a_retracted_cause` | 120 | not-in | `'TOC 缓存结果被当正文标题' not in ev`（**CH-516 已补同主语的「不断言成因」限定面：必须计 1，判据 `(0, 1)`**） |  |
@@ -241,9 +261,9 @@ search_blocks 3，实测取来而非推断）——把建表脚本写坏成缺�
 | 48 | G | `tests/test_ch503_docs_panel.py::test_doclist_is_served_by_the_docs_route` | 73 | not-in | `'QSTATE.tasks' not in src.split('async function loadDocs')[1]` |  |  |
 | 49 | G | `tests/test_ch503_docs_panel.py::test_bare_doc_field_interpolation_is_caught_by_the_scan` | 116 | not-search | `not _BARE_DOC.search(good)` |  |  |
 | 50 | G | `tests/test_ch503_docs_panel.py::test_docs_empty_state_names_only_the_library_writing_faces` | 245 | not-in | `'save_ir' not in body` |  |  |
-| 51 | G | `tests/test_ch503_furniture_wrap.py::test_real_furniture_after_hard_end_is_still_stripped` | 78 | not-in | `'机密文件请勿外传。' not in kept` |  |  |
-| 52 | G | `tests/test_ch503_furniture_wrap.py::test_first_line_of_document_has_no_wrap_anchor` | 89 | not-in | `'准流程。' not in _texts(stripped)` |  |  |
-| 53 | G | `tests/test_ch503_furniture_wrap.py::test_running_header_without_terminal_punctuation_is_stripped` | 132 | not-in | `'综合长文档测试 内部测试样本' not in kept` |  |  |
+| 51 | G | `tests/test_ch503_furniture_wrap.py::test_real_furniture_after_hard_end_is_still_stripped` | 83 | not-in | `'机密文件请勿外传。' not in kept` → 输入全集/幸存者同主语计数 `(2, 0)` | CH-520 ✓（输入全集该串 2 处） |  |
+| 52 | G | `tests/test_ch503_furniture_wrap.py::test_first_line_of_document_has_no_wrap_anchor` | 101 | not-in | `'准流程。' not in _texts(stripped)` → 输入全集/幸存者同主语计数 `(2, 0)` + 同夹具正文存活 `(2, 2)`（新行 109） | CH-520 ✓（输入 2 处 + 两条正文行存活） |  |
+| 53 | G | `tests/test_ch503_furniture_wrap.py::test_running_header_without_terminal_punctuation_is_stripped` | 158 | not-in | `'综合长文档测试 内部测试样本' not in kept` → 输入全集/幸存者同主语计数 `(2, 0)` | CH-520 ✓（输入全集该串 2 处 = 重复计数前提） |  |
 | 54 | G | `tests/test_ch504_qa_caliber.py::test_md040_stays_visible_after_reclass` | 71 | not-in | `'MD040' not in mdscore.CONTRACT_RULES` |  | CH-516 ✓ |
 | 55 | G | `tests/test_ch504_qa_caliber.py::test_fence_no_lang_rule_still_fires_and_cites_dialect` | 91 | not-in | `'契约' not in ev` |  | CH-516 ✓ |
 | 56 | G | `tests/test_ch504_qa_caliber.py::test_duplicate_anchor_evidence_reports_multiplicity_not_a_retracted_cause` | 120 | not-in | `'TOC 缓存结果被当正文标题' not in ev` |  | CH-516 ✓ |

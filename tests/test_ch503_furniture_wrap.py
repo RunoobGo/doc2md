@@ -74,8 +74,16 @@ def test_real_furniture_after_hard_end_is_still_stripped():
         [_body("本章说明适用范围。"), _banded("机密文件请勿外传。")],
     )
     stripped = _strip_page_furniture(pages, 12.0)
-    kept = _texts(stripped)
-    assert "机密文件请勿外传。" not in kept, "真页脚未被剔除（红线判据被改成不存在）"
+    src, kept = _texts(pages), _texts(stripped)
+    subject = "机密文件请勿外传。"
+    # CH-520 成对判据（B-53 #51）：`kept` 只装幸存者，被剔掉的那一行按构造不会出现在
+    # 它里面——只看剔除后的结果，「真剔除了」和「夹具里压根没这行」长得一样。
+    # 同主语正例面取它在输入全集里的出现数。
+    in_src, in_kept = src.count(subject), kept.count(subject)
+    assert (in_src, in_kept) == (2, 0), (
+        f"剔除通路无感：{subject} 在输入全集出现 {in_src} 处、剔除后剩 {in_kept} 处"
+        f"（应为 2 / 0；输入低于 2 说明这行没进边距带夹具，那条「不得出现」是在空壳上"
+        f"恒真；剩 2 说明家具剔除本身已被改成不剔除）")
     assert kept.count("本章说明适用范围。") == 1
 
 
@@ -86,7 +94,21 @@ def test_first_line_of_document_has_no_wrap_anchor():
         [_banded("准流程。"), _body("正文继续。")],
     )
     stripped = _strip_page_furniture(pages, 12.0)
-    assert "准流程。" not in _texts(stripped), "无锚点时应当照常剔除（本轮不放宽这一侧）"
+    src, kept = _texts(pages), _texts(stripped)
+    subject = "准流程。"
+    # CH-520 成对判据（B-53 #52）：否定面只看得到幸存者，先钉住这一行确实重复了 2 次。
+    in_src, in_kept = src.count(subject), kept.count(subject)
+    assert (in_src, in_kept) == (2, 0), (
+        f"无锚点剔除无感：{subject} 在输入全集出现 {in_src} 处、剔除后剩 {in_kept} 处"
+        f"（应为 2 / 0；输入低于 2 说明首行没落进边距带，那条「不得出现」是在空壳上恒真）")
+    # 这条原来只有否定面，再补同夹具的正文存活面：把「首行」和「正文」一起删的实现
+    # 照样能满足 (2, 0)，只有正文计数能挡住它。
+    faces = ("正文开始。", "正文继续。")
+    body_in = sum(src.count(t) for t in faces)
+    body_kept = sum(kept.count(t) for t in faces)
+    assert (body_in, body_kept) == (2, 2), (
+        f"边距带剔除越界吃正文：{faces} 在输入全集出现 {body_in} 处、剔除后剩 "
+        f"{body_kept} 处（应为 2 / 2）")
 
 
 def test_wrap_anchor_is_page_order_continuous():
@@ -128,8 +150,15 @@ def test_running_header_without_terminal_punctuation_is_stripped():
         [_banded("综合长文档测试 内部测试样本"), _body("这一行写完了。")],
     )
     stripped = _strip_page_furniture(pages, 12.0)
-    kept = _texts(stripped)
-    assert "综合长文档测试 内部测试样本" not in kept
+    src, kept = _texts(pages), _texts(stripped)
+    subject = "综合长文档测试 内部测试样本"
+    # CH-520 成对判据（B-53 #53）：同一条页眉串在幸存者面看不见自己——正例面取它在
+    # 输入全集里的出现数，顺带钉住「重复计数真的到了 2」这个家具信号的前提。
+    in_src, in_kept = src.count(subject), kept.count(subject)
+    assert (in_src, in_kept) == (2, 0), (
+        f"页眉剔除无感：{subject} 在输入全集出现 {in_src} 处、剔除后剩 {in_kept} 处"
+        f"（应为 2 / 0；输入低于 2 说明重复计数根本到不了 2，那条「不得出现」是在空壳上"
+        f"恒真；剩 2 说明豁免面被放宽到了页眉）")
     assert kept.count("这一段继续上一页的句子，直到这里才结束。") == 1
 
 
