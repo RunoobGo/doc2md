@@ -92,7 +92,16 @@ def test_idempotent_replay_skips_save_ir_no_conflict(api_client, small_pdf):
     assert r1.status_code == 202, r1.get_data(as_text=True)[:300]
     j1 = r1.get_json()["jobs"][0]
     assert j1["idempotency_hit"] is False
-    assert "status" not in j1                    # 新鲜落库路径不带 status 键
+    # 新鲜落库路径不带 status 键；命中基准取同一响应容器上契约承诺的公开键数——
+    # 响应面一旦被抹平成空壳，这条字面否定对任何实现都真。
+    _fresh_must = frozenset({"file", "job_id", "doc_id", "attached",
+                             "idempotency_hit", "sharded", "shard_count"})
+    _fresh_miss = sorted(_fresh_must - set(j1))
+    _status_hits = list(j1).count("status")
+    assert (_status_hits, _fresh_miss) == (0, []), (
+        f"新鲜落库响应面自证失败：status 命中 {_status_hits} 次（应为 0），"
+        f"同容器契约键缺失 {_fresh_miss}（应为空；键缺一即说明响应面被抹平，"
+        f"status 那个 0 就只是空壳）")
     doc, job_id = j1["doc_id"], j1["job_id"]
 
     # 编辑一个块——此后任何 save_ir 重跑都会撞 E4091（edited_blocks_present）
@@ -172,7 +181,16 @@ def test_scrub_record_fingerprints_long_bytes():
     out = scrub_record(long_bytes)
     assert isinstance(out, str)
     assert out.startswith("<sha256:") and out.endswith(">")
-    assert "正文" not in out                                # 内容不泄露
+    # 长 bytes 走指纹档后内容不得泄露；命中基准两半：输入全集里该串必须存在（30 处），
+    # 同主语短 bytes 必须解码后原样保留（1 处）——「一律指纹化」的黑洞式实现会让后者掉到 0。
+    _src_text = long_bytes.decode("utf-8")
+    _short_same = scrub_record("正文".encode("utf-8"))
+    _leak = (out.count("正文"), _src_text.count("正文"), _short_same.count("正文"))
+    assert _leak == (0, 30, 1), (
+        f"长 bytes 脱敏判据无感：输出命中正文 {_leak[0]} 处（应为 0），"
+        f"输入全集命中 {_leak[1]} 处（应为 30，为 0 说明夹具主语没造出来），"
+        f"同主语短 bytes 保留 {_leak[2]} 处（应为 1，为 0 说明解码通路整体失效，"
+        f"前一个 0 只是空壳）")
     assert out.isascii()
     assert scrub_record(long_bytes) == out                  # 同内容同指纹（保可关联性）
     assert scrub_record(bytearray(long_bytes)) == out       # bytearray 同口径

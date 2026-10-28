@@ -56,6 +56,7 @@
 | CH-521（第十一批） | `tests/test_ch503_docs_panel.py` | 3（全为 gate：#48/#49/#50） | **69** |
 | CH-522（第十二批） | `tests/test_ch496_local.py` | 3（全为 gate：#34/#35/#36） | **66** |
 | CH-523（第十三批） | `tests/test_ch505_contract_sync.py` | 3（全为 gate：#62/#63/#64） | **63** |
+| CH-524（第十四批） | `tests/test_ch475_fixes.py` | 2（全为 gate：#6/#8） | **61** |
 
 首批实测出一条**判据本身失真**的形态：#89 原口径 `json.dumps(body)` 用默认
 `ensure_ascii=True`，中文查询被写成 `\uXXXX`，`'例外' not in ...` 对任何中文查询
@@ -175,6 +176,21 @@ M-e（cmd_serve 注入 `app.run(host=`）落新行 286 的 `(3, 1)`；M-f（oncl
 还原后 `docs/dev-plan.md`（`b7590164…`）与测试文件（`b02cdf03…`）md5 与改前逐字节一致：零产品改动，
 `PIPELINE_VERSION` 保持 2.22.0，gate 仍 **735**、全量仍 **1575**、覆盖率仍 **7,942 stmts / 678 miss**。剩余 **63** 条。
 
+第十四批（CH-524）两条都在**响应/日志交付面**，各自补出一点：#6 是新鲜落库响应不得带 `status`，命中基准取
+**同一响应容器上契约承诺的公开键数**（实测 7 个：`file`/`job_id`/`doc_id`/`attached`/`idempotency_hit`/`sharded`/
+`shard_count`），判据 `(status 计数, 缺失契约键) == (0, [])`——响应面被抹平成空壳时，这条字面否定对任何实现都真；
+#8 是长 bytes 脱敏后不得含正文，命中基准取**输入全集计数 + 同主语短 bytes 存活**两半：输入 `"正文"` 计 30、
+输出必须 0、`scrub_record("正文".encode())` 必须原样保留 1（判据 `(0, 30, 1)`）。本批实测出**外壳断言会先吃掉
+泄漏型变异**：把 bytes 的解码后长度门短路（真实泄漏形态）时，红落在更早的指纹封套断言
+`out.startswith("<sha256:")` 上，而不是新判据——按第六批纪律记判据归属、不计入本批牙齿证据；能真正落到新行
+189 的只有黑洞式（一律指纹化 → 同主语短 bytes 掉到 0）与夹具抽空（输入主语整体消失 → 输入计数 0）两种形态。
+变异：M-1a（新鲜响应加回 `"status": "queued"`）落新行 101 的 `(1, [])`；M-1b（新鲜响应摘掉 `sharded`）落新行 101
+的 `(0, ['sharded'])`；M-2b（`len(rec) > 0` 一律指纹化）落新行 189 的 `(0, 30, 0)`；M-2c（夹具把 `正文` 从源串里
+摘掉）落新行 189 的 `(0, 0, 1)`——旧写法 `'正文' not in out` 对这种形态恒真；M-2a（解码后跳过长度门）作对照落到
+旧行 183 的封套断言；另设对照 C-1（新鲜响应前加无害注释，保持全绿）。还原后 `doc2md/api.py`（`1657445f…`）与
+`doc2md/ops/logging.py`（`cf81f9ec…`）md5 与改前逐字节一致：零产品改动，`PIPELINE_VERSION` 保持 2.22.0，
+gate 仍 **735**、全量仍 **1575**、覆盖率仍 **7,942 stmts / 678 miss**。剩余 **61** 条。
+
 ## 红线层优先复核（gate 且无同主语正断言）
 
 | 文件::测试 | 行 | 形态 | 被否定表达式 | 控制流内 |
@@ -183,8 +199,8 @@ M-e（cmd_serve 注入 `app.run(host=`）落新行 286 的 `(3, 1)`；M-f（oncl
 | `tests/test_ch473_fixes.py::test_test5_v22_legacy_rebuilds_fts_and_backfills_columns` | 1223 | not-in | `'revision' not in {r[1] for r in con.execute('PRAGMA table_info(blocks)')}`（**CH-519 已补同容器必存列面：blocks 5 / tokens 4 / search_blocks 3 必须计满，三面合并判据 `([0, 0, 0], [5, 4, 3])`**） |  |
 | `tests/test_ch473_fixes.py::test_test5_v22_legacy_rebuilds_fts_and_backfills_columns` | 1223 | not-in | `'role' not in {r[1] for r in con.execute('PRAGMA table_info(tokens)')}`（**CH-519 已并入同一条三面计数判据**） |  |
 | `tests/test_ch473_fixes.py::test_test5_v22_legacy_rebuilds_fts_and_backfills_columns` | 1223 | not-in | `'aux' not in {r[1] for r in con.execute('PRAGMA table_info(search_blocks)')}`（**CH-519 已并入同一条三面计数判据**） |  |
-| `tests/test_ch475_fixes.py::test_idempotent_replay_skips_save_ir_no_conflict` | 95 | not-in | `'status' not in j1` |  |
-| `tests/test_ch475_fixes.py::test_scrub_record_fingerprints_long_bytes` | 175 | not-in | `'正文' not in out` |  |
+| `tests/test_ch475_fixes.py::test_idempotent_replay_skips_save_ir_no_conflict` | 101 | not-in | `'status' not in j1`（**CH-524 已补同容器契约键面：新鲜响应 7 个契约键必须齐、`status` 计 0，判据 `(0, [])`**） |  |
+| `tests/test_ch475_fixes.py::test_scrub_record_fingerprints_long_bytes` | 189 | not-in | `'正文' not in out`（**CH-524 已补输入全集 + 同主语短 bytes 两半：判据 `(0, 30, 1)`**） |  |
 | `tests/test_ch476_fixes.py::test_sync_jobs_reject_when_task_row_gone_before_commit` | 238 | not-in | `done_hits = codes.count("job_done")`（**CH-513 已补同主语正断言**：同表补一条正常作业，判据 `(0, 1)`） |  |
 | `tests/test_ch476_fixes.py::test_no_drift_when_content_matches_even_if_source_vanishes` | 651 | not-in | `clean_hits = list(detail).count("content_drift")`（**CH-513 已补同主语正断言**：同函数补一条真漂移作业，判据 `(0, 1)`） |  |
 | `tests/test_ch476_fixes.py::test_gap1_inserted_runs_are_extracted_and_deletions_are_not` | 1231 | not-in | `body_hits = texts.count("被删除的旧文本")`（**CH-513 已补同主语正断言**：夹具 `document.xml` 的 `w:delText` 计 1，判据 `(0, 1)`） |  |
@@ -260,9 +276,9 @@ M-e（cmd_serve 注入 `app.run(host=`）落新行 286 的 `(3, 1)`；M-f（oncl
 | 3 | G | `tests/test_ch473_fixes.py::test_test5_v22_legacy_rebuilds_fts_and_backfills_columns` | 1223 | not-in | `'revision' not in {r[1] for r in con.execute('PRAGMA table_info(blocks)')}` → 三面合并 `(leak, base) == ([0,0,0], [5,4,3])` | CH-519 ✓（同容器必存列 5/4/3） |  |
 | 4 | G | `tests/test_ch473_fixes.py::test_test5_v22_legacy_rebuilds_fts_and_backfills_columns` | 1223 | not-in | `'role' not in ...`（并入第 3 行的三面计数判据） | CH-519 ✓ |  |
 | 5 | G | `tests/test_ch473_fixes.py::test_test5_v22_legacy_rebuilds_fts_and_backfills_columns` | 1223 | not-in | `'aux' not in ...`（并入第 3 行的三面计数判据） | CH-519 ✓ |  |
-| 6 | G | `tests/test_ch475_fixes.py::test_idempotent_replay_skips_save_ir_no_conflict` | 95 | not-in | `'status' not in j1` |  |  |
+| 6 | G | `tests/test_ch475_fixes.py::test_idempotent_replay_skips_save_ir_no_conflict` | 101 | not-in | `'status' not in j1`（**CH-524 已补同容器契约键面：7 个契约键必齐、`status` 计 0，判据 `(0, [])`**） |  |  |
 | 7 | G | `tests/test_ch475_fixes.py::test_patch_audit_actor_is_token_hash_not_plaintext` | 144 | not-in | `editor_tok not in actor` | 143 |  |
-| 8 | G | `tests/test_ch475_fixes.py::test_scrub_record_fingerprints_long_bytes` | 175 | not-in | `'正文' not in out` |  |  |
+| 8 | G | `tests/test_ch475_fixes.py::test_scrub_record_fingerprints_long_bytes` | 189 | not-in | `'正文' not in out`（**CH-524 已补输入全集 + 同主语短 bytes 两半；判据 `(0, 30, 1)`**） |  |  |
 | 9 | G | `tests/test_ch476_fixes.py::test_sync_jobs_reject_when_task_row_gone_before_commit` | 238 | not-in | `done_hits = codes.count("job_done")` → `assert (done_hits, ok_done_hits) == (0, 1)` |  | CH-513 ✓ |
 | 10 | G | `tests/test_ch476_fixes.py::test_no_drift_when_content_matches_even_if_source_vanishes` | 651 | not-in | `clean_hits = list(detail).count("content_drift")` → `assert (clean_hits, drift_hits) == (0, 1)` |  | CH-513 ✓ |
 | 11 | G | `tests/test_ch476_fixes.py::test_gap1_inserted_runs_are_extracted_and_deletions_are_not` | 1231 | not-in | `body_hits = texts.count("被删除的旧文本")` → `assert (body_hits, xml_hits) == (0, 1)` |  | CH-513 ✓ |
